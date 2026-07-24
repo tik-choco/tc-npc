@@ -78,6 +78,12 @@ pub mod topic {
     pub const SENSE: &str = "agent:sense";
     pub const INTERRUPT: &str = "agent:interrupt";
     pub const ACTION: &str = "agent:action";
+    /// Internal-only (no Go equivalent): carries [`super::msg::CONFIG_UPDATED`]
+    /// after `PUT /api/config` persists a new config, so modules that can
+    /// hot-reload (scheduler, action map data) pick it up without a restart.
+    /// Payload is the complete new `Config` serialized to JSON, unredacted —
+    /// this topic must never be forwarded to WS clients.
+    pub const CONFIG: &str = "npc:config";
 }
 
 /// Canonical envelope `type` values carried inside [`Envelope::r#type`].
@@ -92,6 +98,8 @@ pub mod msg {
     pub const TTS: &str = "tts";
     pub const SUSPEND: &str = "suspend";
     pub const RESUME: &str = "resume";
+    /// See [`super::topic::CONFIG`].
+    pub const CONFIG_UPDATED: &str = "config_updated";
 }
 
 #[cfg(test)]

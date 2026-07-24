@@ -98,9 +98,11 @@ async fn run(config_path: Option<PathBuf>) -> anyhow::Result<()> {
     if config.action.enabled {
         spawn_module(&mut handles, &ctx, "npc-action", npc_action::module(&ctx));
     }
-    if config.scheduler.enabled {
-        spawn_module(&mut handles, &ctx, "npc-scheduler", npc_scheduler::module(&ctx));
-    }
+    // Unlike the other modules, the scheduler is always spawned: it idles
+    // when `scheduler.enabled` is false and picks up schedule edits made
+    // from the web UI live (via the `npc:config` bus topic), so announcements
+    // added at runtime take effect without a restart.
+    spawn_module(&mut handles, &ctx, "npc-scheduler", npc_scheduler::module(&ctx));
     #[cfg(feature = "mist")]
     if config.mist.enabled {
         spawn_module(&mut handles, &ctx, "npc-mist", npc_mist::module(&ctx));

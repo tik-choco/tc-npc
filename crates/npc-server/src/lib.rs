@@ -29,6 +29,25 @@ struct AppState {
     /// The address actually bound (may differ from `config.server.addr` if
     /// the configured port was taken and we fell back to the next one).
     addr: String,
+    /// The latest *saved* config: starts as the startup snapshot
+    /// (`ctx.config`) and is replaced on every successful `PUT /api/config`.
+    /// `GET /api/config`, masked-secret restoration, and the LLM probe
+    /// endpoints all read this — NOT `ctx.config` — so the settings UI
+    /// round-trips what was last saved rather than what the process booted
+    /// with. (Running modules still hold the startup snapshot; only
+    /// scheduler/action map data hot-reload via the `npc:config` topic.)
+    current_config: Arc<std::sync::RwLock<Arc<npc_core::Config>>>,
+}
+
+impl AppState {
+    /// Cheap snapshot of the latest saved config.
+    fn current_config(&self) -> Arc<npc_core::Config> {
+        self.current_config.read().unwrap().clone()
+    }
+
+    fn set_current_config(&self, config: npc_core::Config) {
+        *self.current_config.write().unwrap() = Arc::new(config);
+    }
 }
 
 struct ServerModule;
@@ -58,6 +77,7 @@ async fn run_server(ctx: ModuleCtx) -> anyhow::Result<()> {
     bus_forward::spawn(ctx.clone(), hub.clone(), echo.clone());
 
     let state = AppState {
+        current_config: Arc::new(std::sync::RwLock::new(ctx.config.clone())),
         ctx: ctx.clone(),
         hub,
         echo,
@@ -85,6 +105,8 @@ async fn run_server(ctx: ModuleCtx) -> anyhow::Result<()> {
             "/api/characters/:id/activate",
             post(rest::api_activate_character),
         )
+        .route("/api/llm/models", post(rest::api_llm_models))
+        .route("/api/llm/voices", post(rest::api_llm_voices))
         .fallback(assets::static_handler)
         .with_state(state);
 

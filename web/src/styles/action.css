@@ -1,10 +1,10 @@
-/* 行動 view — position readout + command composer + action log. */
+/* 行動 view — interactive location/route map + command composer + action log. */
 
 .action-view {
   display: flex;
   flex-direction: column;
-  gap: var(--space-5);
-  max-width: 720px;
+  gap: var(--space-4);
+  max-width: 1040px;
   margin: 0 auto;
   padding: var(--space-5);
 }
@@ -19,8 +19,243 @@
   margin-bottom: var(--space-3);
 }
 
-.action-position-card,
-.action-command-card {
+.action-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: calc(var(--space-3) * -1);
+}
+
+.action-toolbar .action-section-title {
+  margin-bottom: 0;
+}
+
+.action-toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.action-save-chip--saving {
+  color: var(--primary);
+  background: var(--primary-soft);
+  border-color: transparent;
+}
+
+.action-save-chip--saved {
+  color: var(--success);
+  background: var(--success-soft);
+  border-color: transparent;
+}
+
+.action-save-chip--error {
+  color: var(--danger-text);
+  background: var(--danger-soft);
+  border-color: transparent;
+}
+
+.action-hint {
+  margin: 0;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  color: var(--text-subtle);
+}
+
+/* --- Map card ------------------------------------------------------------ */
+
+.action-map-card {
+  position: relative;
+  padding: var(--space-3);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-l);
+  box-shadow: var(--shadow-1);
+}
+
+.action-position-empty {
+  margin-top: var(--space-2);
+  font-size: 0.78rem;
+  color: var(--text-subtle);
+}
+
+.map-canvas-wrap {
+  position: relative;
+  width: 100%;
+  height: 480px;
+  overflow: hidden;
+  background: var(--bg-accent);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-m);
+}
+
+.map-canvas-svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+  cursor: grab;
+}
+
+.map-canvas-svg:active {
+  cursor: grabbing;
+}
+
+.map-canvas-svg.is-add-mode {
+  cursor: crosshair;
+}
+
+.map-grid .grid-minor {
+  stroke: var(--border);
+  stroke-width: 0.02;
+}
+
+.map-grid .grid-major {
+  stroke: var(--border-strong);
+  stroke-width: 0.035;
+}
+
+.map-grid .grid-axis {
+  stroke: var(--text-subtle);
+  stroke-width: 0.05;
+  opacity: 0.6;
+}
+
+.map-trail {
+  stroke: var(--success);
+  stroke-opacity: 0.4;
+  stroke-width: 0.14;
+}
+
+.map-location {
+  cursor: grab;
+}
+
+.map-location.is-dragging {
+  cursor: grabbing;
+}
+
+.map-location-hit {
+  fill: transparent;
+  stroke: none;
+}
+
+.map-location-dot {
+  fill: var(--primary);
+  stroke: var(--surface);
+  stroke-width: 0.12;
+}
+
+.map-location.is-dragging .map-location-dot {
+  fill: var(--primary-hover);
+}
+
+.map-location-label {
+  font-size: 0.9px;
+  font-weight: 600;
+  fill: var(--text);
+  text-anchor: middle;
+  paint-order: stroke;
+  stroke: var(--surface);
+  stroke-width: 0.18;
+  user-select: none;
+}
+
+.map-position-ring {
+  fill: none;
+  stroke: var(--success);
+  stroke-width: 0.1;
+  opacity: 0.5;
+}
+
+.map-position-arrow {
+  fill: var(--success);
+}
+
+.map-position-dot {
+  fill: var(--success);
+  stroke: var(--surface);
+  stroke-width: 0.12;
+}
+
+.map-toolbar {
+  position: absolute;
+  top: var(--space-3);
+  right: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-1);
+  background: var(--elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-m);
+  box-shadow: var(--shadow-2);
+}
+
+.map-toolbar .icon-btn.is-active {
+  color: var(--on-primary);
+  background: var(--primary);
+  border-color: var(--primary);
+}
+
+.map-readout {
+  position: absolute;
+  left: var(--space-3);
+  bottom: var(--space-3);
+  padding: var(--space-1) var(--space-3);
+  font-size: 0.74rem;
+  font-family: var(--mono);
+  color: var(--text-muted);
+  background: var(--elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  pointer-events: none;
+}
+
+.map-hint {
+  position: absolute;
+  top: var(--space-3);
+  left: var(--space-3);
+  padding: var(--space-1) var(--space-3);
+  font-size: 0.74rem;
+  font-weight: 600;
+  color: var(--primary);
+  background: var(--primary-soft);
+  border: 1px solid var(--primary-border);
+  border-radius: var(--radius-pill);
+  pointer-events: none;
+}
+
+.map-add-popover {
+  position: absolute;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  transform: translate(-50%, -140%);
+  background: var(--elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-m);
+  box-shadow: var(--shadow-2);
+}
+
+.map-add-popover input {
+  width: 120px;
+  padding: var(--space-1) var(--space-2);
+  font-size: 0.8rem;
+}
+
+/* --- Location / route panels --------------------------------------------- */
+
+.action-panels {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-4);
+  align-items: start;
+}
+
+.action-panel {
   padding: var(--space-4) var(--space-5);
   background: var(--surface);
   border: 1px solid var(--border);
@@ -28,38 +263,175 @@
   box-shadow: var(--shadow-1);
 }
 
-.action-position-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: var(--space-3);
-}
-
-.action-position-grid > div {
+.action-loc-list {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  padding: var(--space-3);
-  text-align: center;
+  gap: var(--space-2);
+}
+
+.action-loc-row {
+  display: grid;
+  grid-template-columns: minmax(70px, 1.3fr) 64px 64px 56px auto auto;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2);
   background: var(--surface-2);
   border-radius: var(--radius-m);
 }
 
-.action-position-label {
-  font-size: 0.72rem;
+.action-loc-row input {
+  padding: var(--space-2);
+  font-size: 0.8rem;
+}
+
+.action-route-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-bottom: var(--space-4);
+}
+
+.action-route-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1);
+  border-radius: var(--radius-m);
+}
+
+.action-route-item.is-selected {
+  background: var(--primary-soft);
+}
+
+.action-route-select {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 1;
+  padding: var(--space-2) var(--space-3);
+  font: inherit;
+  font-size: 0.85rem;
   font-weight: 600;
-  color: var(--text-subtle);
+  color: var(--text);
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-m);
+  cursor: pointer;
 }
 
-.action-position-value {
-  font-size: 1.1rem;
+.action-route-color {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+
+.action-route-loop-chip {
+  padding: 1px var(--space-2);
+  font-size: 0.66rem;
+}
+
+.action-route-detail {
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+}
+
+.action-route-detail-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
+.action-route-name-input {
+  flex: 1;
   font-weight: 700;
-  color: var(--primary);
-  font-variant-numeric: tabular-nums;
 }
 
-.action-position-empty {
-  font-size: 0.84rem;
+.action-route-loop-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.action-route-actions {
+  display: flex;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+.action-waypoint-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.action-waypoint-empty {
+  padding: var(--space-3);
+  font-size: 0.8rem;
   color: var(--text-subtle);
+}
+
+.action-waypoint-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  background: var(--surface-2);
+  border-radius: var(--radius-m);
+}
+
+.action-waypoint-index {
+  flex-shrink: 0;
+  width: 18px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--text-subtle);
+  text-align: center;
+}
+
+.action-waypoint-select {
+  flex: 1;
+  min-width: 0;
+  padding: var(--space-2);
+  font-size: 0.8rem;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-s);
+}
+
+.action-waypoint-seconds {
+  width: 60px;
+  padding: var(--space-2);
+  font-size: 0.8rem;
+}
+
+.action-waypoint-wait {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  font-size: 0.74rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+/* --- Command card & log (unchanged layout) -------------------------------- */
+
+.action-command-card {
+  padding: var(--space-4) var(--space-5);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-l);
+  box-shadow: var(--shadow-1);
 }
 
 .action-command-row {
@@ -81,7 +453,7 @@
   flex-direction: column;
   gap: var(--space-2);
   padding: var(--space-3);
-  max-height: 360px;
+  max-height: 320px;
   overflow-y: auto;
   background: var(--surface);
   border: 1px solid var(--border);
@@ -109,4 +481,20 @@
 
 .action-log-item span {
   word-break: break-word;
+}
+
+@media (max-width: 860px) {
+  .action-panels {
+    grid-template-columns: 1fr;
+  }
+
+  .map-canvas-wrap {
+    height: 380px;
+  }
+}
+
+@media (max-width: 560px) {
+  .action-loc-row {
+    grid-template-columns: 1fr 1fr;
+  }
 }

@@ -7,6 +7,7 @@ description = "HTTP/WebSocket server and embedded web UI host for tc-npc"
 
 [dependencies]
 npc-core = { workspace = true }
+npc-llm = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 serde = { workspace = true }

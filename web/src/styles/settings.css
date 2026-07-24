@@ -1,16 +1,18 @@
-/* 設定 view — JSON config editor. */
+/* 設定 view — tabbed structured forms (AI接続/音声/モジュール・連携) plus a
+   raw-JSON fallback tab. Card pattern matches the rest of the app:
+   background: var(--surface); border: 1px solid var(--border);
+   border-radius: var(--radius-l); box-shadow: var(--shadow-1). */
 
 .settings-view {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
-  max-width: 860px;
+  gap: var(--space-4);
+  max-width: 720px;
   margin: 0 auto;
   padding: var(--space-5);
-  height: 100%;
 }
 
-.settings-toolbar {
+.settings-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -23,16 +25,176 @@
   color: var(--text);
 }
 
-.settings-toolbar-actions {
+.settings-save-chip {
+  font-size: 0.72rem;
+}
+
+/* --- Tabs ----------------------------------------------------------------- */
+
+.settings-tabs {
   display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  overflow-x: auto;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: var(--space-1);
+}
+
+.settings-tab {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: none;
+  background: transparent;
+  border-radius: var(--radius-s);
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+
+.settings-tab:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.settings-tab-active {
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+
+/* --- Sections & cards ------------------------------------------------------ */
+
+.settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.settings-section-head {
+  display: flex;
+  align-items: center;
   gap: var(--space-2);
 }
 
-.settings-hint {
+.settings-section-head h3 {
+  font-size: 0.88rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.settings-restart-badge {
+  cursor: help;
+}
+
+.settings-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-5);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-l);
+  box-shadow: var(--shadow-1);
+}
+
+.settings-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.settings-card h4 {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+/* --- Toggle ----------------------------------------------------------------- */
+
+.settings-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 0.84rem;
+  color: var(--text);
+  cursor: pointer;
+  width: fit-content;
+}
+
+.settings-toggle input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--primary);
+  cursor: pointer;
+}
+
+.settings-toggle-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-5);
+}
+
+/* --- Model / voice picker --------------------------------------------------- */
+
+.settings-picker {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.settings-picker-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.settings-picker-row select,
+.settings-picker-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.settings-picker-message {
   margin: 0;
-  font-size: 0.78rem;
+  font-size: 0.72rem;
+  color: var(--text-subtle);
+}
+
+.settings-picker-message-error {
+  color: var(--danger-text);
+}
+
+/* --- 詳細 (JSON) tab -------------------------------------------------------- */
+
+.settings-json {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.settings-toolbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.settings-json-note {
+  margin: 0;
+  font-size: 0.76rem;
   line-height: 1.6;
   color: var(--text-subtle);
+}
+
+.settings-toolbar-actions {
+  display: flex;
+  gap: var(--space-2);
+  flex-shrink: 0;
 }
 
 .settings-error {
@@ -53,7 +215,6 @@
 }
 
 .settings-editor {
-  flex: 1;
   min-height: 320px;
   padding: var(--space-4);
   font-family: var(--mono);
@@ -71,4 +232,19 @@
   outline: none;
   border-color: var(--primary);
   box-shadow: 0 0 0 3px var(--primary-soft);
+}
+
+/* --- Spinner ---------------------------------------------------------------- */
+
+.spin {
+  animation: tc-npc-settings-spin 0.9s linear infinite;
+}
+
+@keyframes tc-npc-settings-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
 }

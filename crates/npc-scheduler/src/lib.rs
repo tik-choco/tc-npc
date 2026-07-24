@@ -10,19 +10,23 @@
 //! publishes a `tts` message on `agent:interrupt` and `npc-speech` plays the
 //! chime and speaks the text.
 //!
-//! Config hot-reload is intentionally NOT implemented: the schedule is
-//! computed once from the `Config` snapshot handed to `run` at startup. A
-//! future version could watch `PUT /api/config` (or the config file) and
-//! recompute the schedule when `scheduler.announcements` changes.
+//! Config hot-reload: this module is always spawned (regardless of
+//! `scheduler.enabled` — see `src/main.rs`), and the schedule is recomputed
+//! whenever a [`npc_core::bus::msg::CONFIG_UPDATED`] message arrives on
+//! [`npc_core::bus::topic::CONFIG`] (published after `PUT /api/config`
+//! persists a new config). If `scheduler.enabled` is `false`, or there are
+//! no valid `scheduler.announcements`, the module simply has nothing to
+//! wait on but shutdown/config updates until one arrives.
 
 use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Local, NaiveDateTime, NaiveTime, TimeZone};
 use serde_json::json;
+use tokio::sync::broadcast::error::RecvError;
 
 use npc_core::config::AnnouncementConfig;
-use npc_core::{msg, topic, Module, ModuleCtx};
+use npc_core::{msg, topic, Config, Module, ModuleCtx};
 
 pub fn module(_ctx: &ModuleCtx) -> anyhow::Result<Box<dyn Module>> {
     Ok(Box::new(SchedulerModule))
@@ -37,64 +41,120 @@ impl Module for SchedulerModule {
     }
 
     async fn run(self: Box<Self>, ctx: ModuleCtx) -> anyhow::Result<()> {
-        let now = Local::now();
-        let mut entries: Vec<ScheduledAnnouncement> = ctx
-            .config
-            .scheduler
-            .announcements
-            .iter()
-            .filter_map(|ann| match parse_time(&ann.time) {
-                Some(time) => Some(ScheduledAnnouncement {
-                    config: ann.clone(),
-                    next: next_occurrence(time, now),
-                }),
-                None => {
-                    tracing::warn!(
-                        time = %ann.time,
-                        "npc-scheduler: invalid announcement time (expected HH:MM or HH:MM:SS), skipping"
-                    );
-                    None
-                }
-            })
-            .collect();
+        let mut entries = compute_schedule(&ctx.config);
+        log_schedule(&entries);
 
-        if entries.is_empty() {
-            tracing::info!("npc-scheduler: no valid announcements configured, idling until shutdown");
-            ctx.shutdown.cancelled().await;
-            return Ok(());
-        }
-
-        for entry in &entries {
-            tracing::info!(time = %entry.config.time, next = %entry.next, "npc-scheduler: scheduled announcement");
-        }
+        let mut rx = ctx.bus.subscribe();
 
         loop {
-            let wake_at = entries
-                .iter()
-                .map(|e| e.next)
-                .min()
-                .expect("entries is non-empty");
-
-            let duration = (wake_at - Local::now()).to_std().unwrap_or(Duration::ZERO);
+            // With no entries there's nothing to sleep towards — wait
+            // indefinitely for shutdown or a config update that might add
+            // some. `tokio::time::sleep` with a `far_future` duration keeps
+            // the `select!` shape uniform without a separate branch.
+            let wake_at = entries.iter().map(|e| e.next).min();
+            let duration = match wake_at {
+                Some(wake_at) => (wake_at - Local::now()).to_std().unwrap_or(Duration::ZERO),
+                None => far_future(),
+            };
 
             tokio::select! {
                 _ = ctx.shutdown.cancelled() => {
                     tracing::info!("npc-scheduler: shutting down");
                     return Ok(());
                 }
-                _ = tokio::time::sleep(duration) => {}
-            }
-
-            // Fire every entry due at (or before, to absorb scheduling
-            // jitter) `wake_at` — this is what makes multiple announcements
-            // configured for the same time fire together.
-            for entry in entries.iter_mut() {
-                if entry.next <= wake_at {
-                    fire(&ctx, &entry.config);
-                    entry.next += chrono::Duration::hours(24);
+                _ = tokio::time::sleep(duration) => {
+                    let Some(wake_at) = wake_at else { continue };
+                    // Fire every entry due at (or before, to absorb
+                    // scheduling jitter) `wake_at` — this is what makes
+                    // multiple announcements configured for the same time
+                    // fire together.
+                    for entry in entries.iter_mut() {
+                        if entry.next <= wake_at {
+                            fire(&ctx, &entry.config);
+                            entry.next += chrono::Duration::hours(24);
+                        }
+                    }
+                }
+                received = rx.recv() => {
+                    match received {
+                        Ok(bus_msg) => {
+                            if bus_msg.topic == topic::CONFIG && bus_msg.env.r#type == msg::CONFIG_UPDATED {
+                                match serde_json::from_value::<Config>(bus_msg.env.payload) {
+                                    Ok(new_config) => {
+                                        entries = compute_schedule(&new_config);
+                                        tracing::info!("npc-scheduler: config updated, schedule recomputed");
+                                        log_schedule(&entries);
+                                    }
+                                    Err(err) => {
+                                        tracing::warn!(error = %err, "npc-scheduler: failed to deserialize updated config, keeping current schedule");
+                                    }
+                                }
+                            }
+                        }
+                        Err(RecvError::Lagged(skipped)) => {
+                            tracing::warn!(skipped, "npc-scheduler: bus receiver lagged, some messages dropped");
+                        }
+                        Err(RecvError::Closed) => {
+                            tracing::info!("npc-scheduler: bus closed, shutting down");
+                            return Ok(());
+                        }
+                    }
                 }
             }
         }
+    }
+}
+
+/// A duration long enough that `tokio::time::sleep` effectively never fires
+/// on its own (a plain "no timer" branch would need a separate `select!`
+/// arm per state, which is more code than just picking a very long sleep).
+/// ~10 years; still short enough to avoid `Duration` overflow when added to
+/// `Instant::now()` internally.
+fn far_future() -> Duration {
+    Duration::from_secs(10 * 365 * 24 * 60 * 60)
+}
+
+/// Ports the announcement -> next-occurrence computation out of `run` so it
+/// can be re-run whenever a `CONFIG_UPDATED` message arrives. Returns an
+/// empty `Vec` if `scheduler.enabled` is `false` or there are no valid
+/// announcements — either way, `run`'s loop just idles on shutdown/bus
+/// events until a future config update supplies some.
+fn compute_schedule(config: &Config) -> Vec<ScheduledAnnouncement> {
+    if !config.scheduler.enabled {
+        tracing::info!("npc-scheduler: scheduler disabled, idling until config update");
+        return Vec::new();
+    }
+
+    let now = Local::now();
+    let entries: Vec<ScheduledAnnouncement> = config
+        .scheduler
+        .announcements
+        .iter()
+        .filter_map(|ann| match parse_time(&ann.time) {
+            Some(time) => Some(ScheduledAnnouncement {
+                config: ann.clone(),
+                next: next_occurrence(time, now),
+            }),
+            None => {
+                tracing::warn!(
+                    time = %ann.time,
+                    "npc-scheduler: invalid announcement time (expected HH:MM or HH:MM:SS), skipping"
+                );
+                None
+            }
+        })
+        .collect();
+
+    if entries.is_empty() {
+        tracing::info!("npc-scheduler: no valid announcements configured, idling until config update");
+    }
+
+    entries
+}
+
+fn log_schedule(entries: &[ScheduledAnnouncement]) {
+    for entry in entries {
+        tracing::info!(time = %entry.config.time, next = %entry.next, "npc-scheduler: scheduled announcement");
     }
 }
 
@@ -220,5 +280,60 @@ mod tests {
         let time = NaiveTime::from_hms_opt(9, 0, 45).unwrap();
         let next = next_occurrence(time, from);
         assert_eq!(next, local(2026, 7, 24, 9, 0, 45));
+    }
+
+    fn announcement(time: &str) -> AnnouncementConfig {
+        AnnouncementConfig {
+            time: time.to_string(),
+            text: "hello".to_string(),
+            chime_file: String::new(),
+            volume: 1.0,
+        }
+    }
+
+    #[test]
+    fn compute_schedule_disabled_yields_no_entries_even_with_announcements() {
+        let mut config = Config::default();
+        config.scheduler.enabled = false;
+        config.scheduler.announcements = vec![announcement("09:00")];
+        assert!(compute_schedule(&config).is_empty());
+    }
+
+    #[test]
+    fn compute_schedule_enabled_skips_invalid_and_keeps_valid_entries() {
+        let mut config = Config::default();
+        config.scheduler.enabled = true;
+        config.scheduler.announcements = vec![announcement("09:00"), announcement("not-a-time")];
+        let entries = compute_schedule(&config);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].config.time, "09:00");
+    }
+
+    #[test]
+    fn compute_schedule_enabled_with_no_announcements_is_empty() {
+        let mut config = Config::default();
+        config.scheduler.enabled = true;
+        assert!(compute_schedule(&config).is_empty());
+    }
+
+    /// Simulates the `CONFIG_UPDATED` reload path in `run`: a schedule
+    /// computed from one config is fully replaced (not merged) by
+    /// recomputing from a second, matching the "next lookup sees new data"
+    /// contract this hot-reload was built for.
+    #[test]
+    fn compute_schedule_recomputes_fully_on_new_config() {
+        let mut first = Config::default();
+        first.scheduler.enabled = true;
+        first.scheduler.announcements = vec![announcement("09:00")];
+        let entries = compute_schedule(&first);
+        assert_eq!(entries.len(), 1);
+
+        let mut second = Config::default();
+        second.scheduler.enabled = true;
+        second.scheduler.announcements = vec![announcement("10:00"), announcement("11:00")];
+        let entries = compute_schedule(&second);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].config.time, "10:00");
+        assert_eq!(entries[1].config.time, "11:00");
     }
 }

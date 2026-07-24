@@ -12,6 +12,13 @@
 //! the command dispatcher. Every log line and position update is published
 //! on `npc:ui` (`action_log` / `position`) for `npc-server` to forward to
 //! the web UI over WebSocket.
+//!
+//! Also subscribes `npc:config` for hot-reload: a `CONFIG_UPDATED` message
+//! (published after `PUT /api/config` persists a new config) replaces the
+//! locations/routes behind `ActionState::map_data` (see `state::MapData`)
+//! so dispatcher/autopilot lookups see the new map data without a restart.
+//! `action.osc_address` and `action.enabled` are read once above at
+//! startup and are NOT part of this hot-reload.
 
 mod autopilot;
 mod controller;
@@ -23,10 +30,10 @@ mod state;
 mod types;
 
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use async_trait::async_trait;
-use npc_core::{msg, topic, Envelope, Module, ModuleCtx};
+use npc_core::{msg, topic, Config, Envelope, Module, ModuleCtx};
 use npc_llm::{ChatMessage, LlmClient};
 use serde_json::Value;
 use tokio::sync::broadcast::error::RecvError;
@@ -36,7 +43,7 @@ use autopilot::Autopilot;
 use controller::Controller;
 use navigator::Navigator;
 use osc::VrcClient;
-use state::ActionState;
+use state::{ActionState, MapData};
 
 /// Bus message `type` for a plain command dispatch (`{"text": "..."}`).
 /// Not among `npc_core::bus::msg`'s constants (which mirror only the Go
@@ -59,12 +66,17 @@ impl Module for ActionModule {
     async fn run(self: Box<Self>, ctx: ModuleCtx) -> anyhow::Result<()> {
         let config = ctx.config.clone();
 
+        // `osc_address` (and `action.enabled`, checked by `src/main.rs`
+        // before this module is even spawned) are fixed for the process
+        // lifetime — only `locations`/`routes` (via `map_data` below)
+        // hot-reload.
         let vrc = Arc::new(VrcClient::connect(&config.action.osc_address).await?);
         let controller = Controller::new(vrc.clone());
         let navigator = Arc::new(Navigator::new(vrc.clone(), ctx.bus.clone()));
         let autopilot = Autopilot::new(navigator.clone());
         let llm = LlmClient::new(config.api.base_url.clone(), config.api.api_key.clone());
-        let static_system_prompt = llm_action::build_static_system_prompt(&config);
+        let static_system_prompt = llm_action::build_static_system_prompt();
+        let map_data = Arc::new(RwLock::new(MapData::from_config(&config)));
 
         let state = Arc::new(ActionState {
             bus: ctx.bus.clone(),
@@ -74,6 +86,7 @@ impl Module for ActionModule {
             controller,
             navigator,
             autopilot,
+            map_data,
             llm,
             static_system_prompt: static_system_prompt.clone(),
             chat_history: AsyncMutex::new(vec![ChatMessage::system(static_system_prompt)]),
@@ -93,6 +106,12 @@ impl Module for ActionModule {
                 msg = rx.recv() => {
                     match msg {
                         Ok(bus_msg) => {
+                            if bus_msg.topic == topic::CONFIG {
+                                if bus_msg.env.r#type == msg::CONFIG_UPDATED {
+                                    handle_config_updated(&state, bus_msg.env.payload);
+                                }
+                                continue;
+                            }
                             if bus_msg.topic != topic::ACTION {
                                 continue;
                             }
@@ -108,6 +127,25 @@ impl Module for ActionModule {
         }
 
         Ok(())
+    }
+}
+
+/// Replaces `state.map_data` with the locations/routes from a freshly
+/// received `Config`, so the next dispatcher/autopilot lookup sees them. A
+/// route already running (see `dispatcher::execute_actions`'s background
+/// task) keeps the location snapshot it was handed when it started — only
+/// future lookups pick up the change, matching this hot-reload's contract.
+fn handle_config_updated(state: &Arc<ActionState>, payload: Value) {
+    match serde_json::from_value::<Config>(payload) {
+        Ok(new_config) => {
+            let new_map_data = MapData::from_config(&new_config);
+            let (locations, routes) = (new_map_data.locations.len(), new_map_data.routes.len());
+            *state.map_data.write().unwrap() = new_map_data;
+            tracing::info!(locations, routes, "npc-action: config updated, locations/routes reloaded");
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "npc-action: failed to deserialize updated config, keeping current locations/routes");
+        }
     }
 }
 

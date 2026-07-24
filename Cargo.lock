@@ -2558,6 +2558,7 @@ dependencies = [
  "futures-util",
  "mime_guess",
  "npc-core",
+ "npc-llm",
  "open",
  "rust-embed",
  "serde",

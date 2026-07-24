@@ -3,7 +3,7 @@
 // props to whichever tab is active. Plain hooks only — no router/state lib
 // per the app's "keep it lean" rule.
 import { useState } from "preact/hooks";
-import { Bot, MessageSquare, Users, Mic, Eye, Gamepad2, Settings as SettingsIcon, Moon, Sun } from "lucide-preact";
+import { Bot, MessageSquare, Users, Mic, Eye, Gamepad2, CalendarClock, Settings as SettingsIcon, Moon, Sun } from "lucide-preact";
 
 import { useTheme } from "./hooks/useTheme";
 import { useNpcSocket } from "./hooks/useNpcSocket";
@@ -12,9 +12,10 @@ import { CharactersView } from "./views/CharactersView";
 import { VoiceView } from "./views/VoiceView";
 import { VisionView } from "./views/VisionView";
 import { ActionView } from "./views/ActionView";
+import { ScheduleView } from "./views/ScheduleView";
 import { SettingsView } from "./views/SettingsView";
 
-type Tab = "chat" | "characters" | "voice" | "vision" | "action" | "settings";
+type Tab = "chat" | "characters" | "voice" | "vision" | "action" | "schedule" | "settings";
 
 const TABS: Array<{ id: Tab; label: string; icon: typeof MessageSquare }> = [
   { id: "chat", label: "チャット", icon: MessageSquare },
@@ -22,6 +23,7 @@ const TABS: Array<{ id: Tab; label: string; icon: typeof MessageSquare }> = [
   { id: "voice", label: "音声", icon: Mic },
   { id: "vision", label: "視覚", icon: Eye },
   { id: "action", label: "行動", icon: Gamepad2 },
+  { id: "schedule", label: "予定", icon: CalendarClock },
   { id: "settings", label: "設定", icon: SettingsIcon },
 ];
 
@@ -89,6 +91,7 @@ export function App() {
             onCommand={(text) => npc.send({ type: "command", text })}
           />
         )}
+        {tab === "schedule" && <ScheduleView />}
         {tab === "settings" && <SettingsView />}
       </main>
     </div>

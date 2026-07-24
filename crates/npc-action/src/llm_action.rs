@@ -4,7 +4,6 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use npc_core::Config;
 use npc_llm::{ChatMessage, ChatRequest, ResponseFormat};
 
 use crate::dispatcher::execute_actions;
@@ -44,10 +43,12 @@ const ACTION_DESCRIPTIONS: &[&str] = &[
     r#""route" args: ["route_name"] - 登録済みルートを実行する"#,
 ];
 
-/// Ports `buildSystemPrompt`'s static portion (the position status line is
-/// appended fresh every turn by [`dynamic_system_prompt`], porting
-/// `updateSystemPrompt`).
-pub fn build_static_system_prompt(cfg: &Config) -> String {
+/// Ports `buildSystemPrompt`'s truly static portion — instructions plus the
+/// action reference. The locations/routes listing and the position status
+/// line are appended fresh every turn by [`dynamic_system_prompt`] (porting
+/// `updateSystemPrompt`), so map data edited from the web UI at runtime is
+/// reflected in NL action chats without a restart.
+pub fn build_static_system_prompt() -> String {
     let mut s = String::new();
     s.push_str(
         "あなたはVRChat内のアバターを制御するアシスタントです。\n\
@@ -64,10 +65,19 @@ pub fn build_static_system_prompt(cfg: &Config) -> String {
         s.push_str(line);
         s.push('\n');
     }
+    s
+}
 
-    if !cfg.action.locations.is_empty() {
+/// The `登録済みロケーション` / `登録済みルート` prompt blocks, built from the
+/// hot-reloadable [`crate::state::MapData`] snapshot. Empty string when
+/// nothing is registered.
+fn map_prompt_section(state: &ActionState) -> String {
+    let map = state.map_data.read().unwrap().clone();
+    let mut s = String::new();
+
+    if !map.locations.is_empty() {
         s.push_str("\n登録済みロケーション:\n");
-        for loc in &cfg.action.locations {
+        for loc in &map.locations {
             s.push_str(&format!(
                 "- {} (x={:.1}, y={:.1}, heading={:.1}\u{b0})\n",
                 loc.name, loc.x, loc.y, loc.heading
@@ -75,9 +85,9 @@ pub fn build_static_system_prompt(cfg: &Config) -> String {
         }
     }
 
-    if !cfg.action.routes.is_empty() {
+    if !map.routes.is_empty() {
         s.push_str("\n登録済みルート:\n");
-        for r in &cfg.action.routes {
+        for r in &map.routes {
             let waypoints: Vec<&str> = r.waypoints.iter().map(|w| w.location.as_str()).collect();
             let loop_str = if r.r#loop { " [loop]" } else { "" };
             s.push_str(&format!("- {}: {}{}\n", r.name, waypoints.join(" -> "), loop_str));
@@ -89,8 +99,9 @@ pub fn build_static_system_prompt(cfg: &Config) -> String {
 
 fn dynamic_system_prompt(state: &ActionState) -> String {
     format!(
-        "{}\n\n現在のステータス:\n- {}",
+        "{}{}\n\n現在のステータス:\n- {}",
         state.static_system_prompt,
+        map_prompt_section(state),
         state.navigator.pos.get().display()
     )
 }

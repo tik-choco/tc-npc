@@ -93,6 +93,10 @@ fn handle(hub: &Hub, echo: &EchoGuard, volume_limiter: &RateLimiter, bus_msg: Bu
             });
         }
         UI_TOPIC => handle_ui(hub, volume_limiter, env.r#type.as_str(), &env.payload),
+        // `topic::CONFIG` ("npc:config") is deliberately NOT matched here: its
+        // payload is the full, unredacted Config (including api_key secrets)
+        // and must never reach a WS client. Only topics explicitly handled
+        // above are forwarded — this match is a whitelist, not a blocklist.
         _ => {}
     }
 }

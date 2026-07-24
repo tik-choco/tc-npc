@@ -84,7 +84,7 @@ fn calibration_unavailable_message() -> &'static str {
 }
 
 fn format_locations(state: &ActionState) -> String {
-    let locations = &state.config.action.locations;
+    let locations = state.locations();
     if locations.is_empty() {
         return "No locations configured".to_string();
     }
@@ -100,7 +100,7 @@ fn format_locations(state: &ActionState) -> String {
 }
 
 fn format_routes(state: &ActionState) -> String {
-    let routes = &state.config.action.routes;
+    let routes = state.routes();
     if routes.is_empty() {
         return "No routes configured".to_string();
     }
@@ -240,13 +240,7 @@ async fn run_command(state: &Arc<ActionState>, name: &str, args: &[String], canc
                 } else {
                     let target = &args[0];
                     let sec = parse_f64(args, 1, 10.0);
-                    let loc = state
-                        .config
-                        .action
-                        .locations
-                        .iter()
-                        .find(|l| l.name.to_lowercase() == target.to_lowercase())
-                        .cloned();
+                    let loc = state.find_location(target);
                     match loc {
                         Some(loc) => {
                             state
@@ -266,16 +260,10 @@ async fn run_command(state: &Arc<ActionState>, name: &str, args: &[String], canc
                     state.log("Usage: route <route_name>");
                 } else {
                     let target = &args[0];
-                    let route = state
-                        .config
-                        .action
-                        .routes
-                        .iter()
-                        .find(|r| r.name.to_lowercase() == target.to_lowercase())
-                        .cloned();
+                    let route = state.find_route(target);
                     match route {
                         Some(route) => {
-                            let locations = state.config.action.locations.clone();
+                            let locations = state.locations();
                             let log_state = state.clone();
                             if let Err(e) = state
                                 .autopilot

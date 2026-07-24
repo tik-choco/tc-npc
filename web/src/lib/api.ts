@@ -45,3 +45,33 @@ export function importCharacter(data: unknown): Promise<void> {
 export function activateCharacter(id: string): Promise<void> {
   return request(`/api/characters/${encodeURIComponent(id)}/activate`, { method: "POST" });
 }
+
+/**
+ * Connection probe for the AI settings form: the server builds an
+ * OpenAI-compatible client from the given endpoint and lists its models —
+ * a successful non-empty listing doubles as the connection test (per the
+ * tc-* suite's settings convention; no separate "test" button).
+ *
+ * `apiKey: "***"` means "use the key already saved in config for `section`".
+ */
+export interface LlmProbeRequest {
+  baseUrl: string;
+  apiKey: string;
+  section: "api" | "tts" | "stt";
+}
+
+export function listModels(body: LlmProbeRequest): Promise<{ models: string[] }> {
+  return request("/api/llm/models", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export function listVoices(body: LlmProbeRequest): Promise<{ voices: string[] }> {
+  return request("/api/llm/voices", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
