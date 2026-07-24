@@ -1,0 +1,102 @@
+{
+  "api": {
+    "base_url": "http://localhost:11434/v1",
+    "api_key": "",
+    "model": "gpt-4o-mini",
+    "embedding_model": "text-embedding-3-small",
+    "reasoning_effort": ""
+  },
+  "tts": {
+    "enabled": false,
+    "base_url": "",
+    "api_key": "",
+    "model": "",
+    "voice": "alloy",
+    "speed": 1.0,
+    "max_len": 200
+  },
+  "stt": {
+    "enabled": false,
+    "base_url": "",
+    "api_key": "",
+    "model": "whisper-1",
+    "silence_duration": 1.5,
+    "input_threshold": 0.01
+  },
+  "talk": {
+    "enabled": true,
+    "history_size": 20,
+    "prompts": [
+      {
+        "name": "default",
+        "content": "あなたは親しみやすいアシスタントです。\n{{persona}}\n\n直近の会話:\n{{short_term_memory}}\n\n覚えていること:\n{{long_term_memory}}"
+      }
+    ],
+    "filter_prompt_name": ""
+  },
+  "memory": {
+    "enabled": true,
+    "idle_timeout_minutes": 5,
+    "top_k": 5,
+    "threshold": 0.1,
+    "chunk_size": 512,
+    "chunk_overlap": 64,
+    "summarize_prompt": "以下の会話を短く要約してください。",
+    "consolidate_prompt": "以下の記憶をまとめ、重複を除いて簡潔に整理してください。"
+  },
+  "vision": {
+    "enabled": false,
+    "base_url": "",
+    "api_key": "",
+    "model": "",
+    "interval_seconds": 5.0,
+    "capture_mode": "entire",
+    "target_window_title": "",
+    "system_prompt": "画面のスクリーンショットを簡潔に日本語で説明してください。",
+    "debug_save": false
+  },
+  "speech": {
+    "input_device": "",
+    "output_device": "",
+    "input_sample_rate": 16000,
+    "output_sample_rate": 44100
+  },
+  "action": {
+    "enabled": false,
+    "osc_address": "127.0.0.1:9000",
+    "locations": [
+      { "name": "home", "x": 0.0, "y": 0.0, "heading": 0.0 }
+    ],
+    "routes": [
+      {
+        "name": "patrol",
+        "loop": true,
+        "waypoints": [
+          { "location": "home", "seconds": 3.0, "wait": true }
+        ]
+      }
+    ]
+  },
+  "vrc": {
+    "chatbox": false,
+    "osc_address": "127.0.0.1:9000"
+  },
+  "scheduler": {
+    "enabled": false,
+    "announcements": [
+      { "time": "09:00", "text": "おはようございます。", "chime_file": "", "volume": 1.0 }
+    ]
+  },
+  "server": {
+    "addr": "127.0.0.1:47950",
+    "auto_open": true
+  },
+  "character": {
+    "active_id": ""
+  },
+  "mist": {
+    "enabled": false,
+    "signaling_url": "",
+    "room_id": ""
+  }
+}

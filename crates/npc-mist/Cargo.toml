@@ -1,0 +1,38 @@
+# This crate is deliberately its own workspace root (empty `[workspace]`
+# table below), NOT a member of the parent tc-npc workspace -- see the note
+# next to `crates/npc-mist` in the root Cargo.toml for why: it keeps
+# `cargo check/build --workspace` at the root from ever resolving/fetching
+# this crate's heavy mistlib git dependency. It's still consumed normally as
+# an optional path dependency of the root `tc-npc` package, activated only
+# by `cargo build/check --features mist`.
+#
+# Being its own workspace root means it can't inherit `[workspace.package]`/
+# `[workspace.dependencies]` from the parent -- every dependency version
+# below is spelled out explicitly instead of `{ workspace = true }`, kept in
+# sync by hand with the matching entries in the root `Cargo.toml`.
+[workspace]
+
+[package]
+name = "npc-mist"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Optional mistlib P2P integration for tc-npc: presence/messaging room + tc-town character catalog discovery (mist feature)"
+
+[dependencies]
+npc-core = { path = "../npc-core" }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+tracing = "0.1"
+async-trait = "0.1"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# mistlib (MPL-2.0), pinned to a specific commit of the public
+# tik-choco-lab/mistlib repo (https://github.com/tik-choco-lab/mistlib).
+# mistlib-native's `[lib] name` is `mistlib` (see its Cargo.toml), so source
+# in this crate imports it as `mistlib::...`, not `mistlib_native::...` --
+# same convention the `mistl` daemon app uses for its own embedding.
+mistlib-core = { git = "https://github.com/tik-choco-lab/mistlib", rev = "261a20ab8c7b39a444fce197bf76d56aa2b84c02" }
+mistlib-native = { git = "https://github.com/tik-choco-lab/mistlib", rev = "261a20ab8c7b39a444fce197bf76d56aa2b84c02" }

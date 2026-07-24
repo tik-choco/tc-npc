@@ -1,0 +1,90 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/npc-core",
+    "crates/npc-llm",
+    "crates/npc-talk",
+    "crates/npc-memory",
+    "crates/npc-speech",
+    "crates/npc-vision",
+    "crates/npc-action",
+    "crates/npc-scheduler",
+    "crates/npc-server",
+]
+# crates/npc-mist (the optional `mist` feature's crate) is deliberately NOT
+# a member of this workspace, and is excluded here so Cargo's workspace
+# directory-tree auto-discovery doesn't trip over it declaring its own
+# `[workspace]` table (see its Cargo.toml) nested under this one. Excluding
+# it keeps `cargo check/build --workspace` at the root from ever resolving
+# or fetching its heavy mistlib git dependency. It's still reachable as an
+# ordinary optional path dependency of the root package below, activated
+# only by `--features mist`.
+exclude = ["crates/npc-mist"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/tik-choco/tc-npc"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "multipart", "stream"] }
+futures-util = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+dirs = "5"
+dotenvy = "0.15"
+chrono = { version = "0.4", features = ["serde"] }
+tokio-util = "0.7"
+async-trait = "0.1"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+npc-core = { path = "crates/npc-core" }
+npc-llm = { path = "crates/npc-llm" }
+npc-talk = { path = "crates/npc-talk" }
+npc-memory = { path = "crates/npc-memory" }
+npc-speech = { path = "crates/npc-speech" }
+npc-vision = { path = "crates/npc-vision" }
+npc-action = { path = "crates/npc-action" }
+npc-scheduler = { path = "crates/npc-scheduler" }
+npc-server = { path = "crates/npc-server" }
+
+[package]
+name = "tc-npc"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Unified Rust CLI/server for the tc-npc AI mascot agent suite"
+
+[[bin]]
+name = "tc-npc"
+path = "src/main.rs"
+
+[dependencies]
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tokio-util.workspace = true
+dirs.workspace = true
+
+npc-core.workspace = true
+npc-talk.workspace = true
+npc-memory.workspace = true
+npc-speech.workspace = true
+npc-vision.workspace = true
+npc-action.workspace = true
+npc-scheduler.workspace = true
+npc-server.workspace = true
+npc-mist = { path = "crates/npc-mist", optional = true }
+
+[features]
+mist = ["dep:npc-mist"]

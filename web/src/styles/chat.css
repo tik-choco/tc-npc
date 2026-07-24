@@ -1,0 +1,111 @@
+/* チャット view — transcript + composer. Layout-only; tokens/primitives
+   come from index.css and styles/components.css. */
+
+.chat-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  max-width: 860px;
+  margin: 0 auto;
+  padding: var(--space-4) var(--space-5);
+  gap: var(--space-3);
+}
+
+.chat-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.chat-transcript {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-l);
+  box-shadow: var(--shadow-1);
+}
+
+.chat-bubble-row {
+  display: flex;
+}
+
+.chat-bubble-row--assistant {
+  justify-content: flex-start;
+}
+
+.chat-bubble-row--user {
+  justify-content: flex-end;
+}
+
+.chat-bubble {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-width: 72%;
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-l);
+  font-size: 0.9rem;
+  line-height: 1.55;
+}
+
+.chat-bubble time {
+  align-self: flex-end;
+  font-size: 0.68rem;
+  color: inherit;
+  opacity: 0.65;
+}
+
+.chat-bubble-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.chat-bubble--assistant {
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-bottom-left-radius: var(--radius-xs);
+}
+
+.chat-bubble--user {
+  color: var(--on-primary);
+  background: var(--primary);
+  border-bottom-right-radius: var(--radius-xs);
+}
+
+.chat-system-line {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 2px var(--space-2);
+  font-size: 0.76rem;
+  color: var(--text-subtle);
+}
+
+.chat-system-line span {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: break-word;
+}
+
+.chat-system-line time {
+  flex-shrink: 0;
+  font-size: 0.68rem;
+}
+
+.chat-composer {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.chat-composer input {
+  flex: 1;
+}

@@ -1,0 +1,331 @@
+/* ============================================================
+   TC NPC — design system foundation
+   Same token system as the tik-choco suite (tc-chat/tc-town/tc-note/
+   tc-news): layered surfaces, soft elevation, a spacing scale, refined
+   typography, and an explicit light-default theme (dark only via
+   [data-theme="dark"] — the OS preference is not followed).
+   The accent is amber (unclaimed elsewhere in the family) — this app
+   is an operator console for an AI-NPC agent suite.
+   Component/view stylesheets build on these tokens only.
+   ============================================================ */
+
+:root {
+  color-scheme: light;
+
+  /* Surfaces & structure */
+  --bg: #f6f7f9;
+  --bg-accent: #eef0f4;
+  --surface: #ffffff;
+  --surface-2: #f3f4f7;
+  --surface-3: #e9ebf0;
+  --elevated: #ffffff;
+  --border: #e4e6eb;
+  --border-strong: #cfd2d9;
+
+  /* Text */
+  --text: #16181d;
+  --text-muted: #5a5f6b;
+  --text-subtle: #888e9a;
+  --on-primary: #ffffff;
+
+  /* Brand accent (amber) */
+  --primary: #b45309;
+  --primary-hover: #92400e;
+  --primary-active: #78350f;
+  --primary-soft: rgba(180, 83, 9, 0.1);
+  --primary-soft-strong: rgba(180, 83, 9, 0.16);
+  --primary-border: rgba(180, 83, 9, 0.35);
+
+  /* Status */
+  --success: #16a34a;
+  --success-soft: rgba(22, 163, 74, 0.1);
+  --danger: #dc2626;
+  --danger-text: #b91c1c;
+  --danger-soft: rgba(220, 38, 38, 0.08);
+  --danger-border: rgba(220, 38, 38, 0.3);
+
+  --ring: rgba(180, 83, 9, 0.5);
+  /* Scrim behind modals / sheets on mobile */
+  --scrim: rgba(16, 24, 40, 0.45);
+
+  /* Radii */
+  --radius-xs: 6px;
+  --radius-s: 8px;
+  --radius-m: 12px;
+  --radius-l: 16px;
+  --radius-pill: 999px;
+
+  /* Spacing scale */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+
+  /* Elevation — soft, layered, tuned for light backgrounds */
+  --shadow-1: 0 1px 2px rgba(16, 24, 40, 0.06), 0 1px 3px rgba(16, 24, 40, 0.08);
+  --shadow-2: 0 4px 12px rgba(16, 24, 40, 0.08), 0 2px 6px rgba(16, 24, 40, 0.05);
+  --shadow-3: 0 12px 32px rgba(16, 24, 40, 0.14), 0 4px 12px rgba(16, 24, 40, 0.08);
+
+  /* Glass header backdrop */
+  --header-bg: rgba(255, 255, 255, 0.72);
+
+  /* Motion */
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-fast: 130ms;
+  --dur: 220ms;
+  --dur-slow: 360ms;
+
+  --sans: "Inter", system-ui, -apple-system, "Segoe UI", "Hiragino Kaku Gothic ProN", "Noto Sans JP",
+    "Yu Gothic UI", Meiryo, Roboto, sans-serif;
+  --mono: ui-monospace, "Cascadia Mono", "SF Mono", Consolas, monospace;
+
+  font: 16px/1.5 var(--sans);
+  color: var(--text);
+  background: var(--bg);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg: #0d0e12;
+  --bg-accent: #101218;
+  --surface: #16181e;
+  --surface-2: #1b1e25;
+  --surface-3: #23262e;
+  --elevated: #1a1d24;
+  --border: #2a2e37;
+  --border-strong: #3a3f4a;
+
+  --text: #e8eaee;
+  --text-muted: #a0a6b0;
+  --text-subtle: #737985;
+  --on-primary: #1a1206;
+
+  --primary: #fbbf24;
+  --primary-hover: #fcd34d;
+  --primary-active: #f59e0b;
+  --primary-soft: rgba(251, 191, 36, 0.14);
+  --primary-soft-strong: rgba(251, 191, 36, 0.22);
+  --primary-border: rgba(251, 191, 36, 0.4);
+
+  --success: #4ade80;
+  --success-soft: rgba(74, 222, 128, 0.14);
+  --danger: #f87171;
+  --danger-text: #fca5a5;
+  --danger-soft: rgba(248, 113, 113, 0.12);
+  --danger-border: rgba(248, 113, 113, 0.35);
+
+  --ring: rgba(251, 191, 36, 0.55);
+  --scrim: rgba(0, 0, 0, 0.6);
+
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4), 0 1px 3px rgba(0, 0, 0, 0.3);
+  --shadow-2: 0 4px 14px rgba(0, 0, 0, 0.45), 0 2px 6px rgba(0, 0, 0, 0.35);
+  --shadow-3: 0 16px 40px rgba(0, 0, 0, 0.55), 0 6px 16px rgba(0, 0, 0, 0.4);
+
+  --header-bg: rgba(19, 21, 27, 0.72);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+#app {
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+}
+
+h1,
+h2,
+h3,
+h4,
+p {
+  margin: 0;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+}
+
+a {
+  color: var(--primary);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+:focus {
+  outline: none;
+}
+
+:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-xs);
+}
+
+/* Thin custom scrollbars */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: var(--radius-pill);
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--text-subtle);
+  background-clip: content-box;
+}
+
+/* ============================================================
+   App shell chrome (header + tab nav). Views own their own CSS
+   under src/styles/; this is the one bit of layout that wraps
+   them all, so it lives here alongside the tokens.
+   ============================================================ */
+
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+}
+
+.app-header {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-5);
+  border-bottom: 1px solid var(--border);
+  background: var(--header-bg);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+.app-header-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-weight: 700;
+  font-size: 1.05rem;
+  letter-spacing: 0.01em;
+  color: var(--primary);
+  white-space: nowrap;
+}
+
+.app-tabs {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin-left: auto;
+  overflow-x: auto;
+}
+
+.app-tab {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: none;
+  background: transparent;
+  border-radius: var(--radius-s);
+  color: var(--text-muted);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+
+.app-tab:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.app-tab-active {
+  background: var(--primary-soft);
+  color: var(--primary);
+  font-weight: 600;
+}
+
+.app-header-links {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color var(--dur) var(--ease), border-color var(--dur) var(--ease);
+}
+
+.theme-toggle:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.app-main {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+@media (max-width: 640px) {
+  .app-tab span {
+    display: none;
+  }
+
+  .app-header {
+    padding: var(--space-3);
+    gap: var(--space-2);
+  }
+}

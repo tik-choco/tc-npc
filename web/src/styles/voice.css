@@ -1,0 +1,131 @@
+/* 音声 view — volume meter + suspend/resume + tts line log. */
+
+.voice-view {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  max-width: 720px;
+  margin: 0 auto;
+  padding: var(--space-5);
+}
+
+.voice-meter-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-5);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-l);
+  box-shadow: var(--shadow-1);
+}
+
+.voice-meter-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.voice-meter-value {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-subtle);
+}
+
+.voice-meter-bar {
+  height: 12px;
+  overflow: hidden;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+}
+
+.voice-meter-bar-fill {
+  height: 100%;
+  background: var(--primary);
+  border-radius: var(--radius-pill);
+  transition: width 90ms linear;
+}
+
+.voice-controls {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.voice-log-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.voice-log-title {
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.voice-log-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.voice-log-item {
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-m);
+  box-shadow: var(--shadow-1);
+}
+
+.voice-log-item-header {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+}
+
+.voice-log-item-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.88rem;
+  color: var(--text);
+  word-break: break-word;
+}
+
+.voice-log-item-header time {
+  flex-shrink: 0;
+  font-size: 0.72rem;
+  color: var(--text-subtle);
+}
+
+.voice-log-translations {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: var(--space-2) 0 0;
+  padding: var(--space-2) 0 0;
+  border-top: 1px dashed var(--border);
+  list-style: none;
+}
+
+.voice-log-translations li {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.voice-log-translation-lang {
+  flex-shrink: 0;
+  font-weight: 700;
+  color: var(--primary);
+  text-transform: uppercase;
+  font-size: 0.7rem;
+}

@@ -1,0 +1,21 @@
+[package]
+name = "npc-speech"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Speech (STT/TTS) module for tc-npc: mic capture + VAD + STT, bus-driven TTS playback"
+
+[dependencies]
+npc-core = { workspace = true }
+# npc-llm is not in [workspace.dependencies] (root Cargo.toml is owned by another
+# worker), so depend on it directly by path instead.
+npc-llm = { path = "../npc-llm" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+cpal = "0.15"
+hound = "3.5"
+rosc = "0.10"

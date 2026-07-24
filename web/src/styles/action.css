@@ -1,0 +1,112 @@
+/* 行動 view — position readout + command composer + action log. */
+
+.action-view {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  max-width: 720px;
+  margin: 0 auto;
+  padding: var(--space-5);
+}
+
+.action-section-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: var(--space-3);
+}
+
+.action-position-card,
+.action-command-card {
+  padding: var(--space-4) var(--space-5);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-l);
+  box-shadow: var(--shadow-1);
+}
+
+.action-position-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-3);
+}
+
+.action-position-grid > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-3);
+  text-align: center;
+  background: var(--surface-2);
+  border-radius: var(--radius-m);
+}
+
+.action-position-label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-subtle);
+}
+
+.action-position-value {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.action-position-empty {
+  font-size: 0.84rem;
+  color: var(--text-subtle);
+}
+
+.action-command-row {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.action-command-row input {
+  flex: 1;
+}
+
+.action-log-section {
+  display: flex;
+  flex-direction: column;
+}
+
+.action-log-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  max-height: 360px;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-l);
+  box-shadow: var(--shadow-1);
+}
+
+.action-log-item {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  font-size: 0.85rem;
+  color: var(--text);
+  background: var(--surface-2);
+  border-radius: var(--radius-m);
+}
+
+.action-log-item time {
+  flex-shrink: 0;
+  font-size: 0.72rem;
+  font-family: var(--mono);
+  color: var(--text-subtle);
+}
+
+.action-log-item span {
+  word-break: break-word;
+}

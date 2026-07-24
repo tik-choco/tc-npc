@@ -1,0 +1,109 @@
+/* 視覚 view — read-only config snapshot + observation log. */
+
+.vision-view {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  max-width: 720px;
+  margin: 0 auto;
+  padding: var(--space-5);
+}
+
+.vision-config-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-l);
+  box-shadow: var(--shadow-1);
+}
+
+.vision-config-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 0.88rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.vision-config-loading {
+  font-size: 0.82rem;
+  color: var(--text-subtle);
+}
+
+.vision-config-error {
+  padding: var(--space-2) var(--space-3);
+  font-size: 0.82rem;
+  color: var(--danger-text);
+  background: var(--danger-soft);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-m);
+}
+
+.vision-config-pre {
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  line-height: 1.6;
+  color: var(--text-muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-m);
+  overflow-x: auto;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.vision-log-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.vision-log-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.vision-log-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  max-height: 420px;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-l);
+  box-shadow: var(--shadow-1);
+}
+
+.vision-log-item {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  font-size: 0.85rem;
+  color: var(--text);
+  background: var(--surface-2);
+  border-radius: var(--radius-m);
+}
+
+.vision-log-item time {
+  flex-shrink: 0;
+  font-size: 0.72rem;
+  font-family: var(--mono);
+  color: var(--text-subtle);
+}
+
+.vision-log-item span {
+  word-break: break-word;
+}
