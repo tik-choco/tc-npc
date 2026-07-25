@@ -18,3 +18,5 @@ chrono = { workspace = true }
 tokio-util = { workspace = true }
 async-trait = { workspace = true }
 uuid = { workspace = true }
+# VRChat chatbox OSC output, shared by npc-speech and npc-translate.
+rosc = "0.10"

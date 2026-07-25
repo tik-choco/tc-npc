@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "preact/hooks";
 import { Eye, Settings2 } from "lucide-preact";
 import type { SenseEntry } from "../hooks/useNpcSocket";
 import { getConfig } from "../lib/api";
+import { useI18n } from "../hooks/useI18n";
 import type { ConfigDocument } from "../lib/types";
 import "../styles/components.css";
 import "../styles/vision.css";
@@ -27,6 +28,7 @@ function extractVisionConfig(config: ConfigDocument): unknown {
 }
 
 export function VisionView({ visionLog }: { visionLog: SenseEntry[] }) {
+  const { t } = useI18n();
   const [config, setConfig] = useState<ConfigDocument | null>(null);
   const [configError, setConfigError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -48,22 +50,26 @@ export function VisionView({ visionLog }: { visionLog: SenseEntry[] }) {
       <section class="vision-config-card">
         <h2 class="vision-config-title">
           <Settings2 size={16} />
-          視覚設定(読み取り専用)
+          {t("vision.config.title")}
         </h2>
-        {configError && <div class="vision-config-error">読み込みに失敗しました: {configError}</div>}
-        {!config && !configError && <div class="vision-config-loading">読み込み中…</div>}
+        {configError && (
+          <div class="vision-config-error">
+            {t("common.loadFailed")}: {configError}
+          </div>
+        )}
+        {!config && !configError && <div class="vision-config-loading">{t("common.loading")}</div>}
         {config && <pre class="vision-config-pre">{JSON.stringify(extractVisionConfig(config), null, 2)}</pre>}
       </section>
 
       <section class="vision-log-section">
         <h2 class="vision-log-title">
           <Eye size={16} />
-          観測ログ
+          {t("vision.log.title")}
         </h2>
         <div class="vision-log-scroll" ref={scrollRef}>
           {visionLog.length === 0 && (
             <div class="empty-state">
-              <div class="empty-state-title">まだ観測がありません</div>
+              <div class="empty-state-title">{t("vision.log.empty")}</div>
             </div>
           )}
           {visionLog.map((entry) => (

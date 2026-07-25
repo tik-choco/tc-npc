@@ -5,17 +5,50 @@
 // serde defaults — always spread the existing section when writing back so
 // unknown/unedited fields survive the round-trip.
 
+/**
+ * config.scheduler.announcements[].actions[] — extra bus messages an
+ * announcement publishes when it fires (the port of the Go scheduler's
+ * `redis_actions`). Tagged on `kind`; see `ScheduledAction` in
+ * crates/npc-core/src/config.rs for what each one publishes.
+ */
+export type ScheduledActionKind = "speak" | "action" | "command" | "chat" | "suspend" | "resume" | "raw";
+
+export type ScheduledActionEntry =
+  | { kind: "speak"; content?: string; chime_file?: string }
+  | { kind: "action"; content?: string }
+  | { kind: "command"; text?: string }
+  | { kind: "chat"; content?: string }
+  | { kind: "suspend" }
+  | { kind: "resume" }
+  | { kind: "raw"; topic: string; type: string; payload?: unknown };
+
 /** config.scheduler.announcements[] — daily "HH:MM" / "HH:MM:SS" repeats. */
 export interface AnnouncementEntry {
   time: string;
   text: string;
   chime_file?: string;
   volume?: number;
+  actions?: ScheduledActionEntry[];
 }
 
 export interface SchedulerSection {
   enabled?: boolean;
   announcements?: AnnouncementEntry[];
+}
+
+/** config.translation — simultaneous interpretation (通訳タブ). */
+export interface TranslationSection {
+  /** "off" | "interpret" | "assist" — anything else is treated as "off". */
+  mode?: string;
+  source_language?: string;
+  target_language?: string;
+  target_language_2?: string;
+  context_size?: number;
+  auto_reverse?: boolean;
+  /** Send subtitles to the VRChat chatbox (uses vrc.osc_address). */
+  chatbox?: boolean;
+  /** Model override; empty falls back to api.model. */
+  model?: string;
 }
 
 /** config.action.locations[] — a named point in VRChat-world coordinates. */
@@ -54,6 +87,9 @@ export interface ApiSection {
   api_key?: string;
   model?: string;
   embedding_model?: string;
+  /** "none" | "minimal" | "low" | "medium" | "high" — always sent on chat
+   * requests ("none" is an explicit value, not "omit"); empty/missing is
+   * treated as "none" by the server. */
   reasoning_effort?: string;
 }
 

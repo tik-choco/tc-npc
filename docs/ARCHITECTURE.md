@@ -19,6 +19,7 @@ crates/
   npc-vision/              screen capture + description module (ports agent-vision)
   npc-action/              movement/OSC module                 (ports agent-action)
   npc-scheduler/           scheduled announcements module      (ports agent-scheduler)
+  npc-translate/           simultaneous interpretation module  (ports agent-speech's translation)
   npc-server/              HTTP/WebSocket server + embedded web UI host
 ```
 
@@ -98,12 +99,58 @@ environment variables override the matching JSON fields. See
 `config.example.json` for a full example and `crates/npc-core/src/config.rs`
 for the authoritative field list/defaults. Top-level sections: `api`, `tts`,
 `stt`, `talk`, `memory`, `vision`, `speech`, `action`, `vrc`, `scheduler`,
-`server`, `character`, `mist`. `Config::redacted_json()` masks every
+`translation`, `server`, `character`, `mist`. `Config::redacted_json()` masks every
 `api_key` field for safe display in the web UI.
 
 Prompt templates in `talk.prompts[].content` support placeholders:
 `{{session_meta}}`, `{{short_term_memory}}`, `{{long_term_memory}}`,
 `{{persona}}`.
+
+## Scheduled actions
+
+`scheduler.announcements[].actions[]` is the port of Go `agent-scheduler`'s
+`redis_actions`: extra bus messages an announcement publishes when it fires,
+independent of its `text` (an entry with no text and only actions is a
+perfectly good "do something at 17:00"). Each entry is tagged on `kind`
+(`npc_core::config::ScheduledAction`):
+
+| `kind`     | Publishes                                            |
+|------------|------------------------------------------------------|
+| `speak`    | `agent:interrupt` / `tts` `{content, chime_file}`     |
+| `action`   | `agent:action` / `action` `{content}` (NL → npc-action) |
+| `command`  | `agent:action` / `command` `{text}` (CLI dispatcher)  |
+| `chat`     | `agent:sense` / `speech` `{content}` (answered by npc-talk) |
+| `suspend`  | `agent:interrupt` / `suspend`                         |
+| `resume`   | `agent:interrupt` / `resume`                          |
+| `raw`      | `{topic, type, payload}` verbatim — the literal Go form |
+
+`npc_scheduler::fire_announcement` is the single place this happens, shared
+by the clock and `POST /api/scheduler/test`.
+
+## Simultaneous interpretation (`npc-translate`)
+
+Ports the translation half of Go `agent-speech` (`handleTranslation` /
+`handleAgentTranslation`), driven by `config.translation`:
+
+- `mode: "off"` — nothing runs.
+- `mode: "interpret"` — heard speech (`agent:sense` / `speech`) is translated
+  and **npc-talk does not answer it**: npc-talk reads the same setting and
+  drops speech input while this mode is on, so the NPC acts purely as an
+  interpreter.
+- `mode: "assist"` — normal conversation, with both heard speech and the
+  NPC's `chat_response` translated as subtitles.
+
+Targets are `target_language` (+ optional `target_language_2`), with
+`auto_reverse` translating a reply *in* a target language back into
+`source_language`. Results are published on `npc:ui` as `translation`
+messages — one per target language, sharing an `id` with the "heard this
+line" message published before them so the UI can group them — and
+optionally mirrored to the VRChat chatbox over OSC (`translation.chatbox`).
+
+Like npc-scheduler, npc-translate is always spawned and re-reads
+`config.translation` from `npc:config` `config_updated`, so the mode and
+languages can be switched from the web UI without a restart; the LLM
+connection (`api.*`) is still startup-only.
 
 ## Characters
 
@@ -125,6 +172,7 @@ sections).
 | `chat`            | `{role: "user"\|"assistant", text, ts}`          |
 | `ttsLine`         | `{text, translations?}`                          |
 | `sense`           | `{kind: "vision"\|"speech", text, ts}`            |
+| `translation`     | `{id, source: "user"\|"agent", original, lang, text, reversed, ts}` |
 | `memory`          | `{kind: "short"\|"long", text}`                   |
 | `actionLog`       | `{text}`                                          |
 | `position`        | `{x, y, heading}`                                 |
@@ -153,6 +201,11 @@ sections).
 - `GET /api/characters`
 - `POST /api/characters/import` (tc-town export JSON body)
 - `POST /api/characters/{id}/activate`
+- `POST /api/scheduler/test` → `{index?, text?, chime_file?, actions?}` fires
+  one announcement immediately (ignoring the clock and `scheduler.enabled`)
+  via `npc_scheduler::fire_announcement`; responds `{ok, fired, spoke,
+  actions}`, where `fired: false` means the entry is a no-op (neither text
+  nor actions).
 - `GET /` and all non-`/api`/`/ws` paths → embedded `web/dist` static files,
   with SPA fallback to `index.html`.
 

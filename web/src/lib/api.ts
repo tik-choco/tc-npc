@@ -1,5 +1,6 @@
 // Thin REST client for the tc-npc server (same origin as the WS endpoint —
 // see vite.config.ts's dev proxy for the local-dev equivalent).
+import type { ScheduledActionEntry } from "./config-types";
 import type { CharacterSummary, ConfigDocument } from "./types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -44,6 +45,39 @@ export function importCharacter(data: unknown): Promise<void> {
 
 export function activateCharacter(id: string): Promise<void> {
   return request(`/api/characters/${encodeURIComponent(id)}/activate`, { method: "POST" });
+}
+
+/**
+ * Fire one scheduled announcement right now, bypassing both the clock and
+ * `scheduler.enabled` — the 予定 view's "テスト実行" button, equivalent to
+ * the Go agent-scheduler TUI's `[t] Test Playback`.
+ *
+ * `index` picks the saved announcement; `text` / `chime_file` / `actions`
+ * override it with what's currently on screen, so a test doesn't have to wait
+ * for the debounced autosave to land. `fired: false` means the entry is a
+ * no-op (no text and no actions) and wouldn't produce anything on the real
+ * schedule either; `spoke` / `actions` say which half actually ran.
+ */
+export interface SchedulerTestRequest {
+  index?: number;
+  text?: string;
+  chime_file?: string;
+  actions?: ScheduledActionEntry[];
+}
+
+export interface SchedulerTestResult {
+  ok: boolean;
+  fired: boolean;
+  spoke: boolean;
+  actions: number;
+}
+
+export function testAnnouncement(body: SchedulerTestRequest): Promise<SchedulerTestResult> {
+  return request("/api/scheduler/test", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
 }
 
 /**

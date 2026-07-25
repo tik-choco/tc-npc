@@ -1,5 +1,9 @@
-//! VRChat chatbox OSC output (`config.vrc.chatbox`). Fire-and-forget UDP,
-//! matching the original Go `notifier.SendVRCChatbox` behavior.
+//! VRChat chatbox OSC output. Fire-and-forget UDP, matching the original Go
+//! `notifier.SendVRCChatbox` behavior.
+//!
+//! Lives in npc-core because more than one module writes to the chatbox:
+//! npc-speech (heard speech / spoken replies, `config.vrc.chatbox`) and
+//! npc-translate (subtitles, `config.translation.chatbox`).
 
 use std::net::UdpSocket;
 
@@ -22,7 +26,7 @@ pub fn send_chatbox(osc_address: &str, text: &str) {
     let bytes = match rosc::encoder::encode(&packet) {
         Ok(b) => b,
         Err(err) => {
-            tracing::warn!(error = ?err, "npc-speech: failed to encode vrc chatbox osc message");
+            tracing::warn!(error = ?err, "osc: failed to encode vrc chatbox message");
             return;
         }
     };
@@ -30,13 +34,13 @@ pub fn send_chatbox(osc_address: &str, text: &str) {
     let socket = match UdpSocket::bind("0.0.0.0:0") {
         Ok(s) => s,
         Err(err) => {
-            tracing::warn!(error = %err, "npc-speech: failed to bind osc socket");
+            tracing::warn!(error = %err, "osc: failed to bind socket");
             return;
         }
     };
 
     if let Err(err) = socket.send_to(&bytes, osc_address) {
-        tracing::warn!(error = %err, target = %osc_address, "npc-speech: failed to send vrc chatbox osc message");
+        tracing::warn!(error = %err, target = %osc_address, "osc: failed to send vrc chatbox message");
     }
 }
 

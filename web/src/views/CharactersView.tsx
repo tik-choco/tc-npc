@@ -6,10 +6,12 @@ import { UploadCloud, UserCheck, Users, Loader2 } from "lucide-preact";
 import { activateCharacter, getCharacters, importCharacter } from "../lib/api";
 import type { CharacterSummary } from "../lib/types";
 import { Toast, type ToastState } from "../components/Toast";
+import { useI18n } from "../hooks/useI18n";
 import "../styles/components.css";
 import "../styles/characters.css";
 
 export function CharactersView() {
+  const { t } = useI18n();
   const [characters, setCharacters] = useState<CharacterSummary[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -40,7 +42,7 @@ export function CharactersView() {
     try {
       await activateCharacter(id);
       reload();
-      setToast({ kind: "success", message: "キャラクターを有効化しました" });
+      setToast({ kind: "success", message: t("characters.toast.activated") });
     } catch (err) {
       setToast({ kind: "error", message: err instanceof Error ? err.message : String(err) });
     } finally {
@@ -55,7 +57,7 @@ export function CharactersView() {
       const data = JSON.parse(text);
       await importCharacter(data);
       reload();
-      setToast({ kind: "success", message: `「${file.name}」をインポートしました` });
+      setToast({ kind: "success", message: t("characters.toast.imported", { name: file.name }) });
     } catch (err) {
       setToast({ kind: "error", message: err instanceof Error ? err.message : String(err) });
     } finally {
@@ -81,8 +83,8 @@ export function CharactersView() {
       >
         <UploadCloud size={28} />
         <div class="import-dropzone-text">
-          <strong>tc-town エクスポート(.json)をドラッグ&ドロップ</strong>
-          <span>またはファイルを選択してインポート</span>
+          <strong>{t("characters.drop.title")}</strong>
+          <span>{t("characters.drop.sub")}</span>
         </div>
         <button
           type="button"
@@ -91,7 +93,7 @@ export function CharactersView() {
           onClick={() => fileInputRef.current?.click()}
         >
           {importing ? <Loader2 size={14} class="spin" /> : <UploadCloud size={14} />}
-          ファイルを選択
+          {t("characters.pick")}
         </button>
         <input
           ref={fileInputRef}
@@ -109,17 +111,21 @@ export function CharactersView() {
       <section class="characters-list-section">
         <h2 class="characters-list-title">
           <Users size={16} />
-          キャラクター
+          {t("characters.title")}
         </h2>
 
-        {loadError && <div class="characters-error">読み込みに失敗しました: {loadError}</div>}
+        {loadError && (
+          <div class="characters-error">
+            {t("common.loadFailed")}: {loadError}
+          </div>
+        )}
 
-        {!characters && !loadError && <div class="empty-state">読み込み中…</div>}
+        {!characters && !loadError && <div class="empty-state">{t("common.loading")}</div>}
 
         {characters && characters.length === 0 && (
           <div class="empty-state">
-            <div class="empty-state-title">キャラクターがありません</div>
-            <div class="empty-state-description">上のインポートから tc-town エクスポートを取り込んでください。</div>
+            <div class="empty-state-title">{t("characters.empty.title")}</div>
+            <div class="empty-state-description">{t("characters.empty.desc")}</div>
           </div>
         )}
 
@@ -134,7 +140,7 @@ export function CharactersView() {
                 {c.active ? (
                   <span class="badge badge--success">
                     <UserCheck size={12} />
-                    有効
+                    {t("common.enabled")}
                   </span>
                 ) : (
                   <button
@@ -144,7 +150,7 @@ export function CharactersView() {
                     onClick={() => handleActivate(c.id)}
                   >
                     {busyId === c.id ? <Loader2 size={14} class="spin" /> : <UserCheck size={14} />}
-                    有効化
+                    {t("characters.activate")}
                   </button>
                 )}
               </li>

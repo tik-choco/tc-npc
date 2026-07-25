@@ -2,13 +2,20 @@
 //! `internal/notifier/scheduler.go` in the original service).
 //!
 //! Reads `config.scheduler.announcements` (`{time, text, chime_file,
-//! volume}`, `time` = `"HH:MM"` or `"HH:MM:SS"`, daily recurrence — the Go
-//! original turned these into 6-field cron expressions via `robfig/cron`;
-//! here we hand-roll the same "next local-time occurrence" semantics with
-//! `chrono` instead of pulling in a cron crate). Unlike the Go service this
-//! module does **not** play audio itself: firing an announcement just
-//! publishes a `tts` message on `agent:interrupt` and `npc-speech` plays the
-//! chime and speaks the text.
+//! volume, actions}`, `time` = `"HH:MM"` or `"HH:MM:SS"`, daily recurrence —
+//! the Go original turned these into 6-field cron expressions via
+//! `robfig/cron`; here we hand-roll the same "next local-time occurrence"
+//! semantics with `chrono` instead of pulling in a cron crate). Unlike the Go
+//! service this module does **not** play audio itself: firing an announcement
+//! just publishes a `tts` message on `agent:interrupt` and `npc-speech` plays
+//! the chime and speaks the text.
+//!
+//! Beyond speaking, an announcement can carry `actions` — the port of Go
+//! `agent-scheduler`'s `redis_actions`, which published arbitrary
+//! `{channel, type, payload}` messages so a scheduled entry could move the
+//! avatar or resume a suspended agent instead of (or as well as) talking.
+//! See [`npc_core::config::ScheduledAction`] for the variants and
+//! [`execute_action`] for the envelope each one publishes.
 //!
 //! Config hot-reload: this module is always spawned (regardless of
 //! `scheduler.enabled` — see `src/main.rs`), and the schedule is recomputed
@@ -25,7 +32,7 @@ use chrono::{DateTime, Local, NaiveDateTime, NaiveTime, TimeZone};
 use serde_json::json;
 use tokio::sync::broadcast::error::RecvError;
 
-use npc_core::config::AnnouncementConfig;
+use npc_core::config::{AnnouncementConfig, ScheduledAction};
 use npc_core::{msg, topic, Config, Module, ModuleCtx};
 
 pub fn module(_ctx: &ModuleCtx) -> anyhow::Result<Box<dyn Module>> {
@@ -70,7 +77,7 @@ impl Module for SchedulerModule {
                     // fire together.
                     for entry in entries.iter_mut() {
                         if entry.next <= wake_at {
-                            fire(&ctx, &entry.config);
+                            fire_announcement(&ctx.bus, &entry.config);
                             entry.next += chrono::Duration::hours(24);
                         }
                     }
@@ -202,24 +209,118 @@ fn local_datetime(naive: NaiveDateTime) -> DateTime<Local> {
     }
 }
 
-fn fire(ctx: &ModuleCtx, ann: &AnnouncementConfig) {
+/// What [`fire_announcement`] actually did, so callers (the web UI's test
+/// button in particular) can tell "spoke a line", "ran 2 actions" and "this
+/// entry is a no-op" apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FireOutcome {
+    /// A `tts` interrupt was published for the announcement's own `text`.
+    pub spoke: bool,
+    /// How many `actions` entries were published.
+    pub actions: usize,
+}
+
+impl FireOutcome {
+    /// Whether anything at all was published.
+    pub fn fired(&self) -> bool {
+        self.spoke || self.actions > 0
+    }
+}
+
+/// Publish `ann`'s TTS line and its `actions` — the one place an announcement
+/// turns into bus messages, whether it was reached by the clock or triggered
+/// manually. `npc-server`'s `POST /api/scheduler/test` calls this so the web
+/// UI's test button exercises the real firing path rather than a lookalike
+/// (the Go original does the same: its TUI's `[t] Test Playback` routes
+/// through `TestTriggerIndex` -> `TriggerAnnouncement`).
+///
+/// Text and actions are independent: a text-only entry just speaks, an
+/// actions-only entry (empty `text`) just acts, and an entry with both does
+/// both — matching the Go original, whose `redis_actions` fired regardless of
+/// whether `text` was set.
+pub fn fire_announcement(bus: &npc_core::bus::Bus, ann: &AnnouncementConfig) -> FireOutcome {
+    let mut outcome = FireOutcome::default();
+
     if ann.text.is_empty() {
-        // Empty-text announcements are allowed as no-ops for future action
-        // hooks (e.g. triggering something other than TTS at a scheduled
-        // time) — nothing to publish yet.
-        tracing::debug!(time = %ann.time, "npc-scheduler: no-op announcement (empty text), skipping");
-        return;
+        tracing::debug!(time = %ann.time, "npc-scheduler: announcement has no text, skipping tts");
+    } else {
+        tracing::info!(time = %ann.time, text = %ann.text, "npc-scheduler: firing announcement");
+        bus.publish(
+            topic::INTERRUPT,
+            msg::TTS,
+            json!({
+                "content": ann.text,
+                "chime_file": ann.chime_file,
+            }),
+        );
+        outcome.spoke = true;
     }
 
-    tracing::info!(time = %ann.time, text = %ann.text, "npc-scheduler: firing announcement");
-    ctx.bus.publish(
-        topic::INTERRUPT,
-        msg::TTS,
-        json!({
-            "content": ann.text,
-            "chime_file": ann.chime_file,
-        }),
-    );
+    for action in &ann.actions {
+        if execute_action(bus, action) {
+            outcome.actions += 1;
+        }
+    }
+
+    if !outcome.fired() {
+        tracing::debug!(time = %ann.time, "npc-scheduler: no-op announcement (no text, no actions)");
+    }
+
+    outcome
+}
+
+/// Publish the one bus envelope `action` stands for. Returns whether anything
+/// was published — an action whose only field is blank (an unfinished row in
+/// the web UI) is skipped rather than published as an empty command.
+pub fn execute_action(bus: &npc_core::bus::Bus, action: &ScheduledAction) -> bool {
+    match action {
+        ScheduledAction::Speak { content, chime_file } => {
+            if content.is_empty() && chime_file.is_empty() {
+                return false;
+            }
+            bus.publish(
+                topic::INTERRUPT,
+                msg::TTS,
+                json!({ "content": content, "chime_file": chime_file }),
+            );
+        }
+        ScheduledAction::Action { content } => {
+            if content.trim().is_empty() {
+                return false;
+            }
+            bus.publish(topic::ACTION, msg::ACTION, json!({ "content": content }));
+        }
+        ScheduledAction::Command { text } => {
+            if text.trim().is_empty() {
+                return false;
+            }
+            // `"command"` is npc-action's local message type (see its
+            // `MSG_TYPE_COMMAND`), not one of `npc_core::bus::msg`'s shared
+            // constants, so it's spelled out here too.
+            bus.publish(topic::ACTION, "command", json!({ "text": text }));
+        }
+        ScheduledAction::Chat { content } => {
+            if content.trim().is_empty() {
+                return false;
+            }
+            bus.publish(topic::SENSE, msg::SPEECH, json!({ "content": content }));
+        }
+        ScheduledAction::Suspend => bus.publish(topic::INTERRUPT, msg::SUSPEND, json!({})),
+        ScheduledAction::Resume => bus.publish(topic::INTERRUPT, msg::RESUME, json!({})),
+        ScheduledAction::Raw {
+            topic,
+            msg_type,
+            payload,
+        } => {
+            if topic.trim().is_empty() || msg_type.trim().is_empty() {
+                return false;
+            }
+            bus.publish(topic, msg_type, payload.clone());
+        }
+    }
+
+    tracing::info!(action = ?action, "npc-scheduler: firing scheduled action");
+    true
 }
 
 #[cfg(test)]
@@ -288,6 +389,7 @@ mod tests {
             text: "hello".to_string(),
             chime_file: String::new(),
             volume: 1.0,
+            actions: Vec::new(),
         }
     }
 
@@ -314,6 +416,148 @@ mod tests {
         let mut config = Config::default();
         config.scheduler.enabled = true;
         assert!(compute_schedule(&config).is_empty());
+    }
+
+    #[tokio::test]
+    async fn fire_announcement_publishes_tts_interrupt() {
+        let bus = npc_core::bus::Bus::new();
+        let mut rx = bus.subscribe();
+
+        let mut ann = announcement("09:00");
+        ann.chime_file = "assets/chime.wav".to_string();
+        let outcome = fire_announcement(&bus, &ann);
+        assert!(outcome.spoke);
+        assert_eq!(outcome.actions, 0);
+
+        let received = rx.recv().await.unwrap();
+        assert_eq!(received.topic, topic::INTERRUPT);
+        assert_eq!(received.env.r#type, msg::TTS);
+        assert_eq!(received.env.payload["content"], "hello");
+        assert_eq!(received.env.payload["chime_file"], "assets/chime.wav");
+    }
+
+    #[tokio::test]
+    async fn fire_announcement_skips_empty_text() {
+        let bus = npc_core::bus::Bus::new();
+        let mut rx = bus.subscribe();
+
+        let mut ann = announcement("09:00");
+        ann.text = String::new();
+        assert!(!fire_announcement(&bus, &ann).fired());
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// The Go original's text-less `redis_actions` entries: no speech, but
+    /// the actions still fire.
+    #[tokio::test]
+    async fn fire_announcement_runs_actions_without_text() {
+        let bus = npc_core::bus::Bus::new();
+        let mut rx = bus.subscribe();
+
+        let mut ann = announcement("17:00");
+        ann.text = String::new();
+        ann.actions = vec![ScheduledAction::Action {
+            content: "原点に移動して".to_string(),
+        }];
+
+        let outcome = fire_announcement(&bus, &ann);
+        assert!(!outcome.spoke);
+        assert_eq!(outcome.actions, 1);
+        assert!(outcome.fired());
+
+        let received = rx.recv().await.unwrap();
+        assert_eq!(received.topic, topic::ACTION);
+        assert_eq!(received.env.r#type, msg::ACTION);
+        assert_eq!(received.env.payload["content"], "原点に移動して");
+    }
+
+    #[tokio::test]
+    async fn fire_announcement_speaks_then_runs_actions_in_order() {
+        let bus = npc_core::bus::Bus::new();
+        let mut rx = bus.subscribe();
+
+        let mut ann = announcement("17:00");
+        ann.actions = vec![
+            ScheduledAction::Command {
+                text: "route patrol".to_string(),
+            },
+            ScheduledAction::Resume,
+        ];
+        assert_eq!(fire_announcement(&bus, &ann).actions, 2);
+
+        let first = rx.recv().await.unwrap();
+        assert_eq!(first.env.r#type, msg::TTS);
+        let second = rx.recv().await.unwrap();
+        assert_eq!(second.topic, topic::ACTION);
+        assert_eq!(second.env.r#type, "command");
+        assert_eq!(second.env.payload["text"], "route patrol");
+        let third = rx.recv().await.unwrap();
+        assert_eq!(third.topic, topic::INTERRUPT);
+        assert_eq!(third.env.r#type, msg::RESUME);
+    }
+
+    #[tokio::test]
+    async fn raw_action_publishes_verbatim() {
+        let bus = npc_core::bus::Bus::new();
+        let mut rx = bus.subscribe();
+
+        assert!(execute_action(
+            &bus,
+            &ScheduledAction::Raw {
+                topic: "agent:interrupt".to_string(),
+                msg_type: "resume".to_string(),
+                payload: json!({"why": "test"}),
+            }
+        ));
+
+        let received = rx.recv().await.unwrap();
+        assert_eq!(received.topic, "agent:interrupt");
+        assert_eq!(received.env.r#type, "resume");
+        assert_eq!(received.env.payload["why"], "test");
+    }
+
+    #[tokio::test]
+    async fn blank_actions_publish_nothing() {
+        let bus = npc_core::bus::Bus::new();
+        let mut rx = bus.subscribe();
+
+        assert!(!execute_action(&bus, &ScheduledAction::Action { content: "  ".into() }));
+        assert!(!execute_action(&bus, &ScheduledAction::Command { text: String::new() }));
+        assert!(!execute_action(&bus, &ScheduledAction::Chat { content: String::new() }));
+        assert!(!execute_action(
+            &bus,
+            &ScheduledAction::Speak {
+                content: String::new(),
+                chime_file: String::new(),
+            }
+        ));
+        assert!(!execute_action(
+            &bus,
+            &ScheduledAction::Raw {
+                topic: String::new(),
+                msg_type: "resume".to_string(),
+                payload: json!({}),
+            }
+        ));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn chat_action_injects_a_speech_sense_message() {
+        let bus = npc_core::bus::Bus::new();
+        let mut rx = bus.subscribe();
+
+        assert!(execute_action(
+            &bus,
+            &ScheduledAction::Chat {
+                content: "今日の予定は?".to_string(),
+            }
+        ));
+
+        let received = rx.recv().await.unwrap();
+        assert_eq!(received.topic, topic::SENSE);
+        assert_eq!(received.env.r#type, msg::SPEECH);
+        assert_eq!(received.env.payload["content"], "今日の予定は?");
     }
 
     /// Simulates the `CONFIG_UPDATED` reload path in `run`: a schedule

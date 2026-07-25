@@ -37,24 +37,6 @@
   gap: var(--space-2);
 }
 
-.action-save-chip--saving {
-  color: var(--primary);
-  background: var(--primary-soft);
-  border-color: transparent;
-}
-
-.action-save-chip--saved {
-  color: var(--success);
-  background: var(--success-soft);
-  border-color: transparent;
-}
-
-.action-save-chip--error {
-  color: var(--danger-text);
-  background: var(--danger-soft);
-  border-color: transparent;
-}
-
 .action-hint {
   margin: 0;
   font-size: 0.78rem;
@@ -400,9 +382,12 @@
   flex: 1;
   min-width: 0;
   padding: var(--space-2);
+  padding-right: calc(var(--space-2) + 16px);
   font-size: 0.8rem;
   color: var(--text);
-  background: var(--surface);
+  /* `background-color`, not the shorthand — the shorthand would drop the
+     shared chevron image from components.css. */
+  background-color: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-s);
 }

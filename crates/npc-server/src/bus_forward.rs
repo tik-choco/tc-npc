@@ -9,7 +9,8 @@ use serde_json::Value;
 use crate::hub::{EchoGuard, Hub, RateLimiter};
 use crate::protocol::{now_ms, ServerMsg};
 
-/// Topic used by other modules (npc-action, npc-vision, npc-speech, ...) to
+/// Topic used by other modules (npc-action, npc-vision, npc-speech,
+/// npc-translate, ...) to
 /// push UI-only updates that don't fit the existing `agent:*` topics (e.g.
 /// avatar position, current TTS playback line, a raw action log line). Not
 /// part of `npc_core::bus::topic` since it's consumed only by npc-server.
@@ -126,6 +127,27 @@ fn handle_ui(hub: &Hub, volume_limiter: &RateLimiter, msg_type: &str, payload: &
             hub.broadcast(&ServerMsg::TtsLine {
                 text,
                 translations: None,
+            });
+        }
+        "translation" => {
+            let str_field = |key: &str| {
+                payload
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string()
+            };
+            hub.broadcast(&ServerMsg::Translation {
+                id: str_field("id"),
+                source: str_field("source"),
+                original: str_field("original"),
+                lang: str_field("lang"),
+                text: str_field("text"),
+                reversed: payload.get("reversed").and_then(Value::as_bool).unwrap_or(false),
+                ts: payload
+                    .get("ts")
+                    .and_then(Value::as_i64)
+                    .unwrap_or_else(now_ms),
             });
         }
         _ => {}

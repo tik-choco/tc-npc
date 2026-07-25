@@ -14,6 +14,8 @@ pub struct ModuleFlags {
     pub vision: bool,
     pub action: bool,
     pub scheduler: bool,
+    /// `config.translation.mode` is not `off` — i.e. the 通訳 tab is live.
+    pub translation: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -43,6 +45,20 @@ pub enum ServerMsg {
     },
     #[serde(rename = "sense")]
     Sense { kind: String, text: String, ts: i64 },
+    /// One simultaneous-interpretation update from npc-translate. `lang` is
+    /// empty for the "heard this line, translations pending" frame and names
+    /// the target language for each finished translation; all frames for one
+    /// utterance share an `id` so the client groups them.
+    #[serde(rename = "translation")]
+    Translation {
+        id: String,
+        source: String,
+        original: String,
+        lang: String,
+        text: String,
+        reversed: bool,
+        ts: i64,
+    },
     #[serde(rename = "memory")]
     Memory { kind: String, text: String },
     #[serde(rename = "actionLog")]

@@ -95,7 +95,14 @@ async fn run_vision(ctx: ModuleCtx) -> anyhow::Result<()> {
         config.api.model.clone()
     };
 
-    let client = LlmClient::new(base_url, api_key);
+    let client = LlmClient::new(base_url, api_key)
+        .with_reasoning_effort(config.api.reasoning_effort.clone());
+
+    // The observation text is published on `agent:sense` and read back by
+    // npc-talk/npc-memory, so it follows `config.language` like every other
+    // LLM output. Resolved once — the prompt can't change without a restart.
+    let system_prompt =
+        npc_core::config::with_language_instruction(&config.vision.system_prompt, &config.language);
 
     // Single-flight loop: capture + analyze, then sleep `interval_seconds`
     // measured from the end of the previous cycle, until shutdown.
@@ -104,7 +111,16 @@ async fn run_vision(ctx: ModuleCtx) -> anyhow::Result<()> {
             break;
         }
 
-        run_cycle(&client, &model, &config.vision, &data_dir, &bus, &memory_context).await;
+        run_cycle(
+            &client,
+            &model,
+            &config.vision,
+            &system_prompt,
+            &data_dir,
+            &bus,
+            &memory_context,
+        )
+        .await;
 
         let interval_secs = config.vision.interval_seconds.max(0.1);
         tokio::select! {
@@ -120,6 +136,9 @@ async fn run_cycle(
     client: &LlmClient,
     model: &str,
     vision_config: &npc_core::config::VisionConfig,
+    // `vision_config.system_prompt` with the `config.language` instruction
+    // already applied.
+    system_prompt: &str,
     data_dir: &std::path::Path,
     bus: &npc_core::Bus,
     memory_context: &Arc<Mutex<Option<String>>>,
@@ -147,7 +166,7 @@ async fn run_cycle(
     match vlm::analyze_image(
         client,
         model,
-        &vision_config.system_prompt,
+        system_prompt,
         data_url,
         mem_ctx.as_deref(),
         bus,

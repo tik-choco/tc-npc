@@ -9,6 +9,7 @@ members = [
     "crates/npc-vision",
     "crates/npc-action",
     "crates/npc-scheduler",
+    "crates/npc-translate",
     "crates/npc-server",
 ]
 # crates/npc-mist (the optional `mist` feature's crate) is deliberately NOT
@@ -30,7 +31,12 @@ repository = "https://github.com/tik-choco/tc-npc"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "multipart", "stream"] }
+# `rustls-tls-native-roots` is deliberately enabled alongside the webpki
+# bundle: reqwest loads both stores additively, and self-hosted / on-prem
+# OpenAI-compatible endpoints are frequently fronted by a private CA that
+# only exists in the OS trust store. Without it rustls rejects those with a
+# bare `UnknownIssuer` even though every other tool on the machine works.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "rustls-tls-native-roots", "json", "multipart", "stream"] }
 futures-util = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -52,6 +58,7 @@ npc-speech = { path = "crates/npc-speech" }
 npc-vision = { path = "crates/npc-vision" }
 npc-action = { path = "crates/npc-action" }
 npc-scheduler = { path = "crates/npc-scheduler" }
+npc-translate = { path = "crates/npc-translate" }
 npc-server = { path = "crates/npc-server" }
 
 [package]
@@ -83,6 +90,7 @@ npc-speech.workspace = true
 npc-vision.workspace = true
 npc-action.workspace = true
 npc-scheduler.workspace = true
+npc-translate.workspace = true
 npc-server.workspace = true
 npc-mist = { path = "crates/npc-mist", optional = true }
 

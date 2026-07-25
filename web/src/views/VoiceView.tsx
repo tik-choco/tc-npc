@@ -2,6 +2,7 @@
 // ttsLine frames (spoken lines + any translations).
 import { Pause, Play, Volume2, Languages } from "lucide-preact";
 import type { TtsLineEntry } from "../hooks/useNpcSocket";
+import { useI18n } from "../hooks/useI18n";
 import "../styles/components.css";
 import "../styles/voice.css";
 
@@ -20,6 +21,7 @@ export interface VoiceViewProps {
 }
 
 export function VoiceView({ volume, ttsLines, onSuspend, onResume }: VoiceViewProps) {
+  const { t } = useI18n();
   const pct = Math.max(0, Math.min(1, volume)) * 100;
 
   return (
@@ -27,7 +29,7 @@ export function VoiceView({ volume, ttsLines, onSuspend, onResume }: VoiceViewPr
       <section class="voice-meter-card">
         <div class="voice-meter-header">
           <Volume2 size={16} />
-          <span>マイク音量</span>
+          <span>{t("voice.micVolume")}</span>
           <span class="voice-meter-value">{pct.toFixed(0)}%</span>
         </div>
         <div class="voice-meter-bar">
@@ -36,20 +38,20 @@ export function VoiceView({ volume, ttsLines, onSuspend, onResume }: VoiceViewPr
         <div class="voice-controls">
           <button type="button" class="btn btn-ghost" onClick={onResume}>
             <Play size={14} />
-            再開
+            {t("voice.resume")}
           </button>
           <button type="button" class="btn btn-ghost" onClick={onSuspend}>
             <Pause size={14} />
-            一時停止
+            {t("voice.pause")}
           </button>
         </div>
       </section>
 
       <section class="voice-log-section">
-        <h2 class="voice-log-title">発話ログ</h2>
+        <h2 class="voice-log-title">{t("voice.log.title")}</h2>
         {ttsLines.length === 0 && (
           <div class="empty-state">
-            <div class="empty-state-title">まだ発話がありません</div>
+            <div class="empty-state-title">{t("voice.log.empty")}</div>
           </div>
         )}
         <ul class="voice-log-list">

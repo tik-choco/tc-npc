@@ -11,7 +11,6 @@
 
 mod capture;
 mod device;
-mod osc;
 mod playback;
 mod resample;
 mod vad;
@@ -23,6 +22,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use npc_core::config::{ApiConfig, Config};
+use npc_core::osc;
 use npc_core::{Module, ModuleCtx};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc::UnboundedReceiver;

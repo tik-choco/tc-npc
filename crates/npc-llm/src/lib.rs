@@ -20,9 +20,17 @@ pub static STATIC_VOICES: &[&str] = &[
     "alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer", "verse",
 ];
 
+/// Environment variable holding a path to an extra PEM bundle of CA
+/// certificates to trust, for endpoints behind a private CA that isn't
+/// installed in the OS trust store.
+pub const EXTRA_CA_ENV: &str = "TC_NPC_CA_BUNDLE";
+/// Environment variable that, when set to a truthy value, disables TLS
+/// certificate verification entirely. Escape hatch of last resort.
+pub const INSECURE_TLS_ENV: &str = "TC_NPC_INSECURE_TLS";
+
 #[derive(Debug, thiserror::Error)]
 pub enum LlmError {
-    #[error("http request failed: {0}")]
+    #[error("http request failed: {}", describe_reqwest_error(.0))]
     Request(#[from] reqwest::Error),
     #[error("api error ({status}): {body}")]
     Api { status: u16, body: String },
@@ -32,6 +40,12 @@ pub enum LlmError {
 
 pub type Result<T> = std::result::Result<T, LlmError>;
 
+/// `reasoning_effort` sent on chat requests that don't pick one themselves.
+/// Per tc-docs/drafts/llm-settings-common-v1.md §2.3 the parameter is always
+/// on the wire — `"none"` is an explicit value the caller chose, not the
+/// absence of one.
+pub const DEFAULT_REASONING_EFFORT: &str = "none";
+
 /// Client for an OpenAI-compatible API.
 pub struct LlmClient {
     http: reqwest::Client,
@@ -39,28 +53,39 @@ pub struct LlmClient {
     tts_http: reqwest::Client,
     base_url: String,
     api_key: String,
+    /// Filled into every `ChatRequest` that leaves `reasoning_effort` unset.
+    reasoning_effort: String,
 }
 
 impl LlmClient {
     /// `base_url` is normalized: trailing `/` trimmed, then `/v1` appended
     /// unless it's already present. `api_key` may be empty, in which case no
-    /// `Authorization` header is sent.
+    /// `Authorization` header is sent. Chat requests default to
+    /// `DEFAULT_REASONING_EFFORT`; see [`LlmClient::with_reasoning_effort`].
     pub fn new(base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
-        let http = reqwest::Client::builder()
-            .timeout(DEFAULT_TIMEOUT)
-            .build()
-            .expect("failed to build reqwest client");
-        let tts_http = reqwest::Client::builder()
-            .timeout(TTS_TIMEOUT)
-            .build()
-            .expect("failed to build reqwest client");
+        let http = build_client(DEFAULT_TIMEOUT);
+        let tts_http = build_client(TTS_TIMEOUT);
 
         Self {
             http,
             tts_http,
             base_url: normalize_base_url(&base_url.into()),
             api_key: api_key.into(),
+            reasoning_effort: DEFAULT_REASONING_EFFORT.to_string(),
         }
+    }
+
+    /// Override the `reasoning_effort` this client sends. An empty string
+    /// means "unconfigured" and falls back to `DEFAULT_REASONING_EFFORT` —
+    /// there is no way to omit the parameter.
+    pub fn with_reasoning_effort(mut self, effort: impl Into<String>) -> Self {
+        let effort = effort.into();
+        self.reasoning_effort = if effort.is_empty() {
+            DEFAULT_REASONING_EFFORT.to_string()
+        } else {
+            effort
+        };
+        self
     }
 
     fn url(&self, path: &str) -> String {
@@ -72,6 +97,15 @@ impl LlmClient {
             builder
         } else {
             builder.bearer_auth(&self.api_key)
+        }
+    }
+
+    /// A request that already carries an effort keeps it; everything else
+    /// gets the client's configured one, so no chat call goes out without
+    /// the parameter.
+    fn apply_reasoning_effort(&self, req: &mut ChatRequest) {
+        if req.reasoning_effort.is_none() {
+            req.reasoning_effort = Some(self.reasoning_effort.clone());
         }
     }
 
@@ -94,6 +128,7 @@ impl LlmClient {
     /// Non-streaming chat completion (`POST /chat/completions`, `stream: false`).
     pub async fn chat(&self, mut req: ChatRequest) -> Result<ChatResponse> {
         req.stream = Some(false);
+        self.apply_reasoning_effort(&mut req);
         let resp = self
             .auth(self.http.post(self.url("/chat/completions")).json(&req))
             .send()
@@ -108,6 +143,7 @@ impl LlmClient {
         mut req: ChatRequest,
     ) -> Result<impl Stream<Item = Result<String>>> {
         req.stream = Some(true);
+        self.apply_reasoning_effort(&mut req);
         let resp = self
             .auth(self.http.post(self.url("/chat/completions")).json(&req))
             .send()
@@ -259,6 +295,75 @@ impl LlmClient {
     }
 }
 
+/// Builds an HTTP client that trusts, in addition to the bundled webpki roots
+/// and the OS trust store (see the `rustls-tls-native-roots` note in the root
+/// `Cargo.toml`), any CA certificates in the PEM bundle named by
+/// [`EXTRA_CA_ENV`]. [`INSECURE_TLS_ENV`] disables verification outright.
+///
+/// A bad bundle path or an unparseable PEM is logged and skipped rather than
+/// fatal: losing one extra CA shouldn't take down endpoints that verify fine
+/// against the normal roots.
+fn build_client(timeout: Duration) -> reqwest::Client {
+    let mut builder = reqwest::Client::builder().timeout(timeout);
+
+    if let Ok(path) = std::env::var(EXTRA_CA_ENV) {
+        if !path.trim().is_empty() {
+            match std::fs::read(&path) {
+                Ok(pem) => match reqwest::Certificate::from_pem_bundle(&pem) {
+                    Ok(certs) => {
+                        for cert in certs {
+                            builder = builder.add_root_certificate(cert);
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!("{EXTRA_CA_ENV}={path}: not a valid PEM bundle: {err}")
+                    }
+                },
+                Err(err) => tracing::warn!("{EXTRA_CA_ENV}={path}: cannot read: {err}"),
+            }
+        }
+    }
+
+    if is_truthy_env(INSECURE_TLS_ENV) {
+        tracing::warn!("{INSECURE_TLS_ENV} is set: TLS certificate verification is DISABLED");
+        builder = builder.danger_accept_invalid_certs(true);
+    }
+
+    builder.build().expect("failed to build reqwest client")
+}
+
+fn is_truthy_env(key: &str) -> bool {
+    match std::env::var(key) {
+        Ok(v) => matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"),
+        Err(_) => false,
+    }
+}
+
+/// `reqwest::Error`'s own `Display` stops at "error sending request for url
+/// (…)" and leaves the actual cause — TLS handshake failure, DNS, connection
+/// refused — in the `source()` chain, which is exactly the part a user needs
+/// when a connection test fails. Flatten the whole chain into the message.
+fn describe_reqwest_error(err: &reqwest::Error) -> String {
+    let mut out = err.to_string();
+    let mut source = std::error::Error::source(err);
+    while let Some(cause) = source {
+        let text = cause.to_string();
+        // Skip links that just repeat what we already printed.
+        if !out.ends_with(&text) {
+            out.push_str(": ");
+            out.push_str(&text);
+        }
+        source = cause.source();
+    }
+    if out.contains("UnknownIssuer") {
+        out.push_str(&format!(
+            " (hint: the endpoint's certificate is signed by a CA that isn't trusted. \
+             Install its root CA in the OS trust store, or point {EXTRA_CA_ENV} at a PEM bundle containing it.)"
+        ));
+    }
+    out
+}
+
 fn normalize_base_url(base_url: &str) -> String {
     let trimmed = base_url.trim_end_matches('/');
     if trimmed.ends_with("/v1") {
@@ -315,6 +420,31 @@ mod tests {
             normalize_base_url("https://api.openai.com/"),
             "https://api.openai.com/v1"
         );
+    }
+
+    #[test]
+    fn fills_in_reasoning_effort() {
+        let default_client = LlmClient::new("http://localhost:11434/v1", "");
+        let mut req = ChatRequest::new("m", vec![]);
+        default_client.apply_reasoning_effort(&mut req);
+        assert_eq!(req.reasoning_effort.as_deref(), Some("none"));
+
+        // Empty config value means "unconfigured", not "omit".
+        let empty = LlmClient::new("http://localhost:11434/v1", "").with_reasoning_effort("");
+        let mut req = ChatRequest::new("m", vec![]);
+        empty.apply_reasoning_effort(&mut req);
+        assert_eq!(req.reasoning_effort.as_deref(), Some("none"));
+
+        let high = LlmClient::new("http://localhost:11434/v1", "").with_reasoning_effort("high");
+        let mut req = ChatRequest::new("m", vec![]);
+        high.apply_reasoning_effort(&mut req);
+        assert_eq!(req.reasoning_effort.as_deref(), Some("high"));
+
+        // A request that picked its own effort keeps it.
+        let mut req = ChatRequest::new("m", vec![]);
+        req.reasoning_effort = Some("low".to_string());
+        high.apply_reasoning_effort(&mut req);
+        assert_eq!(req.reasoning_effort.as_deref(), Some("low"));
     }
 
     #[test]

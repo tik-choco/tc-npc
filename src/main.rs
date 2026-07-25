@@ -103,6 +103,9 @@ async fn run(config_path: Option<PathBuf>) -> anyhow::Result<()> {
     // from the web UI live (via the `npc:config` bus topic), so announcements
     // added at runtime take effect without a restart.
     spawn_module(&mut handles, &ctx, "npc-scheduler", npc_scheduler::module(&ctx));
+    // Same deal for the interpreter: it idles when `translation.mode` is
+    // `off` and picks up a mode/language change from the web UI live.
+    spawn_module(&mut handles, &ctx, "npc-translate", npc_translate::module(&ctx));
     #[cfg(feature = "mist")]
     if config.mist.enabled {
         spawn_module(&mut handles, &ctx, "npc-mist", npc_mist::module(&ctx));
@@ -157,6 +160,7 @@ fn print_banner(config: &Config, active: Option<&npc_core::Character>) {
         on_off(config.scheduler.enabled),
         on_off(config.mist.enabled),
     );
+    println!("  translation: {}", config.translation.mode());
     println!("  server: http://{}", config.server.addr);
     match active {
         Some(c) => println!("  character: {} ({})", c.sheet.name, c.id),

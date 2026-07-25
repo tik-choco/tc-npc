@@ -48,7 +48,11 @@ const ACTION_DESCRIPTIONS: &[&str] = &[
 /// line are appended fresh every turn by [`dynamic_system_prompt`] (porting
 /// `updateSystemPrompt`), so map data edited from the web UI at runtime is
 /// reflected in NL action chats without a restart.
-pub fn build_static_system_prompt() -> String {
+///
+/// `language` is `config.language`: it only constrains the `message` field
+/// (what the user reads), never the action names or JSON keys, which are
+/// fixed identifiers the dispatcher matches on.
+pub fn build_static_system_prompt(language: &str) -> String {
     let mut s = String::new();
     s.push_str(
         "あなたはVRChat内のアバターを制御するアシスタントです。\n\
@@ -63,6 +67,11 @@ pub fn build_static_system_prompt() -> String {
     for line in ACTION_DESCRIPTIONS {
         s.push_str("- ");
         s.push_str(line);
+        s.push('\n');
+    }
+    if let Some(instruction) = npc_core::config::language_instruction(language) {
+        s.push_str("\nThe \"message\" field must follow this rule (action names and JSON keys stay as written above): ");
+        s.push_str(instruction);
         s.push('\n');
     }
     s
@@ -159,9 +168,6 @@ async fn do_chat_with_action(state: &Arc<ActionState>, query: &str) -> anyhow::R
 
     let mut req = ChatRequest::new(state.config.api.model.clone(), history.clone());
     req.response_format = Some(ResponseFormat::json_object());
-    if !state.config.api.reasoning_effort.is_empty() {
-        req.reasoning_effort = Some(state.config.api.reasoning_effort.clone());
-    }
 
     let resp = state
         .llm
@@ -177,4 +183,28 @@ async fn do_chat_with_action(state: &Arc<ActionState>, query: &str) -> anyhow::R
     // actions, matching Go's `ChatWithAction` fallback on unmarshal error.
     Ok(serde_json::from_str::<ActionResponse>(&content)
         .unwrap_or(ActionResponse { message: content, actions: Vec::new() }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn static_prompt_omits_language_rule_when_auto() {
+        let prompt = build_static_system_prompt("auto");
+        assert!(prompt.contains("利用可能なアクション:"));
+        assert!(!prompt.contains("\"message\" field"));
+    }
+
+    #[test]
+    fn static_prompt_constrains_only_the_message_field() {
+        let prompt = build_static_system_prompt("zh");
+        // The action reference must survive untranslated — the dispatcher
+        // matches on these names verbatim.
+        for line in ACTION_DESCRIPTIONS {
+            assert!(prompt.contains(line), "missing action line: {line}");
+        }
+        assert!(prompt.contains("Simplified Chinese"));
+        assert!(prompt.contains("action names and JSON keys stay as written"));
+    }
 }

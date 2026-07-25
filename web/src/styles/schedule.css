@@ -30,22 +30,6 @@
   color: var(--text);
 }
 
-.schedule-save-chip {
-  color: var(--text-muted);
-}
-
-.schedule-save-chip--saved {
-  color: var(--success);
-  background: var(--success-soft);
-  border-color: transparent;
-}
-
-.schedule-save-chip--error {
-  color: var(--danger-text);
-  background: var(--danger-soft);
-  border-color: var(--danger-border);
-}
-
 .schedule-enabled-toggle {
   display: flex;
   align-items: center;
@@ -56,16 +40,62 @@
   cursor: pointer;
 }
 
-.schedule-enabled-toggle input {
-  width: 16px;
-  height: 16px;
-  accent-color: var(--primary);
-  cursor: pointer;
-}
-
 .schedule-hint {
   margin: calc(var(--space-3) * -1) 0 0;
   font-size: 0.78rem;
+  color: var(--text-subtle);
+}
+
+/* Soonest upcoming announcement across the whole list. */
+.schedule-next-up {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--primary);
+  border-radius: var(--radius-l);
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+
+.schedule-next-up svg {
+  align-self: center;
+  color: var(--primary);
+  flex-shrink: 0;
+}
+
+.schedule-next-up--disabled {
+  border-left-color: var(--border);
+  opacity: 0.7;
+}
+
+.schedule-next-up--disabled svg {
+  color: var(--text-subtle);
+}
+
+.schedule-next-up-label {
+  font-weight: 600;
+  color: var(--text-subtle);
+}
+
+.schedule-next-up-countdown {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.schedule-next-up-at {
+  font-variant-numeric: tabular-nums;
+}
+
+.schedule-next-up-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--text-subtle);
 }
 
@@ -84,6 +114,70 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-l);
   box-shadow: var(--shadow-1);
+}
+
+/* Countdown + test-run feedback line above each row's fields. */
+.schedule-row-status {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.schedule-countdown {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: 0.76rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+
+.schedule-countdown--imminent {
+  color: var(--danger-text);
+}
+
+.schedule-countdown--soon {
+  color: var(--primary);
+}
+
+.schedule-countdown--disabled,
+.schedule-countdown--invalid {
+  color: var(--text-subtle);
+}
+
+.schedule-countdown--invalid {
+  color: var(--danger-text);
+}
+
+.schedule-countdown-at,
+.schedule-countdown-note {
+  font-weight: 500;
+  color: var(--text-subtle);
+}
+
+.schedule-test-result {
+  font-size: 0.74rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.schedule-test-result--ok {
+  color: var(--success);
+}
+
+.schedule-test-result--warn {
+  color: var(--primary);
+}
+
+.schedule-test-result--error {
+  color: var(--danger-text);
+}
+
+.schedule-test-btn {
+  flex-shrink: 0;
+  gap: var(--space-1);
 }
 
 .schedule-row-main {
@@ -145,7 +239,6 @@
 
 .schedule-volume-row input[type="range"] {
   flex: 1;
-  accent-color: var(--primary);
 }
 
 .schedule-volume-value {
@@ -171,6 +264,81 @@
   }
 
   .schedule-time-field {
+    width: 100%;
+  }
+}
+
+/* --- Actions ------------------------------------------------------------- */
+/* Extra bus messages fired alongside (or instead of) the announcement text —
+   the port of the Go scheduler's `redis_actions`. */
+
+.schedule-row-actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-top: var(--space-3);
+  border-top: 1px dashed var(--border);
+}
+
+.schedule-actions-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--text-subtle);
+}
+
+.schedule-actions-empty {
+  font-size: 0.76rem;
+  color: var(--text-muted);
+}
+
+.schedule-action {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.schedule-action-kind {
+  flex-shrink: 0;
+  width: 150px;
+}
+
+.schedule-action-fields {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 1;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.schedule-action-fields input {
+  flex: 1;
+  min-width: 120px;
+}
+
+.schedule-action-fields input.schedule-action-narrow {
+  flex: 0 1 150px;
+  min-width: 100px;
+}
+
+.schedule-action-note {
+  font-size: 0.76rem;
+  color: var(--text-muted);
+}
+
+.schedule-action-error {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--danger-text);
+}
+
+@media (max-width: 560px) {
+  .schedule-action {
+    flex-wrap: wrap;
+  }
+
+  .schedule-action-kind {
     width: 100%;
   }
 }

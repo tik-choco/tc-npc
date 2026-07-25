@@ -3,6 +3,13 @@
 //! respects shutdown. Ported from Go `agent-talk`'s `main.go` +
 //! `HandleRedisMessage`, plus a suspend/resume feature that has no Go
 //! equivalent (see task spec).
+//!
+//! One more thing can silence the engine: `config.translation.mode ==
+//! "interpret"` (npc-translate's simultaneous-interpretation mode) means
+//! heard speech is to be translated, not answered — so speech input is
+//! dropped for as long as that mode is on. It's tracked from `npc:config`
+//! updates rather than read once at startup so the 通訳 tab can switch modes
+//! without a restart.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,38 +34,36 @@ impl Module for TalkModule {
     }
 
     async fn run(self: Box<Self>, ctx: ModuleCtx) -> anyhow::Result<()> {
-        let llm = npc_llm::LlmClient::new(ctx.config.api.base_url.clone(), ctx.config.api.api_key.clone());
+        let llm = npc_llm::LlmClient::new(ctx.config.api.base_url.clone(), ctx.config.api.api_key.clone())
+            .with_reasoning_effort(ctx.config.api.reasoning_effort.clone());
 
         let active_character = npc_core::active_character(&ctx.data_dir, &ctx.config)
             .ok()
             .flatten();
         let persona = active_character.map(|c| npc_core::persona_prompt(&c.sheet));
 
-        let reasoning_effort = if ctx.config.api.reasoning_effort.is_empty() {
-            None
-        } else {
-            Some(ctx.config.api.reasoning_effort.clone())
-        };
-
         let engine = Arc::new(ChatEngine::new(
             llm,
             ctx.config.api.model.clone(),
-            reasoning_effort,
             ctx.config.talk.prompts.clone(),
             ctx.config.talk.filter_prompt_name.clone(),
             ctx.config.talk.history_size as usize,
             ToolRegistry::new(),
             persona,
+            &ctx.config.language,
             ctx.bus.clone(),
         ));
 
         let mut rx = ctx.bus.subscribe();
-        let mut suspended = false;
-        let mut resume_deadline: Option<Instant> = None;
+        let mut state = TalkState {
+            suspended: false,
+            resume_deadline: None,
+            interpret_mode: ctx.config.translation.suppresses_chat(),
+        };
 
         loop {
             let sleep = async {
-                match resume_deadline {
+                match state.resume_deadline {
                     Some(deadline) => tokio::time::sleep_until(deadline).await,
                     None => std::future::pending::<()>().await,
                 }
@@ -69,15 +74,15 @@ impl Module for TalkModule {
                     tracing::info!("npc-talk: shutdown requested, stopping");
                     break;
                 }
-                _ = sleep, if resume_deadline.is_some() => {
+                _ = sleep, if state.resume_deadline.is_some() => {
                     tracing::debug!("npc-talk: auto-resuming after suspend timeout");
-                    suspended = false;
-                    resume_deadline = None;
+                    state.suspended = false;
+                    state.resume_deadline = None;
                 }
                 received = rx.recv() => {
                     match received {
                         Ok(bus_msg) => {
-                            handle_bus_message(&engine, &mut suspended, &mut resume_deadline, bus_msg);
+                            handle_bus_message(&engine, &mut state, bus_msg);
                         }
                         Err(RecvError::Lagged(skipped)) => {
                             tracing::warn!(skipped, "npc-talk: bus receiver lagged, messages were dropped");
@@ -95,12 +100,19 @@ impl Module for TalkModule {
     }
 }
 
-fn handle_bus_message(
-    engine: &Arc<ChatEngine>,
-    suspended: &mut bool,
-    resume_deadline: &mut Option<Instant>,
-    bus_msg: BusMessage,
-) {
+/// Everything that can gate a chat turn, kept together so the bus handler
+/// takes one `&mut` instead of a growing parameter list.
+struct TalkState {
+    /// An `agent:interrupt` `suspend` is in effect.
+    suspended: bool,
+    /// When that suspend auto-expires (see [`SUSPEND_TIMEOUT`]).
+    resume_deadline: Option<Instant>,
+    /// `config.translation.mode == "interpret"` — heard speech belongs to
+    /// npc-translate, not to a chat turn.
+    interpret_mode: bool,
+}
+
+fn handle_bus_message(engine: &Arc<ChatEngine>, state: &mut TalkState, bus_msg: BusMessage) {
     match bus_msg.topic.as_str() {
         topic::MEM => match bus_msg.env.r#type.as_str() {
             msg::SHORT_TERM_MEMORY => {
@@ -126,7 +138,9 @@ fn handle_bus_message(
         topic::SENSE => {
             if bus_msg.env.r#type == msg::SPEECH {
                 if let Some(content) = extract_content(&bus_msg.env.payload) {
-                    if *suspended {
+                    if state.interpret_mode {
+                        tracing::debug!(content = %content, "npc-talk: interpretation mode, leaving speech to npc-translate");
+                    } else if state.suspended {
                         tracing::debug!(content = %content, "npc-talk: suspended, dropping speech input");
                     } else {
                         tracing::info!(content = %content, "npc-talk: received speech input");
@@ -142,17 +156,37 @@ fn handle_bus_message(
         }
         topic::INTERRUPT => match bus_msg.env.r#type.as_str() {
             msg::SUSPEND => {
-                *suspended = true;
-                *resume_deadline = Some(Instant::now() + SUSPEND_TIMEOUT);
+                state.suspended = true;
+                state.resume_deadline = Some(Instant::now() + SUSPEND_TIMEOUT);
                 tracing::info!("npc-talk: suspended (auto-resume in 600s)");
             }
             msg::RESUME => {
-                *suspended = false;
-                *resume_deadline = None;
+                state.suspended = false;
+                state.resume_deadline = None;
                 tracing::info!("npc-talk: resumed");
             }
             _ => {}
         },
+        topic::CONFIG => {
+            if bus_msg.env.r#type == msg::CONFIG_UPDATED {
+                match serde_json::from_value::<npc_core::Config>(bus_msg.env.payload) {
+                    Ok(new_config) => {
+                        let interpret_mode = new_config.translation.suppresses_chat();
+                        if interpret_mode != state.interpret_mode {
+                            tracing::info!(
+                                interpret_mode,
+                                "npc-talk: interpretation mode changed, speech input {}",
+                                if interpret_mode { "now goes to npc-translate" } else { "answered again" }
+                            );
+                        }
+                        state.interpret_mode = interpret_mode;
+                    }
+                    Err(err) => {
+                        tracing::warn!(error = %err, "npc-talk: failed to deserialize updated config, keeping current mode");
+                    }
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -164,4 +198,100 @@ fn extract_content(payload: &serde_json::Value) -> Option<String> {
         return Some(s.to_string());
     }
     payload.get("content").and_then(|v| v.as_str()).map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use npc_core::{Bus, Config, Envelope};
+
+    fn engine() -> Arc<ChatEngine> {
+        Arc::new(ChatEngine::new(
+            npc_llm::LlmClient::new("http://localhost:0/v1", ""),
+            "test-model".to_string(),
+            Vec::new(),
+            String::new(),
+            10,
+            ToolRegistry::new(),
+            None,
+            "auto",
+            Bus::new(),
+        ))
+    }
+
+    fn config_updated(config: &Config) -> BusMessage {
+        BusMessage {
+            topic: topic::CONFIG.to_string(),
+            env: Envelope {
+                r#type: msg::CONFIG_UPDATED.to_string(),
+                payload: serde_json::to_value(config).unwrap(),
+            },
+        }
+    }
+
+    fn state() -> TalkState {
+        TalkState {
+            suspended: false,
+            resume_deadline: None,
+            interpret_mode: false,
+        }
+    }
+
+    #[test]
+    fn config_update_toggles_interpretation_mode_both_ways() {
+        let engine = engine();
+        let mut state = state();
+
+        let mut config = Config::default();
+        config.translation.mode = "interpret".to_string();
+        handle_bus_message(&engine, &mut state, config_updated(&config));
+        assert!(state.interpret_mode);
+
+        // `assist` keeps npc-talk answering — only `interpret` silences it.
+        config.translation.mode = "assist".to_string();
+        handle_bus_message(&engine, &mut state, config_updated(&config));
+        assert!(!state.interpret_mode);
+    }
+
+    #[test]
+    fn broken_config_payload_keeps_the_current_mode() {
+        let engine = engine();
+        let mut state = state();
+        state.interpret_mode = true;
+
+        handle_bus_message(
+            &engine,
+            &mut state,
+            BusMessage {
+                topic: topic::CONFIG.to_string(),
+                env: Envelope {
+                    r#type: msg::CONFIG_UPDATED.to_string(),
+                    payload: serde_json::json!("not a config"),
+                },
+            },
+        );
+        assert!(state.interpret_mode);
+    }
+
+    #[test]
+    fn suspend_and_resume_still_gate_chat_turns() {
+        let engine = engine();
+        let mut state = state();
+
+        let interrupt = |kind: &str| BusMessage {
+            topic: topic::INTERRUPT.to_string(),
+            env: Envelope {
+                r#type: kind.to_string(),
+                payload: serde_json::json!({}),
+            },
+        };
+
+        handle_bus_message(&engine, &mut state, interrupt(msg::SUSPEND));
+        assert!(state.suspended);
+        assert!(state.resume_deadline.is_some());
+
+        handle_bus_message(&engine, &mut state, interrupt(msg::RESUME));
+        assert!(!state.suspended);
+        assert!(state.resume_deadline.is_none());
+    }
 }

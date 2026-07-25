@@ -130,6 +130,84 @@ fn restore_masked_secrets(incoming: &mut Value, current: &Value) {
     }
 }
 
+/// Body for `POST /api/scheduler/test` — the web UI's "test run" button,
+/// mirroring the Go TUI's `[t] Test Playback`.
+#[derive(serde::Deserialize)]
+struct SchedulerTestRequest {
+    /// Index into the saved `config.scheduler.announcements`.
+    index: Option<usize>,
+    /// Overrides for the saved entry. The UI sends the row exactly as it is
+    /// on screen so a test fires what the user is looking at even if the
+    /// debounced autosave hasn't landed yet.
+    text: Option<String>,
+    chime_file: Option<String>,
+    /// Same idea for the row's `actions` list. Omitted means "use whatever is
+    /// saved"; an empty array means "this row has no actions" — hence
+    /// `Option<Vec<_>>` rather than a defaulted `Vec`.
+    actions: Option<Vec<npc_core::config::ScheduledAction>>,
+}
+
+/// Resolve a test request against the saved config: start from the indexed
+/// announcement (if any) and apply the request's overrides on top.
+fn resolve_test_announcement(
+    req: &SchedulerTestRequest,
+    config: &npc_core::Config,
+) -> Result<npc_core::config::AnnouncementConfig, String> {
+    let mut ann = match req.index {
+        Some(index) => config
+            .scheduler
+            .announcements
+            .get(index)
+            .cloned()
+            .ok_or_else(|| format!("announcement index {index} out of range"))?,
+        None if req.text.is_some() || req.actions.is_some() => npc_core::config::AnnouncementConfig {
+            time: String::new(),
+            text: String::new(),
+            chime_file: String::new(),
+            volume: 1.0,
+            actions: Vec::new(),
+        },
+        None => return Err("either `index`, `text` or `actions` is required".to_string()),
+    };
+
+    if let Some(text) = &req.text {
+        ann.text = text.clone();
+    }
+    if let Some(chime_file) = &req.chime_file {
+        ann.chime_file = chime_file.clone();
+    }
+    if let Some(actions) = &req.actions {
+        ann.actions = actions.clone();
+    }
+    Ok(ann)
+}
+
+/// Fire an announcement immediately, regardless of `scheduler.enabled` (the
+/// point of a test run is to hear it while the schedule itself is still off).
+/// `fired: false` means the entry is a no-op — an announcement with neither
+/// text nor actions publishes nothing on the real schedule either. `spoke` /
+/// `actions` break that down so the UI can say what actually happened.
+pub async fn api_scheduler_test(State(state): State<AppState>, body: String) -> Response {
+    let req: SchedulerTestRequest = match serde_json::from_str(&body) {
+        Ok(r) => r,
+        Err(err) => return error_response(StatusCode::BAD_REQUEST, format!("invalid JSON: {err}")),
+    };
+
+    let ann = match resolve_test_announcement(&req, &state.current_config()) {
+        Ok(a) => a,
+        Err(err) => return error_response(StatusCode::BAD_REQUEST, err),
+    };
+
+    let outcome = npc_scheduler::fire_announcement(&state.ctx.bus, &ann);
+    Json(json!({
+        "ok": true,
+        "fired": outcome.fired(),
+        "spoke": outcome.spoke,
+        "actions": outcome.actions,
+    }))
+    .into_response()
+}
+
 /// Body shared by `POST /api/llm/models` and `POST /api/llm/voices`.
 #[derive(serde::Deserialize)]
 struct LlmProbeRequest {
@@ -313,6 +391,101 @@ mod tests {
     fn resolve_probe_api_key_passes_through_typed_key() {
         let config = npc_core::Config::default();
         assert_eq!(resolve_probe_api_key("api", "sk-typed-just-now", &config), "sk-typed-just-now");
+    }
+
+    fn config_with_announcement() -> npc_core::Config {
+        let mut config = npc_core::Config::default();
+        config.scheduler.announcements = vec![npc_core::config::AnnouncementConfig {
+            time: "09:00".to_string(),
+            text: "saved text".to_string(),
+            chime_file: "saved.wav".to_string(),
+            volume: 1.0,
+            actions: vec![npc_core::config::ScheduledAction::Resume],
+        }];
+        config
+    }
+
+    fn test_request(index: Option<usize>, text: Option<&str>) -> SchedulerTestRequest {
+        SchedulerTestRequest {
+            index,
+            text: text.map(str::to_string),
+            chime_file: None,
+            actions: None,
+        }
+    }
+
+    #[test]
+    fn resolve_test_announcement_uses_saved_entry_by_index() {
+        let ann = resolve_test_announcement(&test_request(Some(0), None), &config_with_announcement()).unwrap();
+        assert_eq!(ann.text, "saved text");
+        assert_eq!(ann.chime_file, "saved.wav");
+        assert_eq!(ann.actions, vec![npc_core::config::ScheduledAction::Resume]);
+    }
+
+    #[test]
+    fn resolve_test_announcement_applies_unsaved_overrides() {
+        let req = SchedulerTestRequest {
+            index: Some(0),
+            text: Some("just typed".to_string()),
+            chime_file: Some(String::new()),
+            actions: Some(vec![npc_core::config::ScheduledAction::Command {
+                text: "go home".to_string(),
+            }]),
+        };
+        let ann = resolve_test_announcement(&req, &config_with_announcement()).unwrap();
+        assert_eq!(ann.text, "just typed");
+        assert_eq!(ann.chime_file, "");
+        assert_eq!(
+            ann.actions,
+            vec![npc_core::config::ScheduledAction::Command {
+                text: "go home".to_string()
+            }]
+        );
+    }
+
+    /// An empty `actions` array is an override to "no actions", not "use the
+    /// saved ones" — otherwise deleting the last action row couldn't be
+    /// tested before the autosave lands.
+    #[test]
+    fn resolve_test_announcement_treats_empty_actions_as_an_override() {
+        let req = SchedulerTestRequest {
+            index: Some(0),
+            text: None,
+            chime_file: None,
+            actions: Some(Vec::new()),
+        };
+        let ann = resolve_test_announcement(&req, &config_with_announcement()).unwrap();
+        assert!(ann.actions.is_empty());
+    }
+
+    #[test]
+    fn resolve_test_announcement_rejects_out_of_range_index() {
+        assert!(resolve_test_announcement(&test_request(Some(3), None), &config_with_announcement()).is_err());
+    }
+
+    #[test]
+    fn resolve_test_announcement_accepts_text_without_index() {
+        let ann =
+            resolve_test_announcement(&test_request(None, Some("ad hoc")), &npc_core::Config::default()).unwrap();
+        assert_eq!(ann.text, "ad hoc");
+    }
+
+    #[test]
+    fn resolve_test_announcement_accepts_actions_without_index_or_text() {
+        let req = SchedulerTestRequest {
+            index: None,
+            text: None,
+            chime_file: None,
+            actions: Some(vec![npc_core::config::ScheduledAction::Suspend]),
+        };
+        let ann = resolve_test_announcement(&req, &npc_core::Config::default()).unwrap();
+        assert!(ann.text.is_empty());
+        assert_eq!(ann.actions, vec![npc_core::config::ScheduledAction::Suspend]);
+    }
+
+    #[test]
+    fn resolve_test_announcement_requires_index_text_or_actions() {
+        assert!(resolve_test_announcement(&test_request(None, None), &npc_core::Config::default()).is_err());
     }
 
     #[test]

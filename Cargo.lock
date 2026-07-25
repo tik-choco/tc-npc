@@ -1727,6 +1727,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "rustls",
+ "rustls-native-certs",
  "tokio",
  "tokio-rustls",
  "tower-service",
@@ -2477,6 +2478,7 @@ dependencies = [
  "chrono",
  "dirs",
  "dotenvy",
+ "rosc",
  "serde",
  "serde_json",
  "thiserror 2.0.19",
@@ -2559,6 +2561,7 @@ dependencies = [
  "mime_guess",
  "npc-core",
  "npc-llm",
+ "npc-scheduler",
  "open",
  "rust-embed",
  "serde",
@@ -2579,7 +2582,6 @@ dependencies = [
  "hound",
  "npc-core",
  "npc-llm",
- "rosc",
  "serde",
  "serde_json",
  "tokio",
@@ -2596,6 +2598,22 @@ dependencies = [
  "npc-core",
  "npc-llm",
  "regex",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "npc-translate"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "futures-util",
+ "npc-core",
+ "npc-llm",
  "serde",
  "serde_json",
  "tokio",
@@ -3588,6 +3606,7 @@ dependencies = [
  "pin-project-lite",
  "quinn",
  "rustls",
+ "rustls-native-certs",
  "rustls-pki-types",
  "serde",
  "serde_json",
@@ -3763,6 +3782,18 @@ dependencies = [
  "rustls-webpki",
  "subtle",
  "zeroize",
+]
+
+[[package]]
+name = "rustls-native-certs"
+version = "0.8.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dab5152771c58876a2146916e53e35057e1a4dfa2b9df0f0305b07f611fdea4d"
+dependencies = [
+ "openssl-probe",
+ "rustls-pki-types",
+ "schannel",
+ "security-framework",
 ]
 
 [[package]]
@@ -4255,6 +4286,7 @@ dependencies = [
  "npc-server",
  "npc-speech",
  "npc-talk",
+ "npc-translate",
  "npc-vision",
  "serde",
  "serde_json",

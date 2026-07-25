@@ -1,0 +1,156 @@
+/* 通訳 view — simultaneous interpretation settings + live transcript. */
+
+.interpret-view {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  max-width: 760px;
+  margin: 0 auto;
+  padding: var(--space-5);
+}
+
+.interpret-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.interpret-header-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--primary);
+}
+
+.interpret-header-title h2 {
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.interpret-hint {
+  font-size: 0.78rem;
+  color: var(--text-subtle);
+  line-height: 1.6;
+}
+
+.interpret-settings {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.interpret-lang-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: var(--space-3);
+}
+
+/* --- Transcript ---------------------------------------------------------- */
+
+.interpret-log {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-height: 0;
+}
+
+.interpret-log-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.interpret-log-head h3 {
+  font-size: 0.86rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.interpret-off-badge {
+  color: var(--text-subtle);
+}
+
+.interpret-transcript {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  max-height: 46vh;
+  overflow-y: auto;
+  padding: var(--space-3);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-l);
+}
+
+.interpret-empty {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  text-align: center;
+  padding: var(--space-4) 0;
+}
+
+.interpret-entry {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  border-left: 3px solid var(--border);
+  border-radius: var(--radius-m);
+  background: var(--surface-2);
+}
+
+.interpret-entry--user {
+  border-left-color: var(--primary);
+}
+
+.interpret-entry-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 0.72rem;
+  color: var(--text-subtle);
+}
+
+.interpret-entry-source {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-weight: 600;
+}
+
+.interpret-entry-time {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+
+.interpret-original {
+  font-size: 0.86rem;
+  color: var(--text);
+  line-height: 1.5;
+}
+
+.interpret-translated {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  font-size: 0.86rem;
+  font-weight: 600;
+  color: var(--primary);
+  line-height: 1.5;
+}
+
+.interpret-lang {
+  flex-shrink: 0;
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: var(--text-subtle);
+}
+
+.interpret-pending {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}

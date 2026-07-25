@@ -1,10 +1,11 @@
 {
+  "language": "auto",
   "api": {
     "base_url": "http://localhost:11434/v1",
     "api_key": "",
     "model": "gpt-4o-mini",
     "embedding_model": "text-embedding-3-small",
-    "reasoning_effort": ""
+    "reasoning_effort": "none"
   },
   "tts": {
     "enabled": false,
@@ -84,8 +85,26 @@
   "scheduler": {
     "enabled": false,
     "announcements": [
-      { "time": "09:00", "text": "おはようございます。", "chime_file": "", "volume": 1.0 }
+      { "time": "09:00", "text": "おはようございます。", "chime_file": "", "volume": 1.0 },
+      {
+        "time": "17:00",
+        "text": "",
+        "actions": [
+          { "kind": "action", "content": "原点に移動して" },
+          { "kind": "command", "text": "route patrol" }
+        ]
+      }
     ]
+  },
+  "translation": {
+    "mode": "off",
+    "source_language": "日本語",
+    "target_language": "英語",
+    "target_language_2": "",
+    "context_size": 3,
+    "auto_reverse": true,
+    "chatbox": false,
+    "model": ""
   },
   "server": {
     "addr": "127.0.0.1:47950",

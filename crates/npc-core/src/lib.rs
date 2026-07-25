@@ -6,6 +6,7 @@ pub mod bus;
 pub mod character;
 pub mod config;
 pub mod module;
+pub mod osc;
 
 pub use bus::{msg, topic, Bus, BusMessage, Envelope};
 pub use character::{

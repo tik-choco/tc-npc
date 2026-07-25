@@ -74,8 +74,9 @@ impl Module for ActionModule {
         let controller = Controller::new(vrc.clone());
         let navigator = Arc::new(Navigator::new(vrc.clone(), ctx.bus.clone()));
         let autopilot = Autopilot::new(navigator.clone());
-        let llm = LlmClient::new(config.api.base_url.clone(), config.api.api_key.clone());
-        let static_system_prompt = llm_action::build_static_system_prompt();
+        let llm = LlmClient::new(config.api.base_url.clone(), config.api.api_key.clone())
+            .with_reasoning_effort(config.api.reasoning_effort.clone());
+        let static_system_prompt = llm_action::build_static_system_prompt(&config.language);
         let map_data = Arc::new(RwLock::new(MapData::from_config(&config)));
 
         let state = Arc::new(ActionState {

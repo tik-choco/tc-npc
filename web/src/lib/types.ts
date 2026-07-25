@@ -29,6 +29,25 @@ export interface SenseMessage {
   ts: number;
 }
 
+/**
+ * One simultaneous-interpretation update from npc-translate. Every frame for
+ * the same utterance shares an `id`: the first arrives with `lang: ""` as
+ * soon as the line is heard (translations still pending), then one frame per
+ * target language as each translation lands. `reversed` marks an
+ * auto-reversed entry (a reply in a target language translated back into the
+ * source language).
+ */
+export interface TranslationMessage {
+  type: "translation";
+  id: string;
+  source: "user" | "agent";
+  original: string;
+  lang: string;
+  text: string;
+  reversed: boolean;
+  ts: number;
+}
+
 export interface MemoryMessage {
   type: "memory";
   kind: "short" | "long";
@@ -80,6 +99,7 @@ export type ServerMessage =
   | ChatMessage
   | TtsLineMessage
   | SenseMessage
+  | TranslationMessage
   | MemoryMessage
   | ActionLogMessage
   | PositionMessage

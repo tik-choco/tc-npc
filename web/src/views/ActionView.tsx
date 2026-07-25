@@ -18,8 +18,11 @@ import {
 } from "lucide-preact";
 import type { ActionLogEntry, PositionState } from "../hooks/useNpcSocket";
 import type { ActionSection, LocationEntry, RouteEntry } from "../lib/config-types";
-import { useConfigDoc, type SaveState } from "../hooks/useConfigDoc";
+import { useConfigDoc } from "../hooks/useConfigDoc";
+import { useI18n } from "../hooks/useI18n";
+import type { Translate } from "../lib/i18n";
 import { MapCanvas } from "../components/MapCanvas";
+import { SaveChip } from "../components/SaveChip";
 import "../styles/components.css";
 import "../styles/action.css";
 
@@ -39,19 +42,6 @@ function nextName(base: string, existing: Set<string>): string {
   return `${base}${i}`;
 }
 
-function saveStateLabel(state: SaveState): string {
-  switch (state) {
-    case "saving":
-      return "保存中…";
-    case "saved":
-      return "保存済み";
-    case "error":
-      return "保存エラー";
-    default:
-      return "";
-  }
-}
-
 export interface ActionViewProps {
   position: PositionState | null;
   actionLogEntries: ActionLogEntry[];
@@ -59,7 +49,8 @@ export interface ActionViewProps {
 }
 
 export function ActionView({ position, actionLogEntries, onCommand }: ActionViewProps) {
-  const { config, saveState, mutate } = useConfigDoc();
+  const { t } = useI18n();
+  const { config, saveState, saveError, mutate } = useConfigDoc();
   const [draft, setDraft] = useState("");
   const [trail, setTrail] = useState<{ x: number; y: number }[]>([]);
   const [addMode, setAddMode] = useState(false);
@@ -100,7 +91,7 @@ export function ActionView({ position, actionLogEntries, onCommand }: ActionView
       doc.action = a;
       const locs = a.locations ?? (a.locations = []);
       const used = new Set(locs.map((l) => l.name));
-      const finalName = nextName(name.trim() || "地点", used);
+      const finalName = nextName(name.trim() || t("action.loc.defaultName"), used);
       locs.push({ name: finalName, x, y, heading: 0 });
     });
   }
@@ -158,7 +149,7 @@ export function ActionView({ position, actionLogEntries, onCommand }: ActionView
 
   function addRoute() {
     const used = new Set(routes.map((r) => r.name));
-    const name = nextName("ルート", used);
+    const name = nextName(t("action.route.defaultName"), used);
     mutate((doc) => {
       const a: ActionSection = (doc.action as ActionSection | undefined) ?? {};
       doc.action = a;
@@ -258,13 +249,13 @@ export function ActionView({ position, actionLogEntries, onCommand }: ActionView
       <div class="action-toolbar">
         <h2 class="action-section-title">
           <Compass size={16} />
-          行動マップ
+          {t("action.map.title")}
         </h2>
         <div class="action-toolbar-right">
-          {saveState !== "idle" && <span class={`chip action-save-chip action-save-chip--${saveState}`}>{saveStateLabel(saveState)}</span>}
+          <SaveChip state={saveState} error={saveError} />
         </div>
       </div>
-      <p class="action-hint">地点・ルートは編集すると自動保存され、すぐに反映されます。</p>
+      <p class="action-hint">{t("action.hint")}</p>
 
       <section class="action-map-card">
         <MapCanvas
@@ -278,25 +269,26 @@ export function ActionView({ position, actionLogEntries, onCommand }: ActionView
           onAddLocation={addLocation}
           onMoveLocation={moveLocation}
         />
-        {!position && <div class="action-position-empty">位置情報は未受信です</div>}
+        {!position && <div class="action-position-empty">{t("action.noPosition")}</div>}
       </section>
 
       <div class="action-panels">
         <section class="action-panel">
           <h2 class="action-section-title">
             <MapPinned size={16} />
-            地点
+            {t("action.locations.title")}
           </h2>
           {locations.length === 0 ? (
             <div class="empty-state">
-              <div class="empty-state-title">地点がありません</div>
-              <div class="empty-state-description">地図の「地点追加モード」から作成できます。</div>
+              <div class="empty-state-title">{t("action.locations.empty.title")}</div>
+              <div class="empty-state-description">{t("action.locations.empty.desc")}</div>
             </div>
           ) : (
             <div class="action-loc-list">
               {locations.map((loc) => (
                 <LocationRow
                   key={loc.name}
+                  t={t}
                   loc={loc}
                   onCommit={(field, value) => updateLocationField(loc.name, field, value)}
                   onDelete={() => removeLocation(loc.name)}
@@ -310,7 +302,7 @@ export function ActionView({ position, actionLogEntries, onCommand }: ActionView
         <section class="action-panel">
           <h2 class="action-section-title">
             <RouteIcon size={16} />
-            ルート
+            {t("action.routes.title")}
           </h2>
           <div class="action-route-list">
             {routes.map((route, idx) => (
@@ -318,27 +310,33 @@ export function ActionView({ position, actionLogEntries, onCommand }: ActionView
                 <button type="button" class="action-route-select" onClick={() => setSelectedRouteName(route.name)}>
                   <span class="action-route-color" style={{ background: ROUTE_LIST_COLORS[idx % ROUTE_LIST_COLORS.length] }} />
                   {route.name}
-                  {route.loop && <span class="chip action-route-loop-chip">ループ</span>}
+                  {route.loop && <span class="chip action-route-loop-chip">{t("action.route.loop")}</span>}
                 </button>
-                <button type="button" class="icon-btn" onClick={() => removeRoute(route.name)} title="削除">
+                <button
+                  type="button"
+                  class="icon-btn"
+                  onClick={() => removeRoute(route.name)}
+                  title={t("common.delete")}
+                >
                   <Trash2 size={14} />
                 </button>
               </div>
             ))}
             <button type="button" class="btn btn-ghost btn-small" onClick={addRoute}>
               <Plus size={14} />
-              ルート追加
+              {t("action.route.add")}
             </button>
           </div>
 
           {routes.length === 0 && (
             <div class="empty-state">
-              <div class="empty-state-title">ルートがありません</div>
+              <div class="empty-state-title">{t("action.routes.empty")}</div>
             </div>
           )}
 
           {selectedRoute && (
             <RouteDetail
+              t={t}
               route={selectedRoute}
               locations={locations}
               onRename={(name) => renameRoute(selectedRoute.name, name)}
@@ -357,7 +355,7 @@ export function ActionView({ position, actionLogEntries, onCommand }: ActionView
       <section class="action-command-card">
         <h2 class="action-section-title">
           <Send size={16} />
-          コマンド送信
+          {t("action.command.title")}
         </h2>
         <div class="action-command-row">
           <input
@@ -374,11 +372,11 @@ export function ActionView({ position, actionLogEntries, onCommand }: ActionView
           />
           <button type="button" class="btn btn-primary" onClick={submit} disabled={!draft.trim()}>
             <Send size={14} />
-            送信
+            {t("common.send")}
           </button>
           <button type="button" class="btn btn-danger" onClick={() => onCommand("stop")}>
             <Square size={14} />
-            停止
+            {t("common.stop")}
           </button>
         </div>
       </section>
@@ -386,12 +384,12 @@ export function ActionView({ position, actionLogEntries, onCommand }: ActionView
       <section class="action-log-section">
         <h2 class="action-section-title">
           <ListTree size={16} />
-          行動ログ
+          {t("action.log.title")}
         </h2>
         <div class="action-log-scroll" ref={scrollRef}>
           {actionLogEntries.length === 0 && (
             <div class="empty-state">
-              <div class="empty-state-title">まだ行動ログがありません</div>
+              <div class="empty-state-title">{t("action.log.empty")}</div>
             </div>
           )}
           {actionLogEntries.map((entry) => (
@@ -409,11 +407,13 @@ export function ActionView({ position, actionLogEntries, onCommand }: ActionView
 const ROUTE_LIST_COLORS = ["#2563eb", "#059669", "#d946ef", "#ea580c", "#0891b2", "#7c3aed"];
 
 function LocationRow({
+  t,
   loc,
   onCommit,
   onDelete,
   onGo,
 }: {
+  t: Translate;
   loc: LocationEntry;
   onCommit: (field: "name" | "x" | "y" | "heading", value: string) => void;
   onDelete: () => void;
@@ -462,13 +462,13 @@ function LocationRow({
         value={heading}
         onInput={(e) => setHeading((e.target as HTMLInputElement).value)}
         onBlur={() => onCommit("heading", heading)}
-        title="向き"
+        title={t("action.loc.heading")}
       />
       <button type="button" class="btn btn-ghost btn-small" onClick={onGo}>
         <Navigation size={13} />
-        移動
+        {t("action.loc.go")}
       </button>
-      <button type="button" class="icon-btn" onClick={onDelete} title="削除">
+      <button type="button" class="icon-btn" onClick={onDelete} title={t("common.delete")}>
         <Trash2 size={14} />
       </button>
     </div>
@@ -488,7 +488,15 @@ function RouteNameInput({ name, onCommit }: { name: string; onCommit: (value: st
   );
 }
 
-function WaypointSeconds({ value, onCommit }: { value: number; onCommit: (value: string) => void }) {
+function WaypointSeconds({
+  t,
+  value,
+  onCommit,
+}: {
+  t: Translate;
+  value: number;
+  onCommit: (value: string) => void;
+}) {
   const [draft, setDraft] = useState(String(value));
   useEffect(() => setDraft(String(value)), [value]);
   return (
@@ -500,12 +508,13 @@ function WaypointSeconds({ value, onCommit }: { value: number; onCommit: (value:
       value={draft}
       onInput={(e) => setDraft((e.target as HTMLInputElement).value)}
       onBlur={() => onCommit(draft)}
-      title="移動時間(秒)"
+      title={t("action.waypoint.seconds")}
     />
   );
 }
 
 function RouteDetail({
+  t,
   route,
   locations,
   onRename,
@@ -517,6 +526,7 @@ function RouteDetail({
   onMoveWaypoint,
   onRemoveWaypoint,
 }: {
+  t: Translate;
   route: RouteEntry;
   locations: LocationEntry[];
   onRename: (name: string) => void;
@@ -535,22 +545,22 @@ function RouteDetail({
         <RouteNameInput name={route.name} onCommit={onRename} />
         <label class="action-route-loop-toggle">
           <input type="checkbox" checked={route.loop ?? false} onChange={(e) => onToggleLoop((e.target as HTMLInputElement).checked)} />
-          ループ
+          {t("action.route.loop")}
         </label>
       </div>
       <div class="action-route-actions">
         <button type="button" class="btn btn-primary btn-small" onClick={onRun}>
           <Play size={13} />
-          実行
+          {t("action.route.run")}
         </button>
         <button type="button" class="btn btn-danger btn-small" onClick={onStop}>
           <Square size={13} />
-          停止
+          {t("common.stop")}
         </button>
       </div>
 
       <div class="action-waypoint-list">
-        {waypoints.length === 0 && <div class="action-waypoint-empty">経由地点がありません</div>}
+        {waypoints.length === 0 && <div class="action-waypoint-empty">{t("action.waypoints.empty")}</div>}
         {waypoints.map((wp, i) => (
           <div class="action-waypoint-row" key={i}>
             <span class="action-waypoint-index">{i + 1}</span>
@@ -565,16 +575,22 @@ function RouteDetail({
                 </option>
               ))}
             </select>
-            <WaypointSeconds value={wp.seconds ?? 3} onCommit={(v) => onUpdateWaypoint(i, "seconds", v)} />
+            <WaypointSeconds t={t} value={wp.seconds ?? 3} onCommit={(v) => onUpdateWaypoint(i, "seconds", v)} />
             <label class="action-waypoint-wait">
               <input
                 type="checkbox"
                 checked={wp.wait ?? false}
                 onChange={(e) => onUpdateWaypoint(i, "wait", (e.target as HTMLInputElement).checked)}
               />
-              待機
+              {t("action.waypoint.wait")}
             </label>
-            <button type="button" class="icon-btn" disabled={i === 0} onClick={() => onMoveWaypoint(i, -1)} title="上へ">
+            <button
+              type="button"
+              class="icon-btn"
+              disabled={i === 0}
+              onClick={() => onMoveWaypoint(i, -1)}
+              title={t("action.moveUp")}
+            >
               <ChevronUp size={14} />
             </button>
             <button
@@ -582,18 +598,18 @@ function RouteDetail({
               class="icon-btn"
               disabled={i === waypoints.length - 1}
               onClick={() => onMoveWaypoint(i, 1)}
-              title="下へ"
+              title={t("action.moveDown")}
             >
               <ChevronDown size={14} />
             </button>
-            <button type="button" class="icon-btn" onClick={() => onRemoveWaypoint(i)} title="削除">
+            <button type="button" class="icon-btn" onClick={() => onRemoveWaypoint(i)} title={t("common.delete")}>
               <Trash2 size={14} />
             </button>
           </div>
         ))}
         <button type="button" class="btn btn-ghost btn-small" onClick={onAddWaypoint} disabled={locations.length === 0}>
           <Plus size={14} />
-          地点追加
+          {t("action.waypoint.add")}
         </button>
       </div>
     </div>

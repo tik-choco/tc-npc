@@ -53,9 +53,23 @@ impl Module for MemoryModule {
 
     async fn run(self: Box<Self>, ctx: ModuleCtx) -> anyhow::Result<()> {
         let cfg = ctx.config.clone();
-        let llm = Arc::new(LlmClient::new(cfg.api.base_url.clone(), cfg.api.api_key.clone()));
+        let llm = Arc::new(
+            LlmClient::new(cfg.api.base_url.clone(), cfg.api.api_key.clone())
+                .with_reasoning_effort(cfg.api.reasoning_effort.clone()),
+        );
         let chat_model = cfg.api.model.clone();
         let embedding_model = cfg.api.embedding_model.clone();
+
+        // Summaries are fed back to npc-talk as `{{short_term_memory}}` /
+        // `{{long_term_memory}}`, so they follow `config.language` too — a
+        // Japanese-worded summarize prompt would otherwise pull the whole
+        // memory context back into Japanese.
+        let summarize_prompt =
+            npc_core::config::with_language_instruction(&cfg.memory.summarize_prompt, &cfg.language);
+        let consolidate_prompt = npc_core::config::with_language_instruction(
+            &cfg.memory.consolidate_prompt,
+            &cfg.language,
+        );
 
         let store_path = ctx.data_dir.join(STORE_FILE_NAME);
         let store = Arc::new(Mutex::new(VectorStore::load(&store_path)));
@@ -88,7 +102,7 @@ impl Module for MemoryModule {
                         let turns = std::mem::take(&mut buffer);
                         let prev_summary = summary.clone();
 
-                        let new_summary = run_summarize(&llm, &chat_model, &cfg.memory.summarize_prompt, &prev_summary, &turns).await;
+                        let new_summary = run_summarize(&llm, &chat_model, &summarize_prompt, &prev_summary, &turns).await;
                         if let Some(new_summary) = new_summary {
                             summary = new_summary.clone();
                             ctx.bus.publish(topic::MEM, msg::SHORT_TERM_MEMORY, json!({ "content": new_summary }));
@@ -99,7 +113,7 @@ impl Module for MemoryModule {
                                 &llm,
                                 &chat_model,
                                 &embedding_model,
-                                &cfg.memory.consolidate_prompt,
+                                &consolidate_prompt,
                                 &prev_summary,
                                 &turns,
                                 cfg.memory.chunk_size as usize,
@@ -124,7 +138,7 @@ impl Module for MemoryModule {
                                         if buffer.len() >= SUMMARY_TURN_THRESHOLD {
                                             let turns = std::mem::take(&mut buffer);
                                             let prev_summary = summary.clone();
-                                            if let Some(new_summary) = run_summarize(&llm, &chat_model, &cfg.memory.summarize_prompt, &prev_summary, &turns).await {
+                                            if let Some(new_summary) = run_summarize(&llm, &chat_model, &summarize_prompt, &prev_summary, &turns).await {
                                                 summary = new_summary.clone();
                                                 ctx.bus.publish(topic::MEM, msg::SHORT_TERM_MEMORY, json!({ "content": new_summary }));
                                             }

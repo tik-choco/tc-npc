@@ -18,4 +18,3 @@ tracing = { workspace = true }
 async-trait = { workspace = true }
 cpal = "0.15"
 hound = "3.5"
-rosc = "0.10"

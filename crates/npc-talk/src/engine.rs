@@ -28,7 +28,6 @@ struct ChatState {
 pub struct ChatEngine {
     llm: LlmClient,
     model: String,
-    reasoning_effort: Option<String>,
     prompts: Vec<PromptEntry>,
     filter_prompt: Option<String>,
     history_size: usize,
@@ -36,6 +35,10 @@ pub struct ChatEngine {
     bus: Bus,
     /// Rendered persona prompt for the active character, if any.
     persona: Option<String>,
+    /// `config.language` reply instruction, pushed as its own system message
+    /// after the configured prompts so it isn't buried mid-persona. `None`
+    /// when the language is `auto`.
+    language_instruction: Option<&'static str>,
     state: Mutex<ChatState>,
 }
 
@@ -44,12 +47,12 @@ impl ChatEngine {
     pub fn new(
         llm: LlmClient,
         model: String,
-        reasoning_effort: Option<String>,
         prompts: Vec<PromptEntry>,
         filter_prompt_name: String,
         history_size: usize,
         tools: ToolRegistry,
         persona: Option<String>,
+        language: &str,
         bus: Bus,
     ) -> Self {
         let filter_prompt = prompts
@@ -60,13 +63,13 @@ impl ChatEngine {
         Self {
             llm,
             model,
-            reasoning_effort,
             prompts,
             filter_prompt,
             history_size,
             tools,
             bus,
             persona,
+            language_instruction: npc_core::config::language_instruction(language),
             state: Mutex::new(ChatState {
                 history: Vec::new(),
                 short_term_memory: String::new(),
@@ -115,6 +118,10 @@ impl ChatEngine {
             messages.push(ChatMessage::system(content));
         }
 
+        if let Some(instruction) = self.language_instruction {
+            messages.push(ChatMessage::system(instruction));
+        }
+
         messages.extend(guard.history.iter().cloned());
 
         let user_msg = ChatMessage::user(input.to_string());
@@ -159,8 +166,16 @@ impl ChatEngine {
 
         if let Some(filter_prompt) = &self.filter_prompt {
             if !final_content.is_empty() {
+                // The filter pass rewrites the reply, so it needs the same
+                // language instruction — otherwise it can hand back a
+                // rewrite in whatever language the filter prompt is in.
+                let mut filter_system = filter_prompt.clone();
+                if let Some(instruction) = self.language_instruction {
+                    filter_system.push_str("\n\n");
+                    filter_system.push_str(instruction);
+                }
                 let filter_messages = vec![
-                    ChatMessage::system(filter_prompt.clone()),
+                    ChatMessage::system(filter_system),
                     ChatMessage::user(final_content.clone()),
                 ];
                 match self.chat_with_tools(filter_messages, None).await {
@@ -224,7 +239,6 @@ impl ChatEngine {
     ) -> anyhow::Result<ResponseMessage> {
         let mut req = npc_llm::ChatRequest::new(self.model.clone(), messages);
         req.tools = tools;
-        req.reasoning_effort = self.reasoning_effort.clone();
 
         let resp = self.llm.chat(req).await?;
         let choice = resp

@@ -105,6 +105,7 @@ async fn run_server(ctx: ModuleCtx) -> anyhow::Result<()> {
             "/api/characters/:id/activate",
             post(rest::api_activate_character),
         )
+        .route("/api/scheduler/test", post(rest::api_scheduler_test))
         .route("/api/llm/models", post(rest::api_llm_models))
         .route("/api/llm/voices", post(rest::api_llm_voices))
         .fallback(assets::static_handler)

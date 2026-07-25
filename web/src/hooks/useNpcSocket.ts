@@ -2,7 +2,8 @@
 // frames out into per-view state slices: a merged `timeline` for the chat
 // view (chat + sense + memory + actionLog, in arrival order) plus dedicated
 // lists/scalars for the views that only care about one frame kind (音声's
-// ttsLines/volume, 視覚's visionLog, 行動's actionLogEntries/position).
+// ttsLines/volume, 視覚's visionLog, 行動's actionLogEntries/position, 通訳's
+// translations).
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import { NpcSocket, type ConnectionState } from "../lib/ws";
 import type { ClientMessage, ServerMessage } from "../lib/types";
@@ -19,6 +20,20 @@ export interface TtsLineEntry {
   id: number;
   text: string;
   translations?: Record<string, string>;
+  ts: number;
+}
+
+/**
+ * One interpreted utterance for the 通訳 tab, assembled from the several
+ * `translation` frames that share an id: the original arrives first and each
+ * target language fills in `translations` as it lands.
+ */
+export interface TranslationEntry {
+  id: string;
+  source: "user" | "agent";
+  original: string;
+  translations: Record<string, string>;
+  reversed: boolean;
   ts: number;
 }
 
@@ -54,6 +69,7 @@ export interface UseNpcSocketResult {
   character: { id: string; name: string } | null;
   timeline: TimelineEntry[];
   ttsLines: TtsLineEntry[];
+  translations: TranslationEntry[];
   visionLog: SenseEntry[];
   actionLogEntries: ActionLogEntry[];
   position: PositionState | null;
@@ -73,6 +89,7 @@ export function useNpcSocket(): UseNpcSocketResult {
   const [character, setCharacter] = useState<{ id: string; name: string } | null>(null);
   const [timeline, setTimeline] = useState<TimelineEntry[]>([]);
   const [ttsLines, setTtsLines] = useState<TtsLineEntry[]>([]);
+  const [translations, setTranslations] = useState<TranslationEntry[]>([]);
   const [visionLog, setVisionLog] = useState<SenseEntry[]>([]);
   const [actionLogEntries, setActionLogEntries] = useState<ActionLogEntry[]>([]);
   const [position, setPosition] = useState<PositionState | null>(null);
@@ -140,6 +157,37 @@ export function useNpcSocket(): UseNpcSocketResult {
           );
           break;
 
+        case "translation":
+          // Upsert by id: the `lang: ""` frame creates the entry, each
+          // later frame fills in one target language.
+          setTranslations((prev) => {
+            const index = prev.findIndex((entry) => entry.id === msg.id);
+            if (index === -1) {
+              return cap(
+                [
+                  ...prev,
+                  {
+                    id: msg.id,
+                    source: msg.source,
+                    original: msg.original,
+                    translations: msg.lang === "" ? {} : { [msg.lang]: msg.text },
+                    reversed: msg.reversed,
+                    ts: msg.ts,
+                  },
+                ],
+                MAX_ENTRIES,
+              );
+            }
+            if (msg.lang === "") return prev;
+            const next = [...prev];
+            next[index] = {
+              ...next[index],
+              translations: { ...next[index].translations, [msg.lang]: msg.text },
+            };
+            return next;
+          });
+          break;
+
         case "position":
           setPosition({ x: msg.x, y: msg.y, heading: msg.heading });
           break;
@@ -189,6 +237,7 @@ export function useNpcSocket(): UseNpcSocketResult {
     character,
     timeline,
     ttsLines,
+    translations,
     visionLog,
     actionLogEntries,
     position,

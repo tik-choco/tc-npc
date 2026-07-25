@@ -12,6 +12,7 @@ import { useRef, useState } from "preact/hooks";
 import { Check, MapPin, Maximize2, X, ZoomIn, ZoomOut } from "lucide-preact";
 import type { LocationEntry, RouteEntry } from "../lib/config-types";
 import type { PositionState } from "../hooks/useNpcSocket";
+import { useI18n } from "../hooks/useI18n";
 import "../styles/action.css";
 
 interface ViewBox {
@@ -125,6 +126,7 @@ export function MapCanvas({
   onAddLocation,
   onMoveLocation,
 }: MapCanvasProps) {
+  const { t } = useI18n();
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const svgRef = useRef<SVGSVGElement | null>(null);
   const [viewBox, setViewBox] = useState<ViewBox>(DEFAULT_VIEWBOX);
@@ -220,7 +222,11 @@ export function MapCanvas({
     if (wasClick && addMode && svg) {
       const world = clientToWorld(svg, e.clientX, e.clientY);
       const used = new Set(locations.map((l) => l.name));
-      setPendingAdd({ x: round2(world.x), y: round2(world.y), name: nextName("地点", used) });
+      setPendingAdd({
+        x: round2(world.x),
+        y: round2(world.y),
+        name: nextName(t("action.loc.defaultName"), used),
+      });
     }
   }
 
@@ -261,7 +267,7 @@ export function MapCanvas({
 
   function confirmAdd() {
     if (!pendingAdd) return;
-    onAddLocation(pendingAdd.name.trim() || "地点", pendingAdd.x, pendingAdd.y);
+    onAddLocation(pendingAdd.name.trim() || t("action.loc.defaultName"), pendingAdd.x, pendingAdd.y);
     setPendingAdd(null);
   }
 
@@ -420,40 +426,42 @@ export function MapCanvas({
               }
             }}
           />
-          <button type="button" class="icon-btn" onClick={confirmAdd} title="追加">
+          <button type="button" class="icon-btn" onClick={confirmAdd} title={t("common.add")}>
             <Check size={14} />
           </button>
-          <button type="button" class="icon-btn" onClick={() => setPendingAdd(null)} title="キャンセル">
+          <button type="button" class="icon-btn" onClick={() => setPendingAdd(null)} title={t("common.cancel")}>
             <X size={14} />
           </button>
         </div>
       )}
 
       <div class="map-toolbar">
-        <button type="button" class="icon-btn" onClick={() => zoomAtCenter(1 / 1.4)} title="ズームイン">
+        <button type="button" class="icon-btn" onClick={() => zoomAtCenter(1 / 1.4)} title={t("map.zoomIn")}>
           <ZoomIn size={16} />
         </button>
-        <button type="button" class="icon-btn" onClick={() => zoomAtCenter(1.4)} title="ズームアウト">
+        <button type="button" class="icon-btn" onClick={() => zoomAtCenter(1.4)} title={t("map.zoomOut")}>
           <ZoomOut size={16} />
         </button>
-        <button type="button" class="icon-btn" onClick={fitBounds} title="全体表示">
+        <button type="button" class="icon-btn" onClick={fitBounds} title={t("map.fit")}>
           <Maximize2 size={16} />
         </button>
         <button
           type="button"
           class={`icon-btn${addMode ? " is-active" : ""}`}
           onClick={onToggleAddMode}
-          title="地点追加モード"
+          title={t("map.addMode")}
         >
           <MapPin size={16} />
         </button>
       </div>
 
       <div class="map-readout">
-        {hoverWorld ? `X ${hoverWorld.x.toFixed(1)} / Y ${hoverWorld.y.toFixed(1)}` : `表示範囲 約${Math.round(viewBox.w)}m`}
+        {hoverWorld
+          ? `X ${hoverWorld.x.toFixed(1)} / Y ${hoverWorld.y.toFixed(1)}`
+          : t("map.range", { meters: Math.round(viewBox.w) })}
       </div>
 
-      {addMode && <div class="map-hint">地点追加モード: 地図をクリックして新しい地点を作成</div>}
+      {addMode && <div class="map-hint">{t("map.hint")}</div>}
     </div>
   );
 }

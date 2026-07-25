@@ -24,6 +24,7 @@ pub fn module_flags(config: &npc_core::Config) -> ModuleFlags {
         vision: config.vision.enabled,
         action: config.action.enabled,
         scheduler: config.scheduler.enabled,
+        translation: !config.translation.mode().is_off(),
     }
 }
 
