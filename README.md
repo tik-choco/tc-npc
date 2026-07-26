@@ -1,201 +1,102 @@
 # tc-npc
 
-AI NPC(マスコット)を1プロセスで動かすRustのCLI/サーバーです。会話・短期/長期記憶・音声(STT/TTS)・画面認識・VRChat互換のOSCアバター制御・定時アナウンスといったエージェント群を1バイナリに統合し、起動時にローカルWeb UI(既定 `http://127.0.0.1:47950`)を配信します。もとは複数のGoマイクロサービス(Redis pub/subで連携)だった構成を、プロセス内バス(`tokio::sync::broadcast`)に置き換えて1バイナリへ統合したものです。
+A single-binary Rust CLI/server that runs an AI NPC (mascot). Chat, memory,
+speech, vision, VRChat avatar control, and scheduled announcements all run as
+modules inside one process, talking to each other over an in-process bus
+(`tokio::sync::broadcast`) instead of the original Go microservices +
+Redis pub/sub setup. A local Web UI (default `http://127.0.0.1:47950`) is
+served on startup.
 
-## 特徴
+日本語版は [README.ja.md](README.ja.md) を参照してください。
 
-- **会話 (talk)**: OpenAI互換LLMとのチャットエージェント。プロンプトテンプレートに短期/長期記憶・ペルソナを差し込み。感情ドライブモデル(`talk.affect`)による内的状態の表出、初対面時の警戒、終話の自動制御にも対応
-- **記憶 (memory)**: 直近会話の短期要約と、チャンク分割+埋め込みによる長期ベクトルストア(RAG検索)。会話の話者名やスケジュールイベントから人物ごとの記録(`memory.people`)も蓄積し、視覚(vision)が見た人物とも紐付けられます
-- **音声 (speech / tts・stt)**: マイク入力のVAD区切り+OpenAI互換STT、OpenAI互換TTSでの発話再生。既定では無効(config有効化制)
-- **視覚 (vision)**: 画面/ウィンドウの定期キャプチャとVLMによる説明。既定では無効
-- **行動 (action)**: VRChat互換OSCでのアバター制御、位置管理、自然言語からのコマンド列生成。既定では無効
-- **スケジューラ (scheduler)**: 時刻指定の定時アナウンス(TTS発話+チャイム)に加え、同じ時刻に実行するアクション(自然言語での行動指示・コマンド・会話への投入・suspend/resume・任意のトピックへのraw送信)も指定可能。既定では無効。Web UIの「予定」タブでは次の実行までの残り時間が表示され、時刻を待たずにその場で実行する「テスト実行」も可能
-- **同時通訳 (translation)**: 聞き取った発話をLLMで翻訳。`interpret`(通訳のみ・NPCは応答しない) / `assist`(会話しつつ発話と応答に訳文を付ける)の2モードがあり、翻訳先は最大2言語、逆方向の発話は自動で話者の言語へ訳し戻します(auto_reverse)。訳文はWeb UIの「通訳」タブとVRChatチャットボックスに出力。既定では無効
-- **Web UI**: Preact製のローカルUI(チャット/キャラ/人物/音声/視覚/行動/予定/通訳/設定タブ)をバイナリに同梱して配信
-- **多言語対応**: UIの表示言語(日本語/English/中文)は「設定 > 一般」タブで切り替え。ブラウザの言語設定を初期値とし、選択はブラウザに保存されます。NPC自身の応答言語は別設定(`config.language`)
-- **キャラクターインポート**: tc-town のキャラクターエクスポートJSONを取り込み、ペルソナシートとして利用
-- **mist (オプション機能)**: `mist` cargo featureで mistlib (P2P) を組み込み、tc-townのキャラクターカタログルームに接続する機能。既定では無効
+## Features
 
-## クイックスタート
+- **Chat**: OpenAI-compatible LLM chat agent with short/long-term memory and
+  persona injected into the prompt template. Includes an affect/emotion drive
+  model and automatic conversation closing (`talk.affect`).
+- **Memory**: short-term summarization plus a chunked, embedded long-term
+  vector store (RAG). Also tracks per-person records (`memory.people`) built
+  from speaker names and, optionally, vision.
+- **Speech**: VAD-segmented mic input via OpenAI-compatible STT, and
+  OpenAI-compatible TTS playback. Disabled by default.
+- **Vision**: periodic screen/window capture described by a VLM. Disabled by
+  default.
+- **Action**: VRChat-compatible OSC avatar control, position/route
+  management, and natural-language-to-command generation. Disabled by
+  default.
+- **Scheduler**: timed announcements (TTS + chime) that can also fire actions
+  (commands, chat input, suspend/resume, raw bus messages). Disabled by
+  default.
+- **Translation**: `interpret` (translate-only) and `assist` (chat +
+  translation) modes, up to two target languages. Disabled by default.
+- **Web UI**: a Preact app (chat/character/people/speech/vision/action/
+  schedule/translation/settings tabs) bundled into the binary.
+- **Character import**: loads tc-town character-export JSON as a persona
+  sheet.
+- **mist** (optional feature): connects to tc-town's character catalog room
+  via mistlib (P2P). Disabled by default.
 
-### 前提
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how the modules,
+bus, and protocol fit together, including a deeper look at person memory.
 
-- Rust (stable)
-- Node.js (Web UIのビルド用)
+## Quick start
 
-### ビルド・実行
+Prerequisites: Rust (stable), Node.js (for the Web UI build).
 
 ```bash
-# Web UIビルド + Rustビルドを一括で
-just all
+just all              # build web UI + Rust binary
+tc-npc run             # first run
+```
 
-# または手動で
+Or manually:
+
+```bash
 cd web && npm install && npm run build
 cd ..
 cargo build --release
 ```
 
-初回実行:
+The Web UI opens at `config.server.addr` (default `http://127.0.0.1:47950`).
+Pass `--no-open` (or set `config.server.auto_open: false`) to skip
+auto-opening a browser tab — useful with `just watch`, which restarts the
+binary on every Rust source change without spawning a new tab each time.
 
-```bash
-tc-npc run
-```
-
-起動すると `config.server.addr`(既定 `http://127.0.0.1:47950`)でWeb UIが開きます。ブラウザを自動で開かせたくない場合は `--no-open`(または `config.server.auto_open: false`)を指定してください。
-
-開発中は `just watch` でRustソースの変更を検知して再ビルド・再起動します。このレシピは `--no-open` 付きで起動するため、再起動のたびに新しいタブが開くことはありません。開いたままのタブが `/ws` へ自動再接続します(切断中は最大5秒間隔でリトライ、タブをフォアグラウンドに戻すと即時リトライ)。
-
-## 設定
-
-設定ファイルは既定で `./config.json`、または `--config <path>` で指定したパスから読み込まれます。まずは例をコピーしてください。
+## Configuration
 
 ```bash
 cp config.example.json config.json
 ```
 
-APIキーなどの秘匿情報は `.env` に記載します(`.env.example` を参照)。`.env` は先に読み込まれ、その後一部の環境変数が対応するJSONフィールドを上書きします。
+`config.json` is read by default (or pass `--config <path>`). Secrets go in
+`.env` (see `.env.example`), loaded before config and used to override a few
+JSON fields via environment variables.
 
-LLM/TTS/STTのエンドポイントはすべてOpenAI互換で、既定値はlocalhost(Ollama等のローカル推論サーバー)を想定しています。
+**Never commit API keys.** `config.json` and `.env` are already
+`.gitignore`d.
 
-**APIキーは絶対にコミットしないでください。** `config.json` と `.env` は `.gitignore`済みです。
+LLM/TTS/STT endpoints are OpenAI-compatible; defaults point at a local
+inference server (e.g. Ollama). See the comments in `config.example.json`
+for the full list of sections and fields.
 
-主な設定セクション:
+If your OpenAI-compatible endpoint uses a private-CA certificate (common on
+institutional networks) and you can't install the root CA into the OS trust
+store, set `TC_NPC_CA_BUNDLE` to a PEM bundle path, or `TC_NPC_INSECURE_TLS=1`
+as a last resort. This is the fix for an LLM probe failing with
+`invalid peer certificate: UnknownIssuer`.
 
-| セクション | 概要 |
+## CLI
+
+| Command | Description |
 |---|---|
-| `language` | NPCが応答する言語。`auto`(既定・プロンプト任せ) / `ja` / `en` / `zh`。talk・vision・memory・actionの各システムプロンプトに「この言語で答えて」という指示を追加します |
-| `api` | チャット/埋め込み用のOpenAI互換LLMエンドポイント |
-| `tts` | 音声合成(OpenAI互換TTS)。既定で無効 |
-| `stt` | 音声認識(OpenAI互換STT)。既定で無効 |
-| `talk` | 会話エージェントの履歴サイズ・プロンプトテンプレート・感情ドライブ制御(`affect`) |
-| `memory` | 短期/長期記憶の閾値・チャンクサイズ・要約プロンプト。`memory.people` で人物ごとの記憶を制御(後述) |
-| `vision` | 画面キャプチャ間隔・対象ウィンドウ・VLMプロンプト。既定で無効 |
-| `action` | VRChat OSCアドレス・移動先(locations)・巡回ルート(routes)。既定で無効 |
-| `vrc` | VRChat連携(チャットボックス送信、OSCアドレス) |
-| `scheduler` | 定時アナウンスのリスト(時刻・本文・チャイム音声・音量・アクション)。既定で無効 |
-| `translation` | 同時通訳(モード・話者の言語・翻訳先言語・文脈数・auto_reverse・チャットボックス出力)。既定で `mode: "off"` |
-| `server` | Web UI/APIのバインドアドレスと自動オープン |
-| `character` | 現在アクティブなキャラクターID |
-| `mist` | mistlib接続設定(シグナリングURL・ルームID)。`mist` featureを有効にした場合のみ意味を持つ |
+| `tc-npc run` | Start the agents and Web server (default when no subcommand is given) |
+| `tc-npc import <path>` | Import a character from a tc-town export JSON |
+| `tc-npc characters` | List imported characters |
+| `tc-npc config-path` | Print the resolved config file path and data directory |
 
-### talk.affect (感情ドライブモデル)
+All subcommands accept `--config <path>`.
 
-`talk.affect` は会話エージェントの内的状態表現と終話制御をまとめて切り替えます。
+## License
 
-| キー | 説明 |
-|---|---|
-| `enabled` | 22種の内的ドライブ(ドーパミン等になぞらえた値)を相手の発話から毎ターン更新し、基準値から大きくズレたものだけを「今の内的状態」としてプロンプトに滲ませます。セリフに直接書かせるのではなく態度に出させる設計です。既定で有効 |
-| `forced_closure` | 相手が別れの挨拶をしたら、LLMを呼ばずに短い別れの言葉で会話を閉じます。AIが会話を延々と引き延ばすのを防ぎます。既定で有効 |
-
-いずれも `false` にすると従来どおりの挙動になります。
-
-### memory.people (人物ごとの記憶)
-
-会話の話者名やスケジュールイベントの実行者名から人物レコードを作成し、会話からLLMで抽出した事実をその人物に紐付けて蓄積します。`vision.person_detection` を有効にすると、画面に映った人物をVLMが `observe_person` ツールで報告し、同じ人物レコードに外見・様子が追記されます(名前と外見で同一人物と分かった場合。LLM/VLMによる抽出のため、人物の識別や事実の抽出が取りこぼされたり誤ることがあります)。レコードは1人1ファイルで `{data_dir}/people/{id}.json` に保存されます。
-
-| キー | 説明 |
-|---|---|
-| `memory.people.enabled` | 人物ごとの記録を行うか。既定 `true` |
-| `memory.people.extract_prompt` | 会話から人物に関する事実を抽出させるLLMプロンプト |
-| `memory.people.max_facts` | 1人あたりに保持する事実(facts)の上限。超えると古いものから捨てられます。既定 `20` |
-| `memory.people.link_vision` | 視覚(vision)が報告した人物の観察を人物レコードへ取り込むか。既定 `true` |
-| `vision.person_detection` | 画面に映った人物を検出し、`observe_person` ツールで報告するか。既定 `false` |
-
-Web UIの「人物」タブから一覧・詳細(蓄積された事実・関連する長期記憶)の閲覧、名前・別名・メモ・外見の編集、レコードの削除ができます。
-
-### プライベートCA配下のエンドポイント
-
-学内・社内で自前運用しているOpenAI互換サーバーは、公開CAではなくプライベートCAが発行した証明書を使っていることがあります。HTTPSクライアントはOSのトラストストア(Windowsの証明書ストア、Linuxの `/etc/ssl/certs` 等)も参照するため、そのルートCAをOSにインストール済みであればそのまま接続できます。
-
-OSにインストールできない場合は、ルートCAを含むPEMバンドルのパスを環境変数で渡してください。
-
-| 環境変数 | 説明 |
-|---|---|
-| `TC_NPC_CA_BUNDLE` | 追加で信頼するCA証明書のPEMバンドルへのパス |
-| `TC_NPC_INSECURE_TLS` | `1` / `true` / `yes` でTLS証明書の検証を完全に無効化(最終手段。通信内容が保護されなくなります) |
-
-接続テスト(モデル一覧の取得)が `502 Bad Gateway: http request failed: ... invalid peer certificate: UnknownIssuer` で失敗する場合が、まさにこのケースです。
-
-## キャラクター
-
-キャラクターは [tc-town](https://github.com/tik-choco) のキャラクターエクスポートJSON(`{"app":"tc-town","version":1,"kind":"character","characters":[...]}`)から取り込みます。
-
-```bash
-tc-npc import <export.json>
-tc-npc characters
-```
-
-インポートされたキャラクターは `character.active_id` に設定したものがアクティブになり、そのパーソナリティシートがNPCのペルソナ(システムプロンプト)として使われます。
-
-## CLI コマンド
-
-| コマンド | 説明 |
-|---|---|
-| `tc-npc run` | エージェント群とWebサーバーを起動(サブコマンド省略時の既定動作) |
-| `tc-npc import <path>` | tc-townエクスポートJSONからキャラクターを取り込み |
-| `tc-npc characters` | 保存済みキャラクターの一覧表示 |
-| `tc-npc config-path` | 解決される設定ファイルパスとデータディレクトリを表示 |
-
-すべてのサブコマンドで `--config <path>` を指定可能です。
-
-## アーキテクチャ
-
-各エージェントは `Module` トレイトを実装するクレート(`npc-talk` / `npc-memory` / `npc-speech` / `npc-vision` / `npc-action` / `npc-scheduler` / `npc-translate`)として分離されており、プロセス内バス(`npc-core::bus`)経由でメッセージをやり取りします。バスのトピック/メッセージ種別は、統合前のGoエージェント群(Redis pub/sub)の配線契約をそのまま踏襲しています。詳細は [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) を参照してください。
-
-## 予定とアクション
-
-`scheduler.announcements[]` は毎日同じ時刻に繰り返す予定です。`text` を読み上げるだけでなく、`actions` に指定したものを同じ時刻に実行できます(Go版 `agent-scheduler` の `redis_actions` 相当)。`text` が空でアクションだけの予定も有効です。
-
-| `kind` | 動作 |
-|---|---|
-| `speak` | `{content, chime_file}` を読み上げ |
-| `action` | 自然言語の指示を `npc-action` に渡す(例: 「原点に移動して」) |
-| `command` | CLIコマンドを実行(例: `route patrol`) |
-| `chat` | 発話として投入し、NPCに応答させる |
-| `suspend` / `resume` | 会話・発話の一時停止/再開 |
-| `raw` | `{topic, type, payload}` をそのままバスへ送信 |
-
-```json
-{
-  "time": "17:00",
-  "text": "",
-  "actions": [
-    { "kind": "action", "content": "原点に移動して" },
-    { "kind": "command", "text": "route patrol" }
-  ]
-}
-```
-
-Web UIの「予定」タブから編集でき、保存すると再起動なしで反映されます。「テスト実行」は本文とアクションの両方をその場で実行します。
-
-## 同時通訳
-
-`translation.mode` を切り替えて使います(Go版 `agent-speech` の翻訳機能の移植)。
-
-- `off`: 翻訳しない(既定)
-- `interpret`: 聞き取った発話を翻訳する。NPCは応答せず通訳に徹します(`npc-talk` が発話入力を受け取らなくなります)
-- `assist`: いつもどおり会話しつつ、発話とNPCの応答の両方に訳文を付けます
-
-`target_language` / `target_language_2` で最大2言語に翻訳し、`auto_reverse` を有効にすると翻訳先の言語で話しかけられたときに `source_language` へ訳し戻します。`context_size` の分だけ直近の発話を文脈としてLLMに渡します。訳文はWeb UIの「通訳」タブに表示され、`translation.chatbox` を有効にすると `vrc.osc_address` 宛にVRChatチャットボックスとしても送信されます。設定はWeb UIから変更でき、再起動なしで次の発話から反映されます。
-
-## VRChat連携
-
-`action` モジュールはVRChat互換のOSCプロトコルでアバターを制御します。既定のOSC送信先は `127.0.0.1:9000` です。
-
-- 位置・移動: `config.action.locations` / `routes` で定義した地点・巡回ルートへの移動
-- チャットボックス: `config.vrc.chatbox` を有効にすると発話内容をVRChatのチャットボックスに送信
-- 自然言語コマンド: チャット入力から行動コマンド列をLLMで生成し、OSC経由でアバターへ送信
-
-## mist機能(オプション)
-
-`mist` cargo featureを有効にすると、mistlib(MPL-2.0ライセンスのP2Pライブラリ)を組み込み、tc-townのキャラクターカタログルームに接続できます。
-
-```bash
-cargo build --features mist
-```
-
-既定(feature無効)のビルドではmistlibへの依存は発生しません。`config.mist` セクションで接続先(シグナリングURL・ルームID)を設定します。
-
-## ライセンス
-
-このリポジトリ自体は [MIT License](LICENSE) です。mist機能が依存する mistlib は MPL-2.0 ライセンスで、外部依存として取得されます(このリポジトリのコードには含まれません)。
+This repository is [MIT licensed](LICENSE). The optional `mist` feature
+depends on mistlib (MPL-2.0), fetched as an external dependency and not
+included in this repo's code.
