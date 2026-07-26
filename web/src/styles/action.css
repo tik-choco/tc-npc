@@ -55,10 +55,18 @@
   box-shadow: var(--shadow-1);
 }
 
-.action-position-empty {
+.action-map-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
   margin-top: var(--space-2);
+}
+
+.action-position-readout {
   font-size: 0.78rem;
   color: var(--text-subtle);
+  font-variant-numeric: tabular-nums;
 }
 
 .map-canvas-wrap {

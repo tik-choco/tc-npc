@@ -31,6 +31,11 @@ pub struct SearchHit {
     pub score: f32,
 }
 
+/// Score bonus added to a hit whose record is linked to the person being
+/// searched for. See [`VectorStore::search_for_person`] for exactly when
+/// it's applied.
+const PERSON_MATCH_BONUS: f32 = 0.05;
+
 /// sha256 hex digest of `text`, used both for dedup and as the `hash`
 /// field of a [`Record`].
 pub fn calculate_hash(text: &str) -> String {
@@ -154,14 +159,38 @@ impl VectorStore {
 
     /// Brute-force cosine-similarity search over every stored record,
     /// filtered by `threshold` and truncated to the top `top_k` by score
-    /// (descending).
-    pub fn search(&self, query_embedding: &[f32], top_k: usize, threshold: f32) -> Vec<SearchHit> {
+    /// (descending) — the port of the Go original's search.
+    ///
+    /// When `person_id` is `Some`, any record whose `metadata["person_id"]`
+    /// equals it gets [`PERSON_MATCH_BONUS`] added to its cosine-similarity
+    /// score. The bonus is applied *before* both the `threshold` filter and
+    /// the top-`top_k` sort/truncate, so a person-linked memory that would
+    /// otherwise fall just short of `threshold` (or just outside the top
+    /// `top_k`) is more likely to be recalled when talking to that person.
+    /// Records that aren't linked to `person_id` keep their plain
+    /// cosine-similarity score and are never excluded — general/unlinked
+    /// knowledge can still be recalled alongside person-specific memories.
+    /// Passing `None` reproduces the pre-person-memory behavior exactly.
+    pub fn search_for_person(
+        &self,
+        query_embedding: &[f32],
+        top_k: usize,
+        threshold: f32,
+        person_id: Option<&str>,
+    ) -> Vec<SearchHit> {
         let mut hits: Vec<SearchHit> = self
             .records
             .iter()
-            .map(|r| SearchHit {
-                text: r.text.clone(),
-                score: cosine_similarity(query_embedding, &r.embedding),
+            .map(|r| {
+                let record_person_id = r.metadata.get("person_id").cloned();
+                let mut score = cosine_similarity(query_embedding, &r.embedding);
+                if person_id.is_some() && record_person_id.as_deref() == person_id {
+                    score += PERSON_MATCH_BONUS;
+                }
+                SearchHit {
+                    text: r.text.clone(),
+                    score,
+                }
             })
             .filter(|hit| hit.score >= threshold)
             .collect();
@@ -285,14 +314,59 @@ mod tests {
         store.add_chunk("d", "b", vec![0.9, 0.1], HashMap::new(), 0);
         store.add_chunk("d", "c", vec![0.0, 1.0], HashMap::new(), 0);
 
-        let hits = store.search(&[1.0, 0.0], 5, 0.5);
+        let hits = store.search_for_person(&[1.0, 0.0], 5, 0.5, None);
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].text, "a");
         assert_eq!(hits[1].text, "b");
 
-        let hits_top1 = store.search(&[1.0, 0.0], 1, 0.5);
+        let hits_top1 = store.search_for_person(&[1.0, 0.0], 1, 0.5, None);
         assert_eq!(hits_top1.len(), 1);
         assert_eq!(hits_top1[0].text, "a");
+    }
+
+    #[test]
+    fn search_for_person_boosts_matching_records_above_threshold() {
+        let dir = std::env::temp_dir().join(format!("npc-memory-test-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("memory-store.json");
+        let mut store = VectorStore::load(&path);
+
+        // cos([1,0], [0.9, 0.43589]) ~= 0.9, comfortably below the 0.93
+        // threshold on its own but above it once PERSON_MATCH_BONUS (0.05)
+        // is added.
+        let mut meta = HashMap::new();
+        meta.insert("person_id".to_string(), "taro".to_string());
+        store.add_chunk("d", "taro-linked", vec![0.9, 0.43589], meta, 0);
+        store.add_chunk("d", "unlinked-same-angle", vec![0.9, 0.43589], HashMap::new(), 0);
+
+        // No person filter: neither record clears the threshold.
+        let hits_none = store.search_for_person(&[1.0, 0.0], 5, 0.93, None);
+        assert!(hits_none.is_empty());
+
+        // Filtering for a person who doesn't match anything: still nothing.
+        let hits_wrong_person = store.search_for_person(&[1.0, 0.0], 5, 0.93, Some("hanako"));
+        assert!(hits_wrong_person.is_empty());
+
+        // Filtering for "taro": the linked record clears the threshold
+        // thanks to the bonus; the unlinked one still doesn't.
+        let hits = store.search_for_person(&[1.0, 0.0], 5, 0.93, Some("taro"));
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].text, "taro-linked");
+    }
+
+    #[test]
+    fn search_for_person_does_not_exclude_unlinked_records() {
+        let dir = std::env::temp_dir().join(format!("npc-memory-test-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("memory-store.json");
+        let mut store = VectorStore::load(&path);
+
+        // A record with no person_id at all, already well above threshold:
+        // it must still come back even when searching "for" a specific
+        // person, since general knowledge should stay recallable.
+        store.add_chunk("d", "general fact", vec![1.0, 0.0], HashMap::new(), 0);
+
+        let hits = store.search_for_person(&[1.0, 0.0], 5, 0.5, Some("taro"));
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].text, "general fact");
     }
 
     #[test]

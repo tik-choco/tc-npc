@@ -37,8 +37,10 @@ release: web-build
 # Rebuild & rerun on Rust source changes (requires `cargo install cargo-watch`).
 # Uses cargo-watch's `-- <full command>` form: `-x "run -p tc-npc"` breaks under
 # the cmd.exe shell above, which doesn't unquote what just passes it.
+# `--no-open` keeps each restart from popping a new browser tab: the tab you
+# already have reconnects over /ws by itself.
 watch:
-    cargo watch -w src -w crates -w Cargo.toml -- cargo run -p tc-npc
+    cargo watch -w src -w crates -w Cargo.toml -- cargo run -p tc-npc -- --no-open
 
 # Vite dev server with HMR for the web UI. Run `just run` in another terminal —
 # /ws, /api and /healthz are proxied to the binary on 127.0.0.1:47950.

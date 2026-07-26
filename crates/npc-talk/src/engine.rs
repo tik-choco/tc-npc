@@ -11,18 +11,26 @@ use npc_llm::{ChatContent, ChatMessage, LlmClient, ResponseMessage};
 use regex::Regex;
 use tokio::sync::Mutex;
 
+use crate::affect::AffectState;
 use crate::tools::ToolRegistry;
 
 /// State mutated over the lifetime of a conversation: message history plus
-/// the latest short/long-term memory snapshots pushed in from `npc-memory`.
-/// Guarded by a single mutex so an entire chat turn (including memory reads)
-/// runs atomically — this both serializes concurrent turns and matches Go's
-/// `ChatAgent.mu` covering `Chat`, `SetMemory`, and `SetLongTermMemory`
-/// alike.
+/// the latest short/long-term memory snapshots pushed in from `npc-memory`,
+/// plus the emotion-drive state (`npc_core::config::AffectConfig`; see
+/// `crate::affect`). Guarded by a single mutex so an entire chat turn
+/// (including memory reads) runs atomically — this both serializes
+/// concurrent turns and matches Go's `ChatAgent.mu` covering `Chat`,
+/// `SetMemory`, and `SetLongTermMemory` alike.
 struct ChatState {
     history: Vec<ChatMessage>,
     short_term_memory: String,
     long_term_memory: String,
+    /// Recalled profile for the person currently in view, pushed in by
+    /// npc-memory on `topic::MEM`/`msg::PERSON_MEMORY` (person-memory
+    /// contract §6). Same "empty string when unset" treatment as
+    /// `short_term_memory`/`long_term_memory`.
+    person_memory: String,
+    affect: AffectState,
 }
 
 pub struct ChatEngine {
@@ -39,6 +47,14 @@ pub struct ChatEngine {
     /// after the configured prompts so it isn't buried mid-persona. `None`
     /// when the language is `auto`.
     language_instruction: Option<&'static str>,
+    /// `config.talk.affect.enabled` — gates both the `AffectState::update`
+    /// call and the `to_prompt()` system message. When `false`, behavior is
+    /// bit-for-bit identical to a build without the affect model.
+    affect_enabled: bool,
+    /// `config.talk.affect.forced_closure` — gates the "answer without
+    /// calling the LLM" short-circuit. Only consulted when `affect_enabled`
+    /// is also `true`.
+    affect_forced_closure: bool,
     state: Mutex<ChatState>,
 }
 
@@ -54,11 +70,18 @@ impl ChatEngine {
         persona: Option<String>,
         language: &str,
         bus: Bus,
+        affect_config: npc_core::config::AffectConfig,
     ) -> Self {
         let filter_prompt = prompts
             .iter()
             .find(|p| p.name == filter_prompt_name && !filter_prompt_name.is_empty())
             .map(|p| p.content.clone());
+
+        if affect_config.enabled {
+            // Published up front so the web UI's affect panel isn't empty
+            // while it waits for the first conversation turn.
+            bus.publish(topic::UI, msg::AFFECT_STATE, AffectState::default().snapshot());
+        }
 
         Self {
             llm,
@@ -70,12 +93,26 @@ impl ChatEngine {
             bus,
             persona,
             language_instruction: npc_core::config::language_instruction(language),
+            affect_enabled: affect_config.enabled,
+            affect_forced_closure: affect_config.forced_closure,
             state: Mutex::new(ChatState {
                 history: Vec::new(),
                 short_term_memory: String::new(),
                 long_term_memory: String::new(),
+                person_memory: String::new(),
+                affect: AffectState::default(),
             }),
         }
+    }
+
+    /// Publish the current [`AffectState`] snapshot on `npc:ui` /
+    /// `affect_state` for the web UI's real-time affect panel. No-op when
+    /// `config.talk.affect.enabled` is `false`.
+    fn publish_affect_snapshot(&self, affect: &AffectState) {
+        if !self.affect_enabled {
+            return;
+        }
+        self.bus.publish(topic::UI, msg::AFFECT_STATE, affect.snapshot());
     }
 
     pub async fn set_short_term_memory(&self, content: String) {
@@ -88,10 +125,24 @@ impl ChatEngine {
         guard.long_term_memory = content;
     }
 
+    pub async fn set_person_memory(&self, content: String) {
+        let mut guard = self.state.lock().await;
+        guard.person_memory = content;
+    }
+
     /// Run one full conversation turn: system prompts -> history -> user
     /// input -> tool-call loop -> optional filter pass -> publish +
     /// history update. Ported from Go `ChatAgent.Chat`.
     pub async fn chat(&self, input: &str) -> anyhow::Result<String> {
+        self.chat_with_speaker(input, None).await
+    }
+
+    /// Same as [`Self::chat`], but with an optional `speaker` (who said
+    /// `input`, per the person-memory contract's `agent:sense`/`speech`
+    /// `speaker` field) threaded through to the published `chat_log` so
+    /// npc-memory can attribute the turn to a person. `chat` itself stays
+    /// speaker-less so every existing call site keeps behaving identically.
+    pub async fn chat_with_speaker(&self, input: &str, speaker: Option<&str>) -> anyhow::Result<String> {
         let mut guard = match self.state.try_lock() {
             Ok(guard) => guard,
             Err(_) => {
@@ -100,7 +151,33 @@ impl ChatEngine {
             }
         };
 
-        let vars = self.build_vars(&guard.short_term_memory, &guard.long_term_memory);
+        if self.affect_enabled {
+            let own_turns = guard.history.iter().filter(|m| m.role == "assistant").count() as u32;
+            // `partner_known` (name-from-memory matching) is out of scope for
+            // this port; always `false` for now.
+            guard.affect.update(input, own_turns, false);
+            self.publish_affect_snapshot(&guard.affect);
+
+            if self.affect_forced_closure {
+                if let Some(reply) = guard.affect.forced_closure_reply(input) {
+                    guard.history.push(ChatMessage::user(input.to_string()));
+                    guard.history.push(ChatMessage::assistant(reply.clone()));
+                    trim_history(&mut guard.history, self.history_size);
+                    drop(guard);
+
+                    self.bus.publish(
+                        topic::CHAT,
+                        msg::CHAT_RESPONSE,
+                        serde_json::json!({ "content": reply, "input": input }),
+                    );
+                    self.bus.publish(topic::CHAT, msg::CHAT_LOG, chat_log_payload(input, &reply, speaker));
+
+                    return Ok(reply);
+                }
+            }
+        }
+
+        let vars = self.build_vars(&guard.short_term_memory, &guard.long_term_memory, &guard.person_memory);
 
         let mut messages: Vec<ChatMessage> = Vec::new();
 
@@ -116,6 +193,10 @@ impl ChatEngine {
                 continue;
             }
             messages.push(ChatMessage::system(content));
+        }
+
+        if self.affect_enabled {
+            messages.push(ChatMessage::system(guard.affect.to_prompt()));
         }
 
         if let Some(instruction) = self.language_instruction {
@@ -206,17 +287,18 @@ impl ChatEngine {
         self.bus.publish(
             topic::CHAT,
             msg::CHAT_LOG,
-            serde_json::json!({
-                "input": input,
-                "output": final_content,
-                "time": chrono::Utc::now().to_rfc3339(),
-            }),
+            chat_log_payload(input, &final_content, speaker),
         );
 
         Ok(final_content)
     }
 
-    fn build_vars(&self, short_term_memory: &str, long_term_memory: &str) -> HashMap<String, String> {
+    fn build_vars(
+        &self,
+        short_term_memory: &str,
+        long_term_memory: &str,
+        person_memory: &str,
+    ) -> HashMap<String, String> {
         let mut vars = HashMap::new();
         vars.insert(
             "session_meta".to_string(),
@@ -227,6 +309,9 @@ impl ChatEngine {
         }
         if !long_term_memory.is_empty() {
             vars.insert("long_term_memory".to_string(), long_term_memory.to_string());
+        }
+        if !person_memory.is_empty() {
+            vars.insert("person_memory".to_string(), person_memory.to_string());
         }
         vars.insert("persona".to_string(), self.persona.clone().unwrap_or_default());
         vars
@@ -248,6 +333,22 @@ impl ChatEngine {
             .ok_or_else(|| anyhow::anyhow!("no choices returned"))?;
         Ok(choice.message)
     }
+}
+
+/// Build the `topic::CHAT`/`msg::CHAT_LOG` payload, carrying `speaker` along
+/// (person-memory contract §2) when the turn's input came with one attached.
+/// `speaker` is omitted entirely rather than emitted as `null`/empty so
+/// npc-memory's "no speaker" case matches the pre-existing payload shape.
+fn chat_log_payload(input: &str, output: &str, speaker: Option<&str>) -> serde_json::Value {
+    let mut payload = serde_json::json!({
+        "input": input,
+        "output": output,
+        "time": chrono::Utc::now().to_rfc3339(),
+    });
+    if let Some(speaker) = speaker {
+        payload["speaker"] = serde_json::Value::String(speaker.to_string());
+    }
+    payload
 }
 
 /// `{{key}}` placeholder substitution, matching Go `fillTemplate`: unknown
@@ -372,5 +473,56 @@ mod tests {
         let mut h = vec![user("u0"), assistant("a0")];
         trim_history(&mut h, 0);
         assert!(h.is_empty());
+    }
+
+    #[test]
+    fn chat_log_payload_includes_speaker_when_present() {
+        let payload = chat_log_payload("hi", "hello", Some("太郎"));
+        assert_eq!(payload["input"], "hi");
+        assert_eq!(payload["output"], "hello");
+        assert_eq!(payload["speaker"], "太郎");
+    }
+
+    #[test]
+    fn chat_log_payload_omits_speaker_field_when_absent() {
+        let payload = chat_log_payload("hi", "hello", None);
+        assert!(payload.get("speaker").is_none());
+    }
+
+    fn test_engine() -> ChatEngine {
+        ChatEngine::new(
+            npc_llm::LlmClient::new("http://localhost:0/v1", ""),
+            "test-model".to_string(),
+            Vec::new(),
+            String::new(),
+            10,
+            crate::tools::ToolRegistry::new(),
+            None,
+            "auto",
+            npc_core::Bus::new(),
+            npc_core::config::AffectConfig::default(),
+        )
+    }
+
+    #[test]
+    fn build_vars_includes_person_memory_when_set() {
+        let engine = test_engine();
+        let vars = engine.build_vars("", "", "太郎について: 犬好き");
+        assert_eq!(vars.get("person_memory").map(String::as_str), Some("太郎について: 犬好き"));
+    }
+
+    #[test]
+    fn build_vars_omits_person_memory_when_empty() {
+        let engine = test_engine();
+        let vars = engine.build_vars("", "", "");
+        assert!(!vars.contains_key("person_memory"));
+    }
+
+    #[test]
+    fn fill_template_expands_person_memory_placeholder() {
+        let engine = test_engine();
+        let vars = engine.build_vars("", "", "太郎: 犬好き");
+        let tpl = "Person: {{person_memory}}";
+        assert_eq!(fill_template(tpl, &vars), "Person: 太郎: 犬好き");
     }
 }

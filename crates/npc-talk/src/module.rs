@@ -52,6 +52,7 @@ impl Module for TalkModule {
             persona,
             &ctx.config.language,
             ctx.bus.clone(),
+            ctx.config.talk.affect.clone(),
         ));
 
         let mut rx = ctx.bus.subscribe();
@@ -133,20 +134,30 @@ fn handle_bus_message(engine: &Arc<ChatEngine>, state: &mut TalkState, bus_msg: 
                     });
                 }
             }
+            msg::PERSON_MEMORY => {
+                if let Some(content) = extract_content(&bus_msg.env.payload) {
+                    tracing::info!(content = %content, "npc-talk: updated person memory");
+                    let engine = engine.clone();
+                    tokio::spawn(async move {
+                        engine.set_person_memory(content).await;
+                    });
+                }
+            }
             _ => {}
         },
         topic::SENSE => {
             if bus_msg.env.r#type == msg::SPEECH {
                 if let Some(content) = extract_content(&bus_msg.env.payload) {
+                    let speaker = extract_speaker(&bus_msg.env.payload);
                     if state.interpret_mode {
                         tracing::debug!(content = %content, "npc-talk: interpretation mode, leaving speech to npc-translate");
                     } else if state.suspended {
                         tracing::debug!(content = %content, "npc-talk: suspended, dropping speech input");
                     } else {
-                        tracing::info!(content = %content, "npc-talk: received speech input");
+                        tracing::info!(content = %content, speaker = ?speaker, "npc-talk: received speech input");
                         let engine = engine.clone();
                         tokio::spawn(async move {
-                            if let Err(err) = engine.chat(&content).await {
+                            if let Err(err) = engine.chat_with_speaker(&content, speaker.as_deref()).await {
                                 tracing::error!(error = %err, "npc-talk: chat turn failed");
                             }
                         });
@@ -200,6 +211,13 @@ fn extract_content(payload: &serde_json::Value) -> Option<String> {
     payload.get("content").and_then(|v| v.as_str()).map(str::to_string)
 }
 
+/// Pull the optional `speaker` field off a `topic::SENSE`/`msg::SPEECH`
+/// payload (person-memory contract §2). Absent when the payload is a bare
+/// string or simply has no `speaker` key — both mean "speaker unknown".
+fn extract_speaker(payload: &serde_json::Value) -> Option<String> {
+    payload.get("speaker").and_then(|v| v.as_str()).map(str::to_string)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,6 +234,7 @@ mod tests {
             None,
             "auto",
             Bus::new(),
+            npc_core::config::AffectConfig::default(),
         ))
     }
 
@@ -293,5 +312,46 @@ mod tests {
         handle_bus_message(&engine, &mut state, interrupt(msg::RESUME));
         assert!(!state.suspended);
         assert!(state.resume_deadline.is_none());
+    }
+
+    #[test]
+    fn extract_speaker_reads_speaker_field() {
+        let payload = serde_json::json!({"content": "hi", "speaker": "太郎"});
+        assert_eq!(extract_speaker(&payload), Some("太郎".to_string()));
+    }
+
+    #[test]
+    fn extract_speaker_none_when_field_absent() {
+        let payload = serde_json::json!({"content": "hi"});
+        assert_eq!(extract_speaker(&payload), None);
+    }
+
+    #[test]
+    fn extract_speaker_none_for_bare_string_payload() {
+        // Matches `extract_content`'s bare-string fallback: a bare string has
+        // no `speaker` field to read, so the speaker is unknown.
+        let payload = serde_json::json!("hi");
+        assert_eq!(extract_speaker(&payload), None);
+    }
+
+    #[tokio::test]
+    async fn person_memory_message_is_dispatched_without_panicking() {
+        let engine = engine();
+        let mut state = state();
+
+        let msg = BusMessage {
+            topic: topic::MEM.to_string(),
+            env: Envelope {
+                r#type: msg::PERSON_MEMORY.to_string(),
+                payload: serde_json::json!({
+                    "person_id": "abc",
+                    "name": "太郎",
+                    "content": "太郎について覚えていること:\n- 犬を飼っている",
+                }),
+            },
+        };
+        handle_bus_message(&engine, &mut state, msg);
+        // Let the tokio::spawn'd `engine.set_person_memory` task actually run.
+        tokio::task::yield_now().await;
     }
 }

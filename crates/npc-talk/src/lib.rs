@@ -5,12 +5,14 @@
 //! OpenAI-compatible LLM via `npc-llm`; publishes responses back on
 //! `agent:chat`.
 
+mod affect;
 mod engine;
 mod module;
 mod tools;
 
 use npc_core::{Module, ModuleCtx};
 
+pub use affect::{AffectState, DriveKey};
 pub use engine::ChatEngine;
 pub use module::TalkModule;
 pub use tools::{ChatTool, ToolRegistry};

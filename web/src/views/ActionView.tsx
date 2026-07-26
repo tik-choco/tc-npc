@@ -6,6 +6,7 @@ import {
   ChevronDown,
   ChevronUp,
   Compass,
+  Crosshair,
   ListTree,
   MapPinned,
   Navigation,
@@ -81,6 +82,15 @@ export function ActionView({ position, actionLogEntries, onCommand }: ActionView
     if (!text) return;
     onCommand(text);
     setDraft("");
+  }
+
+  // Ports agent-action's `reset` nav command: the server zeroes its
+  // dead-reckoned pose (no avatar movement) and republishes it. The trail is
+  // client-side only, so it has to be dropped here — the old path is measured
+  // from an origin that no longer exists.
+  function resetOrigin() {
+    onCommand("reset");
+    setTrail([]);
   }
 
   // --- Location edits -----------------------------------------------------
@@ -269,7 +279,22 @@ export function ActionView({ position, actionLogEntries, onCommand }: ActionView
           onAddLocation={addLocation}
           onMoveLocation={moveLocation}
         />
-        {!position && <div class="action-position-empty">{t("action.noPosition")}</div>}
+        <div class="action-map-foot">
+          <span class="action-position-readout">
+            {position
+              ? `X ${position.x.toFixed(2)} / Y ${position.y.toFixed(2)} / ${t("action.loc.heading")} ${position.heading.toFixed(1)}°`
+              : t("action.noPosition")}
+          </span>
+          <button
+            type="button"
+            class="btn btn-ghost btn-small"
+            onClick={resetOrigin}
+            title={t("action.origin.reset.tooltip")}
+          >
+            <Crosshair size={13} />
+            {t("action.origin.reset")}
+          </button>
+        </div>
       </section>
 
       <div class="action-panels">

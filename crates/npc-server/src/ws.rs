@@ -112,7 +112,7 @@ async fn handle_client_message(state: &AppState, client_id: u64, text: &str) {
     };
 
     match client_msg {
-        ClientMsg::Input { text } => {
+        ClientMsg::Input { text, speaker } => {
             let request_id = Uuid::new_v4().to_string();
             state.hub.send_to(
                 client_id,
@@ -129,7 +129,7 @@ async fn handle_client_message(state: &AppState, client_id: u64, text: &str) {
             state
                 .ctx
                 .bus
-                .publish(topic::SENSE, msg::SPEECH, serde_json::json!({ "content": text }));
+                .publish(topic::SENSE, msg::SPEECH, speech_payload(&text, speaker.as_deref()));
         }
         ClientMsg::Command { text } => {
             state
@@ -173,11 +173,24 @@ async fn handle_client_message(state: &AppState, client_id: u64, text: &str) {
                 text: line.clone(),
                 ts: now_ms(),
             });
-            state
-                .ctx
-                .bus
-                .publish(topic::SENSE, msg::SPEECH, serde_json::json!({ "content": line }));
+            state.ctx.bus.publish(
+                topic::SENSE,
+                msg::SPEECH,
+                speech_payload(&line, user_name.as_deref()),
+            );
         }
+    }
+}
+
+/// Build the `agent:sense`/`speech` payload for `content`, attributing it to
+/// `speaker` when given a non-empty name (see the person-memory contract
+/// §4: `{"content": "...", "speaker": "..."}`). A missing or blank speaker
+/// leaves the payload exactly as before (`{"content": "..."}`) so existing
+/// consumers that don't know about `speaker` see no change.
+fn speech_payload(content: &str, speaker: Option<&str>) -> serde_json::Value {
+    match speaker.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(speaker) => serde_json::json!({ "content": content, "speaker": speaker }),
+        None => serde_json::json!({ "content": content }),
     }
 }
 
@@ -198,5 +211,34 @@ fn build_event_instruction(kind: &str, user_name: Option<&str>, text: Option<&st
             Some(t) if !t.is_empty() => format!("{other}というイベントが発生しました: {t}。短く反応してください。"),
             _ => format!("{other}というイベントが発生しました。短く反応してください。"),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn speech_payload_without_speaker_matches_legacy_shape() {
+        let payload = speech_payload("こんにちは", None);
+        assert_eq!(payload, serde_json::json!({ "content": "こんにちは" }));
+    }
+
+    #[test]
+    fn speech_payload_with_blank_speaker_omits_the_field() {
+        let payload = speech_payload("こんにちは", Some("   "));
+        assert_eq!(payload, serde_json::json!({ "content": "こんにちは" }));
+    }
+
+    #[test]
+    fn speech_payload_with_speaker_includes_it() {
+        let payload = speech_payload("こんにちは", Some("太郎"));
+        assert_eq!(payload, serde_json::json!({ "content": "こんにちは", "speaker": "太郎" }));
+    }
+
+    #[test]
+    fn build_event_instruction_uses_default_name_when_missing() {
+        let line = build_event_instruction("follow", None, None, None);
+        assert!(line.starts_with("誰かさんが"));
     }
 }

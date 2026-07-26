@@ -543,13 +543,20 @@ export function SettingsView() {
                     onChange={(v) => patchSection<ApiSection>("api", { model: v })}
                   />
                 </label>
-                <TextField
-                  label={t("settings.field.embeddingModel")}
-                  tooltip={t("settings.field.embeddingModel.tooltip")}
-                  value={api.embedding_model ?? ""}
-                  placeholder="text-embedding-3-small"
-                  onCommit={(v) => patchSection<ApiSection>("api", { embedding_model: v })}
-                />
+                <label class="field" title={t("settings.field.embeddingModel.tooltip")}>
+                  <span>{t("settings.field.embeddingModel")}</span>
+                  <ModelPicker
+                    t={t}
+                    value={api.embedding_model ?? ""}
+                    placeholder="text-embedding-3-small"
+                    baseUrl={api.base_url ?? ""}
+                    apiKey={api.api_key ?? ""}
+                    section="api"
+                    kind="models"
+                    itemLabel={t("picker.item.model")}
+                    onChange={(v) => patchSection<ApiSection>("api", { embedding_model: v })}
+                  />
+                </label>
                 <ReasoningEffortField
                   t={t}
                   value={api.reasoning_effort || "none"}

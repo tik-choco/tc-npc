@@ -24,6 +24,16 @@ pub struct CharacterRef {
     pub name: String,
 }
 
+/// One drive's current reading within an `affect` frame's `drives` array.
+/// `key` is the contract's snake_case wire key (see
+/// `npc_talk::affect::DriveKey::as_str`), e.g. `"substance_p"`.
+#[derive(Debug, Clone, Serialize)]
+pub struct DriveLevel {
+    pub key: String,
+    pub level: f32,
+    pub base: f32,
+}
+
 /// Server -> client frames. Internally tagged on `"type"`, matching
 /// `ServerMessage` in `web/src/lib/types.ts`.
 #[derive(Debug, Clone, Serialize)]
@@ -61,6 +71,17 @@ pub enum ServerMsg {
     },
     #[serde(rename = "memory")]
     Memory { kind: String, text: String },
+    /// The NPC's internal affect/drive state, published by npc-talk after
+    /// every conversation turn (see `npc_talk::affect::AffectState::snapshot`).
+    #[serde(rename = "affect")]
+    Affect {
+        ts: i64,
+        familiarity: f32,
+        closing: bool,
+        #[serde(rename = "inviteCaution")]
+        invite_caution: bool,
+        drives: Vec<DriveLevel>,
+    },
     #[serde(rename = "actionLog")]
     ActionLog { text: String },
     #[serde(rename = "position")]
@@ -87,6 +108,15 @@ pub enum ServerMsg {
         #[serde(skip_serializing_if = "Option::is_none")]
         message: Option<String>,
     },
+    /// A person record was created or updated. `person` is the camelCase
+    /// `PersonRecord` shape produced by `npc_core::person_to_wire` (see the
+    /// person-memory contract §5) — passed through as-is rather than
+    /// re-modeled here since npc-server only forwards it.
+    #[serde(rename = "person")]
+    Person { person: serde_json::Value },
+    /// A person record was deleted.
+    #[serde(rename = "personDeleted")]
+    PersonDeleted { id: String },
 }
 
 /// Client -> server frames. Internally tagged on `"type"`, matching
@@ -95,7 +125,15 @@ pub enum ServerMsg {
 #[serde(tag = "type")]
 pub enum ClientMsg {
     #[serde(rename = "input")]
-    Input { text: String },
+    Input {
+        text: String,
+        /// Optional display name of whoever typed `text`, so the bus
+        /// message can be attributed to a person record (see the
+        /// person-memory contract §4). Absent/`None` leaves the payload
+        /// exactly as before (no `speaker` field).
+        #[serde(default)]
+        speaker: Option<String>,
+    },
     #[serde(rename = "command")]
     Command { text: String },
     #[serde(rename = "interrupt")]

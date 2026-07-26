@@ -20,6 +20,13 @@ struct Cli {
     #[arg(long, global = true)]
     config: Option<PathBuf>,
 
+    /// Don't open the web UI in a browser at startup (overrides
+    /// `server.auto_open`). Useful under `just watch`, where every rebuild
+    /// restarts the binary and would otherwise pop a new browser tab — the
+    /// already-open tab reconnects on its own.
+    #[arg(long, global = true)]
+    no_open: bool,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -42,7 +49,7 @@ async fn main() -> anyhow::Result<()> {
     let config_path = cli.config;
 
     match cli.command.unwrap_or(Command::Run) {
-        Command::Run => run(config_path).await,
+        Command::Run => run(config_path, cli.no_open).await,
         Command::Import { path } => import(config_path, &path),
         Command::Characters => list_characters_cmd(config_path),
         Command::ConfigPath => config_path_cmd(config_path),
@@ -56,8 +63,11 @@ fn init_tracing() {
         .init();
 }
 
-async fn run(config_path: Option<PathBuf>) -> anyhow::Result<()> {
-    let config = Config::load(config_path.as_deref())?;
+async fn run(config_path: Option<PathBuf>, no_open: bool) -> anyhow::Result<()> {
+    let mut config = Config::load(config_path.as_deref())?;
+    if no_open {
+        config.server.auto_open = false;
+    }
     let config_path = config_path.unwrap_or_else(|| PathBuf::from("config.json"));
     init_tracing();
 

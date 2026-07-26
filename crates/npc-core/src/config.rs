@@ -236,8 +236,8 @@ fn default_history_size() -> u32 {
 }
 
 /// A named prompt template. Content may reference `{{session_meta}}`,
-/// `{{short_term_memory}}`, `{{long_term_memory}}`, and `{{persona}}`
-/// placeholders, filled in by npc-talk at request time.
+/// `{{short_term_memory}}`, `{{long_term_memory}}`, `{{person_memory}}`, and
+/// `{{persona}}` placeholders, filled in by npc-talk at request time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromptEntry {
     pub name: String,
@@ -254,6 +254,8 @@ pub struct TalkConfig {
     pub prompts: Vec<PromptEntry>,
     #[serde(default)]
     pub filter_prompt_name: String,
+    #[serde(default)]
+    pub affect: AffectConfig,
 }
 
 impl Default for TalkConfig {
@@ -263,6 +265,30 @@ impl Default for TalkConfig {
             history_size: default_history_size(),
             prompts: Vec::new(),
             filter_prompt_name: String::new(),
+            affect: AffectConfig::default(),
+        }
+    }
+}
+
+/// Emotion-drive model settings (npc-talk's `AffectState`, ported from
+/// tc-assistant2's `ConversationAffectState`). See `npc-talk::affect`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AffectConfig {
+    /// Track internal drive state and inject it as a system prompt.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// When the drive state machine considers the conversation "closing"
+    /// (e.g. after a farewell), answer with a fixed short reply instead of
+    /// calling the LLM at all.
+    #[serde(default = "default_true")]
+    pub forced_closure: bool,
+}
+
+impl Default for AffectConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            forced_closure: true,
         }
     }
 }
@@ -314,6 +340,9 @@ pub struct MemoryConfig {
     /// memory.
     #[serde(default = "default_consolidate_prompt")]
     pub consolidate_prompt: String,
+    /// 人物ごとの記憶。
+    #[serde(default)]
+    pub people: PersonMemoryConfig,
 }
 
 impl Default for MemoryConfig {
@@ -327,6 +356,43 @@ impl Default for MemoryConfig {
             chunk_overlap: default_chunk_overlap(),
             summarize_prompt: default_summarize_prompt(),
             consolidate_prompt: default_consolidate_prompt(),
+            people: PersonMemoryConfig::default(),
+        }
+    }
+}
+
+fn default_person_max_facts() -> u32 {
+    20
+}
+fn default_person_extract_prompt() -> String {
+    "以下の会話から、登場した人物について新たに分かった事実だけを抽出してください。JSON配列で、各要素は {\"name\": \"人物名\", \"facts\": [\"事実1\", \"事実2\"]} の形式にしてください。人物が特定できない、または新しい情報がない場合は空配列 [] を返してください。説明や前置きは不要です。".to_string()
+}
+
+/// 人物ごとの記憶設定。会話・視覚から人物レコードを組み立てる `npc-memory`
+/// が参照する。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersonMemoryConfig {
+    /// 人物ごとの記録を行うか。既定 true。
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// 会話から人物に関する事実を抽出させるLLMプロンプト。
+    #[serde(default = "default_person_extract_prompt")]
+    pub extract_prompt: String,
+    /// 1人あたりに保持する facts の上限(超えたら古いものから捨てる)。既定 20。
+    #[serde(default = "default_person_max_facts")]
+    pub max_facts: u32,
+    /// npc-vision の person_seen を人物レコードへ取り込むか。既定 true。
+    #[serde(default = "default_true")]
+    pub link_vision: bool,
+}
+
+impl Default for PersonMemoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            extract_prompt: default_person_extract_prompt(),
+            max_facts: default_person_max_facts(),
+            link_vision: true,
         }
     }
 }
@@ -366,6 +432,9 @@ pub struct VisionConfig {
     pub system_prompt: String,
     #[serde(default)]
     pub debug_save: bool,
+    /// 画面に映った人物を検出し、`person_seen` として publish するか。既定 false。
+    #[serde(default)]
+    pub person_detection: bool,
 }
 
 impl Default for VisionConfig {
@@ -380,6 +449,7 @@ impl Default for VisionConfig {
             target_window_title: String::new(),
             system_prompt: default_vision_system_prompt(),
             debug_save: false,
+            person_detection: false,
         }
     }
 }
@@ -905,6 +975,16 @@ mod tests {
         assert_eq!(config.api.base_url, "http://localhost:11434/v1");
         assert!(config.talk.enabled);
         assert_eq!(config.server.addr, "127.0.0.1:47950");
+    }
+
+    #[test]
+    fn affect_config_defaults_to_enabled_for_an_old_config() {
+        // A config.json written before `talk.affect` existed.
+        let config: Config = serde_json::from_str(r#"{"talk": {"enabled": true}}"#).unwrap();
+        assert!(config.talk.affect.enabled);
+        assert!(config.talk.affect.forced_closure);
+        assert!(Config::default().talk.affect.enabled);
+        assert!(Config::default().talk.affect.forced_closure);
     }
 
     #[test]

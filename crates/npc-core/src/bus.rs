@@ -84,6 +84,13 @@ pub mod topic {
     /// Payload is the complete new `Config` serialized to JSON, unredacted —
     /// this topic must never be forwarded to WS clients.
     pub const CONFIG: &str = "npc:config";
+    /// Used by other modules (npc-talk, npc-action, npc-vision, npc-speech,
+    /// npc-translate, ...) to push UI-only updates that don't fit the
+    /// existing `agent:*` topics (e.g. avatar position, current TTS
+    /// playback line, a raw action log line, the affect/drive snapshot).
+    /// Consumed only by npc-server's `bus_forward`, which forwards
+    /// recognized envelopes on to connected WS clients.
+    pub const UI: &str = "npc:ui";
 }
 
 /// Canonical envelope `type` values carried inside [`Envelope::r#type`].
@@ -100,6 +107,22 @@ pub mod msg {
     pub const RESUME: &str = "resume";
     /// See [`super::topic::CONFIG`].
     pub const CONFIG_UPDATED: &str = "config_updated";
+    /// Published on [`super::topic::UI`] by npc-talk after every
+    /// `AffectState::update`, carrying an `AffectSnapshot` (see
+    /// `npc_talk::affect`) so the web UI can render the NPC's internal drive
+    /// state in real time.
+    pub const AFFECT_STATE: &str = "affect_state";
+    /// npc-vision が捉えた人物の観察。`topic::SENSE` に publish され、
+    /// npc-memory が人物レコードへマージする。
+    pub const PERSON_SEEN: &str = "person_seen";
+    /// npc-memory が想起した人物プロフィール。`topic::MEM` に publish され、
+    /// npc-talk が `{{person_memory}}` として差し込む。
+    pub const PERSON_MEMORY: &str = "person_memory";
+    /// 人物レコードの新規作成/更新。`topic::UI` に publish され、
+    /// npc-server が WS の `person` フレームとして転送する。
+    pub const PERSON_UPDATED: &str = "person_updated";
+    /// 人物レコードの削除。`topic::UI`。payload は `{"id": "..."}`。
+    pub const PERSON_DELETED: &str = "person_deleted";
 }
 
 #[cfg(test)]

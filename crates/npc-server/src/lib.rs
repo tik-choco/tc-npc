@@ -37,6 +37,10 @@ struct AppState {
     /// with. (Running modules still hold the startup snapshot; only
     /// scheduler/action map data hot-reload via the `npc:config` topic.)
     current_config: Arc<std::sync::RwLock<Arc<npc_core::Config>>>,
+    /// Latest short-term memory summary, cached from `agent:mem` /
+    /// `short_term_memory` bus traffic by `bus_forward` so `GET /api/memory`
+    /// can answer it without its own bus subscription.
+    short_term_memory: Arc<std::sync::Mutex<String>>,
 }
 
 impl AppState {
@@ -73,8 +77,9 @@ async fn run_server(ctx: ModuleCtx) -> anyhow::Result<()> {
 
     let hub = Hub::default();
     let echo = Arc::new(EchoGuard::default());
+    let short_term_memory = Arc::new(std::sync::Mutex::new(String::new()));
 
-    bus_forward::spawn(ctx.clone(), hub.clone(), echo.clone());
+    bus_forward::spawn(ctx.clone(), hub.clone(), echo.clone(), short_term_memory.clone());
 
     let state = AppState {
         current_config: Arc::new(std::sync::RwLock::new(ctx.config.clone())),
@@ -82,6 +87,7 @@ async fn run_server(ctx: ModuleCtx) -> anyhow::Result<()> {
         hub,
         echo,
         addr: bound_addr.to_string(),
+        short_term_memory,
     };
 
     if ctx.config.server.auto_open {
@@ -106,6 +112,18 @@ async fn run_server(ctx: ModuleCtx) -> anyhow::Result<()> {
             post(rest::api_activate_character),
         )
         .route("/api/scheduler/test", post(rest::api_scheduler_test))
+        .route("/api/memory", get(rest::api_memory))
+        .route("/api/chat/history", get(rest::api_chat_history))
+        .route(
+            "/api/people",
+            get(rest::api_list_people).post(rest::api_create_person),
+        )
+        .route(
+            "/api/people/:id",
+            get(rest::api_get_person)
+                .patch(rest::api_update_person)
+                .delete(rest::api_delete_person),
+        )
         .route("/api/llm/models", post(rest::api_llm_models))
         .route("/api/llm/voices", post(rest::api_llm_voices))
         .fallback(assets::static_handler)

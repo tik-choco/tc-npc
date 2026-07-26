@@ -1,0 +1,387 @@
+/* 人物 view — a roster of recognized people (left) and a detail/edit panel
+   for whichever one is selected (right). Tokens only, same design system as
+   the rest of tc-npc; layout mirrors the list+cards shape of brain.css. */
+
+.people-view {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: var(--space-5);
+}
+
+.people-layout {
+  display: grid;
+  grid-template-columns: minmax(260px, 340px) 1fr;
+  gap: var(--space-4);
+  align-items: start;
+}
+
+.people-list-panel,
+.people-detail-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+  padding: var(--space-4);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-l);
+  box-shadow: var(--shadow-1);
+}
+
+.people-detail-panel {
+  min-height: 320px;
+}
+
+/* --- List panel ------------------------------------------------------------ */
+
+.people-list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.people-list-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.people-hint {
+  margin: 0;
+  font-size: 0.78rem;
+  line-height: 1.6;
+  color: var(--text-subtle);
+}
+
+.people-add-row {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.people-add-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.people-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 620px;
+  overflow-y: auto;
+}
+
+.people-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: var(--space-3) var(--space-4);
+  font: inherit;
+  text-align: left;
+  color: inherit;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-m);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease);
+}
+
+.people-row:hover {
+  background: var(--surface-3);
+}
+
+.people-row--active {
+  border-color: var(--primary-border);
+  background: var(--primary-soft);
+  box-shadow: inset 0 0 0 1px var(--primary-border);
+}
+
+.people-row-name {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.people-row-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 0.72rem;
+  color: var(--text-subtle);
+}
+
+.people-row-encounters {
+  font-variant-numeric: tabular-nums;
+}
+
+.people-row-time {
+  font-size: 0.7rem;
+  color: var(--text-subtle);
+}
+
+/* --- Source badges ----------------------------------------------------------- */
+
+.people-source-badge--chat {
+  color: var(--primary);
+  background: var(--primary-soft);
+}
+
+.people-source-badge--vision {
+  color: var(--success);
+  background: var(--success-soft);
+}
+
+.people-source-badge--event {
+  color: var(--danger-text);
+  background: var(--danger-soft);
+}
+
+.people-source-badge--manual {
+  color: var(--text-muted);
+  background: var(--surface-3);
+}
+
+/* --- Detail panel ------------------------------------------------------------ */
+
+.people-detail-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.people-detail-name-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 1 1 260px;
+  min-width: 0;
+}
+
+.people-detail-name-input {
+  flex: 1;
+  min-width: 0;
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.people-delete-btn {
+  flex-shrink: 0;
+  color: var(--danger-text);
+}
+
+.people-delete-btn:hover:not(:disabled) {
+  background: var(--danger-soft);
+  border-color: var(--danger-border);
+}
+
+.people-delete-confirm {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  padding: var(--space-2) var(--space-3);
+  background: var(--danger-soft);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-m);
+}
+
+.people-delete-confirm-message {
+  font-size: 0.78rem;
+  color: var(--danger-text);
+}
+
+.people-alias-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+/* --- Familiarity meter (lightweight version of brain.css's gauge) ----------- */
+
+.people-familiarity {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.people-familiarity-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.people-familiarity-value {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-subtle);
+}
+
+.people-familiarity-bar-track {
+  position: relative;
+  height: 10px;
+  overflow: hidden;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+}
+
+.people-familiarity-bar-fill {
+  height: 100%;
+  background: var(--primary);
+  border-radius: var(--radius-pill);
+  transition: width var(--dur) var(--ease);
+}
+
+/* --- Stats row ----------------------------------------------------------- */
+
+.people-stats-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-3);
+}
+
+.people-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-2) var(--space-3);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-m);
+}
+
+.people-stat-label {
+  font-size: 0.7rem;
+  color: var(--text-subtle);
+}
+
+.people-stat-value {
+  font-size: 0.84rem;
+  font-weight: 600;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- Sections (appearance / facts / memories) ------------------------------ */
+
+.people-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.people-section-title {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.people-appearance-text {
+  margin: 0;
+  font-size: 0.85rem;
+  line-height: 1.6;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.people-empty-note {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--text-subtle);
+}
+
+.people-fact-list,
+.people-memory-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.people-fact-item,
+.people-memory-item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-s);
+}
+
+.people-fact-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.people-fact-text,
+.people-memory-text {
+  margin: 0;
+  font-size: 0.82rem;
+  line-height: 1.5;
+  color: var(--text);
+  word-break: break-word;
+}
+
+.people-fact-time,
+.people-memory-time {
+  font-size: 0.7rem;
+  color: var(--text-subtle);
+}
+
+/* --- Spinner (mirrors brain.css / characters.css's own local copies) ------- */
+
+.spin {
+  animation: tc-npc-people-spin 0.9s linear infinite;
+}
+
+@keyframes tc-npc-people-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (max-width: 860px) {
+  .people-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .people-list {
+    max-height: 320px;
+  }
+}
+
+@media (max-width: 480px) {
+  .people-stats-row {
+    grid-template-columns: 1fr;
+  }
+}

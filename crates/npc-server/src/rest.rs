@@ -1,6 +1,8 @@
 //! REST handlers: `/healthz`, `/api/state`, `/api/config`, `/api/characters*`.
 
-use axum::extract::{Path, State};
+use std::collections::HashMap;
+
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -353,6 +355,353 @@ fn error_response(status: StatusCode, message: String) -> Response {
     (status, Json(json!({ "error": message }))).into_response()
 }
 
+// ---------------------------------------------------------------------
+// GET /api/memory
+// ---------------------------------------------------------------------
+
+/// Same file name as `npc_memory::STORE_FILE_NAME` (that module is private,
+/// so this is a standalone constant rather than a shared one).
+const MEMORY_STORE_FILE_NAME: &str = "memory-store.json";
+/// Contract cap on `GET /api/memory`'s `longTerm` array.
+const MAX_LONG_TERM_DOCS: usize = 200;
+
+/// Cap on `GET /api/people/:id`'s `memories` array (contract §4).
+const MAX_PERSON_MEMORIES: usize = 50;
+
+/// Mirrors the on-disk shape of `npc_memory::store::Record` just enough to
+/// read `doc_id`/`text`/`created_at`/`metadata` back out — `hash` and
+/// `embedding` are present in the file but deliberately not modeled here, so
+/// they're dropped on deserialize instead of ever reaching the response
+/// (the embedding vector in particular must never be sent to the browser).
+#[derive(Debug, Clone, serde::Deserialize)]
+struct MemoryRecord {
+    doc_id: String,
+    text: String,
+    /// Unix timestamp (seconds), per `npc_memory::store::Record::created_at`.
+    created_at: i64,
+    /// String-keyed metadata as written by `npc_memory` (e.g. `"type"`,
+    /// `"timestamp"`, and — once a chunk has been attributed to someone —
+    /// `"person_id"`). Missing/absent in older records, hence `#[default]`.
+    #[serde(default)]
+    metadata: std::collections::HashMap<String, String>,
+}
+
+impl MemoryRecord {
+    fn person_id(&self) -> Option<&str> {
+        self.metadata.get("person_id").map(String::as_str)
+    }
+}
+
+fn format_created_at(ts: i64) -> String {
+    chrono::DateTime::from_timestamp(ts, 0)
+        .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        .unwrap_or_default()
+}
+
+/// `GET /api/memory`: the current short-term summary plus the long-term
+/// vector store's records (text only — embeddings are never included).
+/// Always 200; a missing/unreadable store is reported as empty rather than
+/// as an error, since "no memories yet" is a normal, expected state.
+pub async fn api_memory(State(state): State<AppState>) -> Response {
+    let short_term = state.short_term_memory.lock().unwrap().clone();
+    let mut records = read_long_term_records(&state.ctx.data_dir);
+    records.truncate(MAX_LONG_TERM_DOCS);
+    let long_term: Vec<Value> = records.into_iter().map(long_term_record_to_wire).collect();
+    Json(json!({ "shortTerm": short_term, "longTerm": long_term })).into_response()
+}
+
+fn long_term_record_to_wire(r: MemoryRecord) -> Value {
+    json!({
+        "docId": r.doc_id,
+        "text": r.text,
+        "createdAt": format_created_at(r.created_at),
+        "personId": r.person_id().unwrap_or_default(),
+    })
+}
+
+/// Read every record from `{data_dir}/memory-store.json`, newest first. A
+/// missing or unparseable store yields an empty list rather than an error
+/// (matches `load_long_term_memory`'s previous "no memories yet is normal"
+/// behavior) — callers apply their own cap/filter on top.
+fn read_long_term_records(data_dir: &std::path::Path) -> Vec<MemoryRecord> {
+    let path = data_dir.join(MEMORY_STORE_FILE_NAME);
+    let data = match std::fs::read_to_string(&path) {
+        Ok(data) => data,
+        Err(_) => return Vec::new(),
+    };
+    let mut records: Vec<MemoryRecord> = match serde_json::from_str(&data) {
+        Ok(records) => records,
+        Err(err) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %err,
+                "npc-server: failed to parse memory store, returning empty"
+            );
+            return Vec::new();
+        }
+    };
+    records.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    records
+}
+
+/// Keep only the records attributed to `person_id`, capped to `limit`.
+/// `records` is assumed already newest-first (as `read_long_term_records`
+/// returns), so the result stays newest-first too.
+fn filter_person_memories(records: Vec<MemoryRecord>, person_id: &str, limit: usize) -> Vec<MemoryRecord> {
+    records
+        .into_iter()
+        .filter(|r| r.person_id() == Some(person_id))
+        .take(limit)
+        .collect()
+}
+
+/// `GET /api/people/:id`'s `memories` array: long-term store records whose
+/// `metadata.person_id` matches `id`, newest first, capped at
+/// [`MAX_PERSON_MEMORIES`]. Embeddings are never included (`MemoryRecord`
+/// doesn't even model that field).
+fn person_memories(data_dir: &std::path::Path, person_id: &str) -> Vec<Value> {
+    let records = read_long_term_records(data_dir);
+    filter_person_memories(records, person_id, MAX_PERSON_MEMORIES)
+        .into_iter()
+        .map(|r| json!({ "docId": r.doc_id, "text": r.text, "createdAt": format_created_at(r.created_at) }))
+        .collect()
+}
+
+// ---------------------------------------------------------------------
+// /api/people
+// ---------------------------------------------------------------------
+
+/// Publish `person_updated` on `topic::UI` so `bus_forward` relays it to
+/// every connected WS client as a `person` frame (contract §4/§2).
+fn publish_person_updated(state: &AppState, person: &npc_core::Person) {
+    state
+        .ctx
+        .bus
+        .publish(npc_core::topic::UI, npc_core::msg::PERSON_UPDATED, npc_core::person_to_wire(person));
+}
+
+/// Publish `person_deleted` on `topic::UI` so `bus_forward` relays it as a
+/// `personDeleted` frame.
+fn publish_person_deleted(state: &AppState, id: &str) {
+    state
+        .ctx
+        .bus
+        .publish(npc_core::topic::UI, npc_core::msg::PERSON_DELETED, json!({ "id": id }));
+}
+
+/// `npc_core::load_person`/`delete_person` return `Err` both for a
+/// syntactically invalid id (the path-traversal guard) and for a genuine
+/// I/O/parse failure on an otherwise valid id. The former is a client
+/// mistake — a crafted or corrupted URL — so it must never surface as a
+/// 5xx; the latter is a real server-side fault. This tells them apart from
+/// the error message `npc_core::person::validate_person_id` produces.
+fn person_error_status(err: &anyhow::Error) -> StatusCode {
+    if err.to_string().contains("invalid person id") {
+        StatusCode::BAD_REQUEST
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    }
+}
+
+/// Newest-`lastSeen`-first ordering for `GET /api/people` (contract §4).
+fn sort_people_by_last_seen_desc(people: &mut [npc_core::Person]) {
+    people.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
+}
+
+pub async fn api_list_people(State(state): State<AppState>) -> Response {
+    match npc_core::list_people(&state.ctx.data_dir) {
+        Ok(mut people) => {
+            sort_people_by_last_seen_desc(&mut people);
+            let out: Vec<Value> = people.iter().map(npc_core::person_to_wire).collect();
+            Json(json!({ "people": out })).into_response()
+        }
+        Err(err) => error_response(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+    }
+}
+
+/// Body for `POST /api/people`.
+#[derive(serde::Deserialize)]
+struct CreatePersonRequest {
+    name: String,
+    #[serde(default)]
+    notes: Option<String>,
+}
+
+/// Trim `name` and reject it (`Err`) if that leaves nothing — a bare space
+/// or empty string isn't a usable person name.
+fn validate_person_name(name: &str) -> Result<&str, String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        Err("name is required".to_string())
+    } else {
+        Ok(trimmed)
+    }
+}
+
+pub async fn api_create_person(State(state): State<AppState>, body: String) -> Response {
+    let req: CreatePersonRequest = match serde_json::from_str(&body) {
+        Ok(r) => r,
+        Err(err) => return error_response(StatusCode::BAD_REQUEST, format!("invalid JSON: {err}")),
+    };
+    let name = match validate_person_name(&req.name) {
+        Ok(n) => n,
+        Err(err) => return error_response(StatusCode::BAD_REQUEST, err),
+    };
+
+    let people = match npc_core::list_people(&state.ctx.data_dir) {
+        Ok(p) => p,
+        Err(err) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+    };
+    // Don't create a second record for someone who already has one — hand
+    // back the existing person instead (no bus publish: nothing changed).
+    if let Some(existing) = npc_core::find_person(&people, name) {
+        return Json(json!({ "person": npc_core::person_to_wire(existing) })).into_response();
+    }
+
+    let mut person = npc_core::new_person(name, "manual");
+    if let Some(notes) = req.notes {
+        person.notes = notes;
+    }
+    if let Err(err) = npc_core::save_person(&state.ctx.data_dir, &person) {
+        return error_response(StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
+    }
+    publish_person_updated(&state, &person);
+    Json(json!({ "person": npc_core::person_to_wire(&person) })).into_response()
+}
+
+pub async fn api_get_person(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    let person = match npc_core::load_person(&state.ctx.data_dir, &id) {
+        Ok(Some(p)) => p,
+        Ok(None) => return error_response(StatusCode::NOT_FOUND, format!("person not found: {id}")),
+        Err(err) => return error_response(person_error_status(&err), err.to_string()),
+    };
+    let memories = person_memories(&state.ctx.data_dir, &id);
+    Json(json!({ "person": npc_core::person_to_wire(&person), "memories": memories })).into_response()
+}
+
+/// Body for `PATCH /api/people/:id`. Every field is optional — only the
+/// ones present in the request are applied, everything else keeps its
+/// current value (see [`apply_person_update`]).
+#[derive(Debug, Default, serde::Deserialize)]
+struct UpdatePersonRequest {
+    #[serde(default)]
+    name: Option<String>,
+    /// Replaces the whole `aliases` array when present (not merged).
+    #[serde(default)]
+    aliases: Option<Vec<String>>,
+    #[serde(default)]
+    notes: Option<String>,
+    #[serde(default)]
+    appearance: Option<String>,
+}
+
+/// Apply only the fields `req` actually sent onto `person`, leaving the rest
+/// untouched.
+fn apply_person_update(person: &mut npc_core::Person, req: &UpdatePersonRequest) {
+    if let Some(name) = &req.name {
+        person.name = name.clone();
+    }
+    if let Some(aliases) = &req.aliases {
+        person.aliases = aliases.clone();
+    }
+    if let Some(notes) = &req.notes {
+        person.notes = notes.clone();
+    }
+    if let Some(appearance) = &req.appearance {
+        person.appearance = appearance.clone();
+    }
+}
+
+pub async fn api_update_person(State(state): State<AppState>, Path(id): Path<String>, body: String) -> Response {
+    let req: UpdatePersonRequest = match serde_json::from_str(&body) {
+        Ok(r) => r,
+        Err(err) => return error_response(StatusCode::BAD_REQUEST, format!("invalid JSON: {err}")),
+    };
+    let mut person = match npc_core::load_person(&state.ctx.data_dir, &id) {
+        Ok(Some(p)) => p,
+        Ok(None) => return error_response(StatusCode::NOT_FOUND, format!("person not found: {id}")),
+        Err(err) => return error_response(person_error_status(&err), err.to_string()),
+    };
+    apply_person_update(&mut person, &req);
+    if let Err(err) = npc_core::save_person(&state.ctx.data_dir, &person) {
+        return error_response(StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
+    }
+    publish_person_updated(&state, &person);
+    Json(json!({ "person": npc_core::person_to_wire(&person) })).into_response()
+}
+
+pub async fn api_delete_person(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    match npc_core::delete_person(&state.ctx.data_dir, &id) {
+        Ok(true) => {
+            publish_person_deleted(&state, &id);
+            Json(json!({ "ok": true })).into_response()
+        }
+        Ok(false) => error_response(StatusCode::NOT_FOUND, format!("person not found: {id}")),
+        Err(err) => error_response(person_error_status(&err), err.to_string()),
+    }
+}
+
+// ---------------------------------------------------------------------
+// GET /api/chat/history
+// ---------------------------------------------------------------------
+
+/// Default value of `GET /api/chat/history`'s `limit` query parameter, when
+/// omitted or unparseable.
+const CHAT_HISTORY_DEFAULT_LIMIT: usize = 200;
+/// Upper bound `limit` is clamped to, regardless of what the client asks for.
+const CHAT_HISTORY_MAX_LIMIT: usize = 1000;
+
+/// Build the wire form of one chat log entry, dropping `speaker` entirely
+/// when absent rather than emitting `"speaker": null` — done by hand here
+/// (instead of relying on `ChatLogEntry`'s own `Serialize` impl) so this
+/// endpoint's contract doesn't silently depend on a `skip_serializing_if`
+/// attribute living in `npc-core`.
+fn chat_log_entry_to_wire(entry: &npc_core::chatlog::ChatLogEntry) -> Value {
+    let mut value = json!({
+        "time": entry.time,
+        "input": entry.input,
+        "output": entry.output,
+    });
+    if let Some(speaker) = &entry.speaker {
+        value["speaker"] = json!(speaker);
+    }
+    value
+}
+
+/// `GET /api/chat/history?limit=N`: the most recent chat turns from the
+/// on-disk chat log, returned oldest-first (chronological order) so the UI
+/// can append them straight into a scrolling transcript. `limit` defaults to
+/// [`CHAT_HISTORY_DEFAULT_LIMIT`] and is clamped to [`CHAT_HISTORY_MAX_LIMIT`].
+/// Sorted here by `time` (rather than trusting `load_recent`'s own ordering)
+/// so the oldest-first contract holds regardless of how that function
+/// internally orders its result.
+///
+/// `load_recent` does blocking file I/O and the log can grow to several
+/// thousand lines, so it runs on `spawn_blocking` rather than inline on this
+/// async handler's Tokio worker thread. A `JoinError` (only possible if that
+/// blocking task panics) is logged and treated as "no entries" so this
+/// endpoint keeps its always-200 contract.
+pub async fn api_chat_history(State(state): State<AppState>, Query(params): Query<HashMap<String, String>>) -> Response {
+    let limit = params
+        .get("limit")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(CHAT_HISTORY_DEFAULT_LIMIT)
+        .min(CHAT_HISTORY_MAX_LIMIT);
+
+    let data_dir = state.ctx.data_dir.clone();
+    let mut entries = match tokio::task::spawn_blocking(move || npc_core::chatlog::load_recent(&data_dir, limit)).await {
+        Ok(entries) => entries,
+        Err(err) => {
+            tracing::error!(error = %err, "npc-server: chat log load task panicked, returning empty");
+            Vec::new()
+        }
+    };
+    entries.sort_by(|a, b| a.time.cmp(&b.time));
+
+    let out: Vec<Value> = entries.iter().map(chat_log_entry_to_wire).collect();
+    Json(json!({ "entries": out })).into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -502,5 +851,171 @@ mod tests {
         assert_eq!(req.base_url, "http://localhost:11434");
         assert_eq!(req.api_key, "***");
         assert_eq!(req.section, "tts");
+    }
+
+    // -------------------------------------------------------------
+    // /api/people
+    // -------------------------------------------------------------
+
+    fn record(doc_id: &str, created_at: i64, person_id: Option<&str>) -> MemoryRecord {
+        let mut metadata = std::collections::HashMap::new();
+        if let Some(pid) = person_id {
+            metadata.insert("person_id".to_string(), pid.to_string());
+        }
+        MemoryRecord {
+            doc_id: doc_id.to_string(),
+            text: format!("text-{doc_id}"),
+            created_at,
+            metadata,
+        }
+    }
+
+    #[test]
+    fn person_error_status_maps_invalid_id_to_bad_request_not_5xx() {
+        let err = anyhow::anyhow!("invalid person id: \"../etc\"");
+        assert_eq!(person_error_status(&err), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn person_error_status_maps_other_errors_to_internal_server_error() {
+        let err = anyhow::anyhow!("failed to parse person abc: unexpected EOF");
+        assert_eq!(person_error_status(&err), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn sort_people_by_last_seen_desc_orders_newest_first() {
+        let mut a = npc_core::new_person("太郎", "manual");
+        a.last_seen = 100;
+        let mut b = npc_core::new_person("花子", "manual");
+        b.last_seen = 300;
+        let mut c = npc_core::new_person("次郎", "manual");
+        c.last_seen = 200;
+        let mut people = vec![a.clone(), b.clone(), c.clone()];
+
+        sort_people_by_last_seen_desc(&mut people);
+        assert_eq!(people.iter().map(|p| p.id.clone()).collect::<Vec<_>>(), vec![b.id, c.id, a.id]);
+    }
+
+    #[test]
+    fn validate_person_name_rejects_blank_and_trims() {
+        assert!(validate_person_name("").is_err());
+        assert!(validate_person_name("   ").is_err());
+        assert_eq!(validate_person_name("  太郎  ").unwrap(), "太郎");
+    }
+
+    #[test]
+    fn apply_person_update_only_touches_fields_that_were_sent() {
+        let mut person = npc_core::new_person("太郎", "manual");
+        person.notes = "original notes".to_string();
+        person.appearance = "original look".to_string();
+
+        // Only `notes` is present in the request.
+        let req = UpdatePersonRequest {
+            name: None,
+            aliases: None,
+            notes: Some("updated notes".to_string()),
+            appearance: None,
+        };
+        apply_person_update(&mut person, &req);
+
+        assert_eq!(person.name, "太郎"); // untouched
+        assert_eq!(person.notes, "updated notes"); // updated
+        assert_eq!(person.appearance, "original look"); // untouched
+    }
+
+    #[test]
+    fn apply_person_update_replaces_aliases_array_wholesale() {
+        let mut person = npc_core::new_person("太郎", "manual");
+        person.aliases = vec!["old-alias".to_string()];
+
+        let req = UpdatePersonRequest {
+            name: None,
+            aliases: Some(vec!["new-alias-1".to_string(), "new-alias-2".to_string()]),
+            notes: None,
+            appearance: None,
+        };
+        apply_person_update(&mut person, &req);
+
+        assert_eq!(person.aliases, vec!["new-alias-1".to_string(), "new-alias-2".to_string()]);
+    }
+
+    #[test]
+    fn apply_person_update_with_no_fields_is_a_no_op() {
+        let mut person = npc_core::new_person("太郎", "manual");
+        let before = format!("{person:?}");
+        apply_person_update(&mut person, &UpdatePersonRequest::default());
+        assert_eq!(format!("{person:?}"), before);
+    }
+
+    #[test]
+    fn filter_person_memories_keeps_only_matching_person_and_respects_limit() {
+        let records = vec![
+            record("1", 300, Some("person-a")),
+            record("2", 200, Some("person-b")),
+            record("3", 100, Some("person-a")),
+            record("4", 50, None),
+        ];
+
+        let filtered = filter_person_memories(records, "person-a", 50);
+        assert_eq!(filtered.len(), 2);
+        assert_eq!(filtered[0].doc_id, "1");
+        assert_eq!(filtered[1].doc_id, "3");
+    }
+
+    #[test]
+    fn filter_person_memories_respects_limit_below_match_count() {
+        let records = vec![record("1", 300, Some("p")), record("2", 200, Some("p")), record("3", 100, Some("p"))];
+        let filtered = filter_person_memories(records, "p", 2);
+        assert_eq!(filtered.len(), 2);
+        assert_eq!(filtered[0].doc_id, "1");
+        assert_eq!(filtered[1].doc_id, "2");
+    }
+
+    #[test]
+    fn filter_person_memories_no_match_returns_empty() {
+        let records = vec![record("1", 100, Some("someone-else"))];
+        assert!(filter_person_memories(records, "person-a", 50).is_empty());
+    }
+
+    #[test]
+    fn long_term_record_to_wire_defaults_missing_person_id_to_empty_string() {
+        let wire = long_term_record_to_wire(record("1", 100, None));
+        assert_eq!(wire["personId"], "");
+        assert_eq!(wire["docId"], "1");
+    }
+
+    #[test]
+    fn long_term_record_to_wire_includes_person_id_when_present() {
+        let wire = long_term_record_to_wire(record("1", 100, Some("person-a")));
+        assert_eq!(wire["personId"], "person-a");
+    }
+
+    // -------------------------------------------------------------
+    // /api/chat/history
+    // -------------------------------------------------------------
+
+    fn chat_entry(time: &str, speaker: Option<&str>, input: &str, output: &str) -> npc_core::chatlog::ChatLogEntry {
+        npc_core::chatlog::ChatLogEntry {
+            time: time.to_string(),
+            speaker: speaker.map(str::to_string),
+            input: input.to_string(),
+            output: output.to_string(),
+        }
+    }
+
+    #[test]
+    fn chat_log_entry_to_wire_omits_speaker_field_when_absent() {
+        let entry = chat_entry("2026-07-26T00:00:00Z", None, "hi", "hello");
+        let wire = chat_log_entry_to_wire(&entry);
+        assert!(wire.get("speaker").is_none());
+        assert_eq!(wire["input"], "hi");
+        assert_eq!(wire["output"], "hello");
+    }
+
+    #[test]
+    fn chat_log_entry_to_wire_includes_speaker_when_present() {
+        let entry = chat_entry("2026-07-26T00:00:00Z", Some("太郎"), "hi", "hello");
+        let wire = chat_log_entry_to_wire(&entry);
+        assert_eq!(wire["speaker"], "太郎");
     }
 }

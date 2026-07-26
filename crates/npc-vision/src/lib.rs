@@ -98,11 +98,24 @@ async fn run_vision(ctx: ModuleCtx) -> anyhow::Result<()> {
     let client = LlmClient::new(base_url, api_key)
         .with_reasoning_effort(config.api.reasoning_effort.clone());
 
+    // When person detection is on, tell the model about `observe_person`
+    // *before* applying the language instruction rather than after: the
+    // language instruction ("Always write your reply in ...") reads like the
+    // final word on output format, so appending after it would visually bury
+    // the person-detection instruction past what looks like the prompt's
+    // closing line. Folding it into `system_prompt` first keeps everything
+    // about *what to do* together, with the language directive staying last.
+    let mut system_prompt_base = config.vision.system_prompt.clone();
+    if config.vision.person_detection {
+        system_prompt_base
+            .push_str("\n\n画面に人物が写っている場合は observe_person ツールで記録してください。");
+    }
+
     // The observation text is published on `agent:sense` and read back by
     // npc-talk/npc-memory, so it follows `config.language` like every other
     // LLM output. Resolved once — the prompt can't change without a restart.
     let system_prompt =
-        npc_core::config::with_language_instruction(&config.vision.system_prompt, &config.language);
+        npc_core::config::with_language_instruction(&system_prompt_base, &config.language);
 
     // Single-flight loop: capture + analyze, then sleep `interval_seconds`
     // measured from the end of the previous cycle, until shutdown.
@@ -170,6 +183,7 @@ async fn run_cycle(
         data_url,
         mem_ctx.as_deref(),
         bus,
+        vision_config.person_detection,
     )
     .await
     {

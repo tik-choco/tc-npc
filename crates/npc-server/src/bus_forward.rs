@@ -3,11 +3,13 @@
 //! receive every topic and filter) and translates recognized envelopes into
 //! `ServerMsg` frames broadcast via the [`Hub`].
 
+use std::sync::{Arc, Mutex};
+
 use npc_core::{msg, topic, BusMessage, ModuleCtx};
 use serde_json::Value;
 
 use crate::hub::{EchoGuard, Hub, RateLimiter};
-use crate::protocol::{now_ms, ServerMsg};
+use crate::protocol::{now_ms, DriveLevel, ServerMsg};
 
 /// Topic used by other modules (npc-action, npc-vision, npc-speech,
 /// npc-translate, ...) to
@@ -16,7 +18,7 @@ use crate::protocol::{now_ms, ServerMsg};
 /// part of `npc_core::bus::topic` since it's consumed only by npc-server.
 const UI_TOPIC: &str = "npc:ui";
 
-pub fn spawn(ctx: ModuleCtx, hub: Hub, echo: std::sync::Arc<EchoGuard>) {
+pub fn spawn(ctx: ModuleCtx, hub: Hub, echo: std::sync::Arc<EchoGuard>, short_term_memory: Arc<Mutex<String>>) {
     let mut rx = ctx.bus.subscribe();
     let shutdown = ctx.shutdown.clone();
     let volume_limiter = RateLimiter::per_second(10);
@@ -27,7 +29,7 @@ pub fn spawn(ctx: ModuleCtx, hub: Hub, echo: std::sync::Arc<EchoGuard>) {
                 _ = shutdown.cancelled() => break,
                 received = rx.recv() => {
                     match received {
-                        Ok(bus_msg) => handle(&hub, &echo, &volume_limiter, bus_msg),
+                        Ok(bus_msg) => handle(&hub, &echo, &volume_limiter, &short_term_memory, bus_msg),
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                             tracing::warn!(skipped, "npc-server: bus forwarder lagged, dropped messages");
                         }
@@ -39,7 +41,13 @@ pub fn spawn(ctx: ModuleCtx, hub: Hub, echo: std::sync::Arc<EchoGuard>) {
     });
 }
 
-fn handle(hub: &Hub, echo: &EchoGuard, volume_limiter: &RateLimiter, bus_msg: BusMessage) {
+fn handle(
+    hub: &Hub,
+    echo: &EchoGuard,
+    volume_limiter: &RateLimiter,
+    short_term_memory: &Arc<Mutex<String>>,
+    bus_msg: BusMessage,
+) {
     let BusMessage { topic: bus_topic, env } = bus_msg;
 
     match bus_topic.as_str() {
@@ -88,6 +96,11 @@ fn handle(hub: &Hub, echo: &EchoGuard, volume_limiter: &RateLimiter, bus_msg: Bu
                 _ => return,
             };
             let content = text_field(&env.payload).unwrap_or_default();
+            if kind == "short" {
+                // Cached so `GET /api/memory` can answer without the REST
+                // handler needing its own bus subscription.
+                *short_term_memory.lock().unwrap() = content.clone();
+            }
             hub.broadcast(&ServerMsg::Memory {
                 kind: kind.to_string(),
                 text: content,
@@ -129,6 +142,40 @@ fn handle_ui(hub: &Hub, volume_limiter: &RateLimiter, msg_type: &str, payload: &
                 translations: None,
             });
         }
+        msg::AFFECT_STATE => {
+            match serde_json::from_value::<AffectStatePayload>(payload.clone()) {
+                Ok(p) => {
+                    hub.broadcast(&ServerMsg::Affect {
+                        ts: now_ms(),
+                        familiarity: p.familiarity,
+                        closing: p.closing,
+                        invite_caution: p.invite_caution,
+                        drives: p
+                            .drives
+                            .into_iter()
+                            .map(|d| DriveLevel {
+                                key: d.key,
+                                level: d.level,
+                                base: d.base,
+                            })
+                            .collect(),
+                    });
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "npc-server: failed to parse affect_state payload");
+                }
+            }
+        }
+        msg::PERSON_UPDATED => {
+            hub.broadcast(&ServerMsg::Person {
+                person: payload.clone(),
+            });
+        }
+        msg::PERSON_DELETED => {
+            if let Some(id) = payload.get("id").and_then(Value::as_str) {
+                hub.broadcast(&ServerMsg::PersonDeleted { id: id.to_string() });
+            }
+        }
         "translation" => {
             let str_field = |key: &str| {
                 payload
@@ -152,6 +199,29 @@ fn handle_ui(hub: &Hub, volume_limiter: &RateLimiter, msg_type: &str, payload: &
         }
         _ => {}
     }
+}
+
+/// Deserialization shape for `npc:ui` / `affect_state` payloads, matching
+/// `npc_talk::affect::AffectSnapshot`'s camelCase JSON (npc-server does not
+/// depend on npc-talk, so this is a minimal standalone mirror rather than a
+/// shared type).
+#[derive(Debug, serde::Deserialize)]
+struct AffectStatePayload {
+    #[serde(default)]
+    familiarity: f32,
+    #[serde(default)]
+    closing: bool,
+    #[serde(default, rename = "inviteCaution")]
+    invite_caution: bool,
+    #[serde(default)]
+    drives: Vec<AffectDrivePayload>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct AffectDrivePayload {
+    key: String,
+    level: f32,
+    base: f32,
 }
 
 /// Publishers use `{"content": ...}` (matching what this crate publishes for

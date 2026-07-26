@@ -1,7 +1,7 @@
 // Thin REST client for the tc-npc server (same origin as the WS endpoint —
 // see vite.config.ts's dev proxy for the local-dev equivalent).
 import type { ScheduledActionEntry } from "./config-types";
-import type { CharacterSummary, ConfigDocument } from "./types";
+import type { CharacterSummary, ConfigDocument, MemoryDocument, PersonDetail, PersonRecord } from "./types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, init);
@@ -47,6 +47,12 @@ export function activateCharacter(id: string): Promise<void> {
   return request(`/api/characters/${encodeURIComponent(id)}/activate`, { method: "POST" });
 }
 
+/** Snapshot of the memory module: the short-term summary plus the
+ *  newest-first-able long-term store, for the 感情 tab's memory panel. */
+export function getMemory(): Promise<MemoryDocument> {
+  return request("/api/memory");
+}
+
 /**
  * Fire one scheduled announcement right now, bypassing both the clock and
  * `scheduler.enabled` — the 予定 view's "テスト実行" button, equivalent to
@@ -80,6 +86,40 @@ export function testAnnouncement(body: SchedulerTestRequest): Promise<SchedulerT
   });
 }
 
+/** List all tracked people, newest-seen first — the 人物 tab's roster. */
+export function getPeople(): Promise<{ people: PersonRecord[] }> {
+  return request("/api/people");
+}
+
+/** One person plus their long-term memories, for the 人物 tab's detail panel. */
+export function getPerson(id: string): Promise<PersonDetail> {
+  return request(`/api/people/${encodeURIComponent(id)}`);
+}
+
+/** Manually add a person (source: "manual") from the 人物 tab. */
+export function createPerson(body: { name: string; notes?: string }): Promise<{ person: PersonRecord }> {
+  return request("/api/people", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export function updatePerson(
+  id: string,
+  body: { name?: string; aliases?: string[]; notes?: string; appearance?: string },
+): Promise<{ person: PersonRecord }> {
+  return request(`/api/people/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export function deletePerson(id: string): Promise<void> {
+  return request(`/api/people/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
 /**
  * Connection probe for the AI settings form: the server builds an
  * OpenAI-compatible client from the given endpoint and lists its models —
@@ -108,4 +148,19 @@ export function listVoices(body: LlmProbeRequest): Promise<{ voices: string[] }>
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+}
+
+/** One persisted chat turn, oldest-first, as returned by the history endpoint. */
+export interface ChatHistoryEntry {
+  time: string;
+  speaker?: string;
+  input: string;
+  output: string;
+}
+
+/** Chat transcript backfill for a fresh page load — useNpcSocket prepends
+ *  this to the live `timeline` on mount so a reload doesn't blank the chat
+ *  tab. `limit` defaults to 200 turns, matching the server default. */
+export function getChatHistory(limit = 200): Promise<{ entries: ChatHistoryEntry[] }> {
+  return request(`/api/chat/history?limit=${limit}`);
 }

@@ -63,10 +63,24 @@ services: `{"type": "...", "payload": ...}`.
 | `TTS`                | `tts`                    |
 | `SUSPEND`            | `suspend`                |
 | `RESUME`             | `resume`                 |
+| `PERSON_SEEN`        | `person_seen`            |
+| `PERSON_MEMORY`      | `person_memory`          |
+| `PERSON_UPDATED`     | `person_updated`         |
+| `PERSON_DELETED`     | `person_deleted`         |
 
 These match `agent-common/pkg/bus` in the original Go suite one-for-one, so
 existing documentation/mental models about "who publishes/subscribes what"
 still apply — only the transport changed.
+
+The four `PERSON_*` types have no Go equivalent — they're new for [person
+memory](#person-memory):
+
+| Type              | Topic          | Published by                              | Subscribed by                                                |
+|-------------------|-----------------|--------------------------------------------|----------------------------------------------------------------|
+| `person_seen`     | `topic::SENSE`  | npc-vision (`observe_person` tool call)     | npc-memory                                                      |
+| `person_memory`   | `topic::MEM`    | npc-memory                                  | npc-talk (fills `{{person_memory}}`)                            |
+| `person_updated`  | `topic::UI`     | npc-memory, npc-server (REST handlers)      | npc-server's `bus_forward` (relayed to WS clients as `person`)  |
+| `person_deleted`  | `topic::UI`     | npc-server (REST `DELETE /api/people/:id`)  | npc-server's `bus_forward` (relayed to WS clients as `personDeleted`) |
 
 ## The `Module` trait
 
@@ -104,7 +118,10 @@ for the authoritative field list/defaults. Top-level sections: `api`, `tts`,
 
 Prompt templates in `talk.prompts[].content` support placeholders:
 `{{session_meta}}`, `{{short_term_memory}}`, `{{long_term_memory}}`,
-`{{persona}}`.
+`{{person_memory}}`, `{{persona}}`. `{{person_memory}}` is filled in the same
+way as the other memory placeholders — empty string when there's nothing to
+say — and templates written before it existed keep working unchanged (an
+unknown placeholder is a no-op, not an error).
 
 ## Scheduled actions
 
@@ -162,6 +179,79 @@ connection (`api.*`) is still startup-only.
 sectioned system-prompt format tc-town itself uses (skipping empty
 sections).
 
+## Person memory
+
+Memories can be tied to an individual, not just to the conversation as a
+whole. The data model, on-disk store, and wire-format conversion live in
+`npc_core::person` (sibling of `npc_core::character`, same one-file-per-record
+layout under `{data_dir}/people/{id}.json`, same atomic tmp+rename save):
+
+- `Person { id, name, aliases, first_seen, last_seen, encounter_count,
+  appearance, facts: Vec<PersonFact>, familiarity, source, notes }` and
+  `PersonFact { text, source, created_at }` — the on-disk, snake_case shape.
+- `people_dir` / `list_people` / `load_person` / `save_person` /
+  `delete_person` — the store, all taking `data_dir: &Path`; ids are
+  validated against `[A-Za-z0-9-]` before touching the filesystem, so a
+  crafted id can never escape `{data_dir}/people/`.
+- `new_person(name, source)` builds a fresh record (uuid v4 id,
+  `first_seen`/`last_seen` = now, `encounter_count` = 1).
+- `normalize_person_name` / `find_person` match a spoken or typed name
+  against existing records: trim, fold full-width whitespace, strip a
+  trailing Japanese honorific (さん/くん/ちゃん/様/氏/先生/せんせい), lowercase,
+  then compare against `name` and every `aliases` entry.
+- `person_to_wire(&Person) -> serde_json::Value` is the single place the
+  on-disk snake_case shape is converted to the camelCase `PersonRecord` JSON
+  shape used by REST/WS and the web UI; both npc-memory and npc-server call
+  it rather than duplicating the field mapping.
+
+### Data flow: chat → person
+
+1. A speaker name arrives alongside speech — from `agent:sense`/`speech`'s
+   optional `speaker` field, `agent:chat`/`chat_log`'s optional `speaker`
+   field, or a scheduler/event's user name — and npc-memory resolves it to a
+   `Person` via `find_person`, creating a new one (`source: "chat"` or
+   `"event"`) if nothing matches.
+2. npc-memory asks the LLM (`memory.people.extract_prompt`) to pull new
+   facts about the people mentioned in the conversation out of the recent
+   turns, as a JSON array of `{name, facts}`.
+3. Extracted facts are appended to the matching person's `facts` (oldest
+   dropped once `memory.people.max_facts` is exceeded), `last_seen` and
+   `encounter_count` are updated, and the record is saved.
+4. npc-memory publishes a short profile as `person_memory` on `topic::MEM`
+   (`{person_id, name, content}`); npc-talk's `ChatEngine` stores it and fills
+   `{{person_memory}}` in the prompt template exactly like
+   `{{short_term_memory}}`/`{{long_term_memory}}` — empty when there's
+   nothing to say.
+
+### Data flow: vision → person
+
+When `vision.person_detection` is enabled, npc-vision's VLM call can invoke
+an `observe_person` tool once per capture cycle; the tool handler publishes
+`person_seen` on `topic::SENSE` with `{name, appearance, note, source:
+"vision"}` (`name` is often empty — the model frequently can't read a name
+off the screen). If `memory.people.link_vision` is enabled, npc-memory
+matches this against existing records by name first, then by appearance, and
+either merges into the match (updating `appearance`/`last_seen`/
+`encounter_count`) or creates a new record (`source: "vision"`). Since a name
+can't always be recovered from the screen, npc-memory caps how many unnamed,
+vision-only records it will create, rather than spawning a fresh `Person`
+every time the VLM redescribes the same unidentified visitor slightly
+differently.
+
+Because both fact extraction and person detection go through an LLM/VLM,
+this is best-effort: a sighting can go unmatched, a fact can be missed, and
+a name can be misread — none of it is a guarantee of accurate recognition.
+
+### Person-tagged long-term memory
+
+Long-term memory chunks created while a resolved person is in context are
+saved with `metadata.person_id` set to that person's id (empty when no
+person was resolved). RAG search over the long-term store gives a small
+relevance bonus to hits whose `metadata.person_id` matches the person
+currently in context, so memories about the person you're talking to surface
+ahead of otherwise-similar chunks about someone else. `GET /api/people/:id`
+reuses the same `metadata.person_id` field to list a person's memories.
+
 ## WS / REST protocol (implemented by `npc-server`)
 
 ### WebSocket, server → client (`/ws`)
@@ -181,17 +271,19 @@ sections).
 | `error`           | `{message}`                                       |
 | `inputAccepted`   | `{requestId}`                                     |
 | `response`        | `{requestId, status: "done"\|"error", text?, message?}` |
+| `person`          | `{person: PersonRecord}` — sent for both create and update, relayed from `person_updated` (`agent:mem`/`npc-server` handlers, see [Person memory](#person-memory)) |
+| `personDeleted`   | `{id}` — relayed from `person_deleted`                |
 
 ### WebSocket, client → server
 
 | Frame        | Fields                                            |
 |--------------|-----------------------------------------------------|
-| `input`      | `{text}`                                            |
+| `input`      | `{text, speaker?}` — `speaker`, if present, is attached to the resulting `agent:sense`/`speech` payload so npc-memory can resolve it to a person |
 | `command`    | `{text}`                                            |
 | `interrupt`  | `{}`                                                |
 | `suspend`    | `{}`                                                |
 | `resume`     | `{}`                                                |
-| `event`      | `{kind, userName?, text?, amount?}`                 |
+| `event`      | `{kind, userName?, text?, amount?}` — `userName` is also carried through as `speaker` |
 
 ### REST
 
@@ -206,6 +298,23 @@ sections).
   via `npc_scheduler::fire_announcement`; responds `{ok, fired, spoke,
   actions}`, where `fired: false` means the entry is a no-op (neither text
   nor actions).
+- `GET /api/memory` → `{shortTerm, longTerm}`; each `longTerm` entry now also
+  carries `personId` (the chunk's `metadata.person_id`, or `""` if none —
+  see [Person memory](#person-memory)).
+- `GET /api/people` → `{people: PersonRecord[]}`, sorted by `lastSeen`
+  descending.
+- `POST /api/people` → body `{name, notes?}` creates a manual record
+  (`source: "manual"`; if a matching name/alias already exists that existing
+  record is returned instead) → `{person: PersonRecord}`.
+- `GET /api/people/:id` → `{person: PersonRecord, memories: [{docId, text,
+  createdAt}]}`, the person's `metadata.person_id`-tagged long-term memories,
+  newest first, capped at 50.
+- `PATCH /api/people/:id` → body `{name?, aliases?, notes?, appearance?}`
+  updates only the fields sent → `{person: PersonRecord}`.
+- `DELETE /api/people/:id` → `{ok: true}`.
+- `POST`/`PATCH`/`DELETE` on `/api/people*` publish `person_updated` /
+  `person_deleted` on `topic::UI` on success; an unknown `:id` is a 404
+  `{error: "..."}`.
 - `GET /` and all non-`/api`/`/ws` paths → embedded `web/dist` static files,
   with SPA fallback to `index.html`.
 

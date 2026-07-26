@@ -3,7 +3,21 @@
 // props to whichever tab is active. Plain hooks only — no router/state lib
 // per the app's "keep it lean" rule.
 import { useState } from "preact/hooks";
-import { Bot, MessageSquare, Users, Mic, Eye, Gamepad2, CalendarClock, Languages, Settings as SettingsIcon, Moon, Sun } from "lucide-preact";
+import {
+  Bot,
+  MessageSquare,
+  Users,
+  UserRound,
+  Mic,
+  Eye,
+  Gamepad2,
+  CalendarClock,
+  Languages,
+  Brain,
+  Settings as SettingsIcon,
+  Moon,
+  Sun,
+} from "lucide-preact";
 
 import { useTheme } from "./hooks/useTheme";
 import { useI18n } from "./hooks/useI18n";
@@ -11,23 +25,37 @@ import { useNpcSocket } from "./hooks/useNpcSocket";
 import type { MessageKey } from "./lib/i18n";
 import { ChatView } from "./views/ChatView";
 import { CharactersView } from "./views/CharactersView";
+import { PeopleView } from "./views/PeopleView";
 import { VoiceView } from "./views/VoiceView";
 import { VisionView } from "./views/VisionView";
 import { ActionView } from "./views/ActionView";
 import { ScheduleView } from "./views/ScheduleView";
 import { InterpretView } from "./views/InterpretView";
+import { BrainView } from "./views/BrainView";
 import { SettingsView } from "./views/SettingsView";
 
-type Tab = "chat" | "characters" | "voice" | "vision" | "action" | "schedule" | "interpret" | "settings";
+type Tab =
+  | "chat"
+  | "characters"
+  | "people"
+  | "voice"
+  | "vision"
+  | "action"
+  | "schedule"
+  | "interpret"
+  | "brain"
+  | "settings";
 
 const TABS: Array<{ id: Tab; labelKey: MessageKey; icon: typeof MessageSquare }> = [
   { id: "chat", labelKey: "app.tab.chat", icon: MessageSquare },
   { id: "characters", labelKey: "app.tab.characters", icon: Users },
+  { id: "people", labelKey: "app.tab.people", icon: UserRound },
   { id: "voice", labelKey: "app.tab.voice", icon: Mic },
   { id: "vision", labelKey: "app.tab.vision", icon: Eye },
   { id: "action", labelKey: "app.tab.action", icon: Gamepad2 },
   { id: "schedule", labelKey: "app.tab.schedule", icon: CalendarClock },
   { id: "interpret", labelKey: "app.tab.interpret", icon: Languages },
+  { id: "brain", labelKey: "app.tab.brain", icon: Brain },
   { id: "settings", labelKey: "app.tab.settings", icon: SettingsIcon },
 ];
 
@@ -74,12 +102,15 @@ export function App() {
         {tab === "chat" && (
           <ChatView
             entries={npc.timeline}
+            errors={npc.errors}
+            pending={npc.pending}
             connectionState={npc.connectionState}
-            onSend={(text) => npc.send({ type: "input", text })}
+            onSend={(text, speaker) => npc.send({ type: "input", text, ...(speaker ? { speaker } : {}) })}
             onInterrupt={() => npc.send({ type: "interrupt" })}
           />
         )}
         {tab === "characters" && <CharactersView />}
+        {tab === "people" && <PeopleView people={npc.people} peopleVersion={npc.peopleVersion} />}
         {tab === "voice" && (
           <VoiceView
             volume={npc.volume}
@@ -98,6 +129,9 @@ export function App() {
         )}
         {tab === "schedule" && <ScheduleView />}
         {tab === "interpret" && <InterpretView translations={npc.translations} />}
+        {tab === "brain" && (
+          <BrainView affect={npc.affect} affectHistory={npc.affectHistory} memoryVersion={npc.memoryVersion} />
+        )}
         {tab === "settings" && <SettingsView />}
       </main>
     </div>

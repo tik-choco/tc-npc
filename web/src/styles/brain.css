@@ -1,0 +1,426 @@
+/* 感情 view — affect-drive dashboard (22-drive bars + familiarity/status
+   badges + a trend sparkline) and the memory panel (short-term summary +
+   long-term list). Tokens only, same design system as the rest of tc-npc. */
+
+.brain-view {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  max-width: 960px;
+  margin: 0 auto;
+  padding: var(--space-5);
+}
+
+.brain-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-5);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-l);
+  box-shadow: var(--shadow-1);
+}
+
+.brain-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.brain-section-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.brain-hint {
+  margin: 0;
+  font-size: 0.78rem;
+  line-height: 1.6;
+  color: var(--text-subtle);
+}
+
+/* --- Status: familiarity gauge + closing/inviteCaution badges ------------ */
+
+.brain-familiarity {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.brain-familiarity-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.brain-familiarity-value {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-subtle);
+}
+
+.brain-familiarity-wary {
+  margin-left: var(--space-1);
+  color: var(--danger-text);
+  background: var(--danger-soft);
+}
+
+.brain-familiarity-bar-track {
+  position: relative;
+  height: 12px;
+  overflow: hidden;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+}
+
+.brain-familiarity-bar-fill {
+  height: 100%;
+  background: var(--primary);
+  border-radius: var(--radius-pill);
+  transition: width var(--dur) var(--ease);
+}
+
+/* The 0.4 familiarity threshold below which the NPC is "wary". Drawn on top
+   of the track (not the fill, which stays under it via z-index) so it reads
+   at any fill level. */
+.brain-familiarity-bar-threshold {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 2px;
+  background: var(--text-subtle);
+  transform: translateX(-1px);
+}
+
+.brain-status-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.brain-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.brain-status-badge--caution {
+  color: var(--danger-text);
+  background: var(--danger-soft);
+}
+
+/* --- Drives ---------------------------------------------------------------- */
+
+.brain-drives-legend {
+  display: flex;
+  gap: var(--space-3);
+  font-size: 0.72rem;
+  color: var(--text-subtle);
+}
+
+.brain-drives-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.brain-drives-legend-item::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-pill);
+}
+
+.brain-drives-legend-item--up::before {
+  background: var(--primary);
+}
+
+.brain-drives-legend-item--down::before {
+  background: var(--danger);
+}
+
+.brain-drive-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: var(--space-3);
+}
+
+.brain-drive {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-m);
+  transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease);
+}
+
+/* Drives currently crossing the |level-base| >= 0.2 threshold are the ones
+   actually folded into this turn's prompt — surfaced with a stronger border
+   and a soft tint rather than color alone. */
+.brain-drive--active {
+  border-color: var(--primary-border);
+  background: var(--primary-soft);
+}
+
+.brain-drive--top {
+  box-shadow: 0 0 0 1px var(--primary-border);
+}
+
+.brain-drive-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.brain-drive-name {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.brain-drive-badge {
+  font-size: 0.64rem;
+}
+
+.brain-drive-badge--top {
+  color: var(--on-primary);
+  background: var(--primary);
+}
+
+.brain-drive-delta {
+  margin-left: auto;
+  font-size: 0.74rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-subtle);
+}
+
+.brain-drive-delta--up {
+  color: var(--primary);
+}
+
+.brain-drive-delta--down {
+  color: var(--danger-text);
+}
+
+.brain-drive-bar-track {
+  position: relative;
+  height: 10px;
+  overflow: hidden;
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+}
+
+.brain-drive-bar-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-radius: var(--radius-pill);
+  transition: left var(--dur) var(--ease), width var(--dur) var(--ease);
+}
+
+.brain-drive-bar-fill--up {
+  background: var(--primary);
+}
+
+.brain-drive-bar-fill--down {
+  background: var(--danger);
+}
+
+.brain-drive-bar-fill--flat {
+  background: transparent;
+}
+
+/* The base-value marker: a thin line drawn over the track, independent of
+   the fill, so "where is baseline" reads even when level == base (no fill
+   at all). */
+.brain-drive-bar-base {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 2px;
+  background: var(--text);
+  opacity: 0.55;
+  transform: translateX(-1px);
+  transition: left var(--dur) var(--ease);
+}
+
+.brain-drive-foot {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  font-size: 0.7rem;
+  color: var(--text-subtle);
+  font-variant-numeric: tabular-nums;
+}
+
+.brain-drive-level {
+  font-weight: 700;
+  color: var(--text-muted);
+}
+
+/* --- Trend sparkline -------------------------------------------------------- */
+
+.brain-trend-select {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.brain-trend-select select {
+  max-width: 280px;
+}
+
+.brain-sparkline {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-m);
+}
+
+.brain-sparkline-svg {
+  flex: 1;
+  height: 64px;
+  min-width: 0;
+}
+
+.brain-sparkline-line {
+  fill: none;
+  stroke: var(--primary);
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.brain-sparkline-current {
+  flex-shrink: 0;
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- Memory ------------------------------------------------------------- */
+
+.brain-memory-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-4);
+}
+
+.brain-memory-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-m);
+  min-height: 120px;
+}
+
+.brain-memory-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.brain-memory-card-title {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.brain-memory-short-text {
+  margin: 0;
+  font-size: 0.85rem;
+  line-height: 1.6;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.brain-memory-empty {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--text-subtle);
+}
+
+.brain-memory-long-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 360px;
+  overflow-y: auto;
+}
+
+.brain-memory-long-item {
+  padding: var(--space-2) var(--space-3);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-s);
+}
+
+.brain-memory-long-text {
+  margin: 0 0 var(--space-1);
+  font-size: 0.82rem;
+  line-height: 1.5;
+  color: var(--text);
+  word-break: break-word;
+}
+
+.brain-memory-long-time {
+  font-size: 0.7rem;
+  color: var(--text-subtle);
+}
+
+/* --- Spinner (mirrors settings.css / characters.css's own local copies) --- */
+
+.spin {
+  animation: tc-npc-brain-spin 0.9s linear infinite;
+}
+
+@keyframes tc-npc-brain-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (max-width: 720px) {
+  .brain-memory-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 480px) {
+  .brain-drive-grid {
+    grid-template-columns: 1fr;
+  }
+}

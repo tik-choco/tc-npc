@@ -6,9 +6,9 @@
 // on the next utterance), so there is no restart badge here. The transcript
 // itself is push-only: entries arrive as the original line first and fill in
 // each target language as its translation lands.
-import { useEffect, useRef } from "preact/hooks";
 import { AlertTriangle, Languages, MessageSquare, Mic } from "lucide-preact";
 
+import { useAutoScroll } from "../hooks/useAutoScroll";
 import { useConfigDoc } from "../hooks/useConfigDoc";
 import { useI18n } from "../hooks/useI18n";
 import type { TranslationEntry } from "../hooks/useNpcSocket";
@@ -33,18 +33,6 @@ const LANGUAGE_SUGGESTIONS = ["日本語", "英語", "中国語", "台湾華語"
 
 function readTranslation(config: ConfigDocument): TranslationSection {
   return (config.translation as TranslationSection | undefined) ?? {};
-}
-
-/** Scrolls to the newest entry as long as the user hasn't scrolled up. */
-function useAutoScroll(dep: unknown) {
-  const ref = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
-    if (nearBottom) el.scrollTop = el.scrollHeight;
-  }, [dep]);
-  return ref;
 }
 
 function TranscriptEntry({ entry }: { entry: TranslationEntry }) {
@@ -79,7 +67,10 @@ function TranscriptEntry({ entry }: { entry: TranslationEntry }) {
 export function InterpretView({ translations }: { translations: TranslationEntry[] }) {
   const { t } = useI18n();
   const { config, loadError, saveState, saveError, mutate } = useConfigDoc();
-  const transcriptRef = useAutoScroll(translations.length);
+  // Keyed on the newest entry's id (not `.length`): the list is capped at
+  // MAX_ENTRIES, so length alone would stop changing — and the effect would
+  // stop firing — once the cap is hit.
+  const transcriptRef = useAutoScroll(translations[translations.length - 1]?.id);
 
   function update(fn: (section: TranslationSection) => void) {
     mutate((draft) => {
