@@ -74,8 +74,11 @@ impl Module for ActionModule {
         let controller = Controller::new(vrc.clone());
         let navigator = Arc::new(Navigator::new(vrc.clone(), ctx.bus.clone()));
         let autopilot = Autopilot::new(navigator.clone());
-        let llm = LlmClient::new(config.api.base_url.clone(), config.api.api_key.clone())
-            .with_reasoning_effort(config.api.reasoning_effort.clone());
+        // Resolved once at startup, mirroring the pre-preset behavior (no
+        // hot-reload for the action LLM connection itself).
+        let resolved_llm = config.resolve_llm(npc_core::LlmTask::Action);
+        let llm = LlmClient::new(resolved_llm.base_url.clone(), resolved_llm.api_key.clone())
+            .with_reasoning_effort(resolved_llm.reasoning_effort.clone());
         let static_system_prompt = llm_action::build_static_system_prompt(&config.language);
         let map_data = Arc::new(RwLock::new(MapData::from_config(&config)));
 
@@ -89,6 +92,7 @@ impl Module for ActionModule {
             autopilot,
             map_data,
             llm,
+            model: resolved_llm.model,
             static_system_prompt: static_system_prompt.clone(),
             chat_history: AsyncMutex::new(vec![ChatMessage::system(static_system_prompt)]),
             chat_busy: AtomicBool::new(false),

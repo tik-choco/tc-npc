@@ -46,7 +46,62 @@
   color: var(--text-subtle);
 }
 
-/* --- Status: familiarity gauge + closing/inviteCaution badges ------------ */
+/* --- Status: partner + familiarity gauge + closing/inviteCaution badges -- */
+
+/* The conversation partner every reading below belongs to. */
+.brain-partner {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  color: var(--text-subtle);
+}
+
+.brain-partner-label {
+  flex-shrink: 0;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.brain-partner-name {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Nobody has identified themselves — muted placeholder, not a name. */
+.brain-partner-name.is-unknown {
+  font-weight: 400;
+  font-style: italic;
+  color: var(--text-subtle);
+}
+
+.brain-partner-badge {
+  flex-shrink: 0;
+}
+
+/* Nobody is talking — muted, but still showing who the state belongs to. */
+.brain-partner.is-away .brain-partner-name {
+  color: var(--text-subtle);
+}
+
+.brain-partner-badge--away {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.brain-partner-badge--switched {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--primary);
+  background: var(--primary-soft);
+}
 
 .brain-familiarity {
   display: flex;

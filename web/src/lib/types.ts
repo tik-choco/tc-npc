@@ -68,6 +68,10 @@ export interface DriveState {
  * carries all 22 entries in a fixed order. `closing` marks a wind-down
  * phase of the conversation; `inviteCaution` marks a first-meeting
  * invitation the NPC is wary of.
+ *
+ * The state is per conversation partner (npc-talk's `PartnerAffect`), so
+ * these readings belong to `partner` specifically — familiarity built with
+ * one person is not what you see when another is speaking.
  */
 export interface AffectMessage {
   type: "affect";
@@ -75,6 +79,21 @@ export interface AffectMessage {
   familiarity: number;
   closing: boolean;
   inviteCaution: boolean;
+  /** Who the NPC is talking to. Omitted while nobody has identified
+   *  themselves — messages typed into this UI carry no speaker, so an
+   *  operator-only session stays unnamed. */
+  partner?: string;
+  /** The NPC has talked with this partner before in this session. */
+  partnerKnown: boolean;
+  /** Set on the single frame where npc-talk detected the partner changing.
+   *  Server-side detection, so the UI doesn't have to diff frames. */
+  partnerSwitched: boolean;
+  /** The partner has been silent past `talk.affect.absence_timeout_secs`, so
+   *  the NPC treats them as having left: drives settle back to baseline
+   *  while what it knows about them is kept. Unlike `partnerSwitched` this
+   *  is a lasting state, cleared only when somebody speaks again. Its frame
+   *  arrives on a timer, not on a conversation turn. */
+  partnerAway: boolean;
   drives: DriveState[];
 }
 
@@ -98,6 +117,15 @@ export interface VolumeMessage {
 export interface StatusMessage {
   type: "status";
   modules: Record<string, boolean>;
+}
+
+/** Current position of the cascade voice loop's 開始/停止 switch. Sent right
+ *  after `hello` and again on every change, from whichever tab flipped it —
+ *  the server is authoritative, so the チャット toggle renders this rather
+ *  than its own local state. */
+export interface VoiceMessage {
+  type: "voice";
+  active: boolean;
 }
 
 export interface ErrorMessage {
@@ -165,6 +193,7 @@ export type ServerMessage =
   | PositionMessage
   | VolumeMessage
   | StatusMessage
+  | VoiceMessage
   | ErrorMessage
   | InputAcceptedMessage
   | ResponseMessage
@@ -177,6 +206,8 @@ export type ClientMessage =
   | { type: "interrupt" }
   | { type: "suspend" }
   | { type: "resume" }
+  | { type: "voiceStart" }
+  | { type: "voiceStop" }
   | { type: "event"; kind: string; userName?: string; text?: string; amount?: number };
 
 // --- REST -------------------------------------------------------------

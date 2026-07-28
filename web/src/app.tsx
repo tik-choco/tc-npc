@@ -1,18 +1,27 @@
 // App shell: header (brand + tab nav + theme toggle) and the single
 // useNpcSocket connection, whose distributed frame state is handed down as
 // props to whichever tab is active. Plain hooks only — no router/state lib
-// per the app's "keep it lean" rule.
-import { useState } from "preact/hooks";
+// per the app's "keep it lean" rule. The top-level nav is チャット(+音声/
+// 状態/通訳 サイドパネル) / キャラ / 人物 / 視覚 / 行動 / 予定 / 感情 /
+// 設定 — 音声 and 通訳 no longer have their own top-level tabs; they live
+// inside the チャット tab's sidebar (see ChatSidebar / ChatView) alongside
+// the 状態 panel.
+//
+// Which tab is active lives in the URL fragment (`#/brain`, `#/chat/status`)
+// rather than in component state — see lib/router.ts for why the fragment and
+// not a path. That makes each tab separately addressable, so the operator can
+// keep several windows open on different tabs at once; the header nav is
+// therefore rendered as real links, which ctrl/middle-click opens in a new
+// window for free.
+import { useEffect } from "preact/hooks";
 import {
   Bot,
   MessageSquare,
   Users,
   UserRound,
-  Mic,
   Eye,
   Gamepad2,
   CalendarClock,
-  Languages,
   Brain,
   Settings as SettingsIcon,
   Moon,
@@ -23,38 +32,23 @@ import { useTheme } from "./hooks/useTheme";
 import { useI18n } from "./hooks/useI18n";
 import { useNpcSocket } from "./hooks/useNpcSocket";
 import type { MessageKey } from "./lib/i18n";
+import { formatHash, useRoute, type Tab } from "./lib/router";
 import { ChatView } from "./views/ChatView";
 import { CharactersView } from "./views/CharactersView";
 import { PeopleView } from "./views/PeopleView";
-import { VoiceView } from "./views/VoiceView";
 import { VisionView } from "./views/VisionView";
 import { ActionView } from "./views/ActionView";
 import { ScheduleView } from "./views/ScheduleView";
-import { InterpretView } from "./views/InterpretView";
 import { BrainView } from "./views/BrainView";
 import { SettingsView } from "./views/SettingsView";
-
-type Tab =
-  | "chat"
-  | "characters"
-  | "people"
-  | "voice"
-  | "vision"
-  | "action"
-  | "schedule"
-  | "interpret"
-  | "brain"
-  | "settings";
 
 const TABS: Array<{ id: Tab; labelKey: MessageKey; icon: typeof MessageSquare }> = [
   { id: "chat", labelKey: "app.tab.chat", icon: MessageSquare },
   { id: "characters", labelKey: "app.tab.characters", icon: Users },
   { id: "people", labelKey: "app.tab.people", icon: UserRound },
-  { id: "voice", labelKey: "app.tab.voice", icon: Mic },
   { id: "vision", labelKey: "app.tab.vision", icon: Eye },
   { id: "action", labelKey: "app.tab.action", icon: Gamepad2 },
   { id: "schedule", labelKey: "app.tab.schedule", icon: CalendarClock },
-  { id: "interpret", labelKey: "app.tab.interpret", icon: Languages },
   { id: "brain", labelKey: "app.tab.brain", icon: Brain },
   { id: "settings", labelKey: "app.tab.settings", icon: SettingsIcon },
 ];
@@ -62,8 +56,17 @@ const TABS: Array<{ id: Tab; labelKey: MessageKey; icon: typeof MessageSquare }>
 export function App() {
   const theme = useTheme();
   const { t } = useI18n();
-  const [tab, setTab] = useState<Tab>("chat");
+  const { route, setChatPanel } = useRoute();
+  const tab = route.tab;
   const npc = useNpcSocket();
+
+  // Name the window after its tab. With several windows open on different
+  // tabs — the whole point of routing them — the title bar and taskbar entry
+  // are the only thing that tells them apart.
+  useEffect(() => {
+    const label = TABS.find((entry) => entry.id === tab)?.labelKey;
+    document.title = label ? `TC NPC — ${t(label)}` : "TC NPC";
+  }, [tab, t]);
 
   return (
     <div class="app-shell">
@@ -73,17 +76,21 @@ export function App() {
           <span>TC NPC</span>
         </div>
         <nav class="app-tabs">
+          {/* Real links, not buttons: activating one only has to change the
+              fragment, which useRoute() picks up — and ctrl/middle-click then
+              opens that tab in its own window without any extra handling. The
+              チャット link keeps the current sidebar panel so switching away
+              and back doesn't reset it. */}
           {TABS.map(({ id, labelKey, icon: Icon }) => (
-            <button
+            <a
               key={id}
-              type="button"
+              href={formatHash({ ...route, tab: id })}
               class={`app-tab${tab === id ? " app-tab-active" : ""}`}
               aria-current={tab === id ? "page" : undefined}
-              onClick={() => setTab(id)}
             >
               <Icon size={16} />
               <span>{t(labelKey)}</span>
-            </button>
+            </a>
           ))}
         </nav>
         <div class="app-header-links">
@@ -105,20 +112,26 @@ export function App() {
             errors={npc.errors}
             pending={npc.pending}
             connectionState={npc.connectionState}
-            onSend={(text, speaker) => npc.send({ type: "input", text, ...(speaker ? { speaker } : {}) })}
+            version={npc.version}
+            character={npc.character}
+            modules={npc.modules}
+            affect={npc.affect}
+            volume={npc.volume}
+            ttsLines={npc.ttsLines}
+            translations={npc.translations}
+            voiceActive={npc.voiceActive}
+            sidebarPanel={route.chatPanel}
+            onSidebarPanelChange={setChatPanel}
+            onSend={(text, speaker) => npc.send({ type: "input", text, speaker })}
             onInterrupt={() => npc.send({ type: "interrupt" })}
+            onSuspend={() => npc.send({ type: "suspend" })}
+            onResume={() => npc.send({ type: "resume" })}
+            onVoiceStart={() => npc.send({ type: "voiceStart" })}
+            onVoiceStop={() => npc.send({ type: "voiceStop" })}
           />
         )}
         {tab === "characters" && <CharactersView />}
         {tab === "people" && <PeopleView people={npc.people} peopleVersion={npc.peopleVersion} />}
-        {tab === "voice" && (
-          <VoiceView
-            volume={npc.volume}
-            ttsLines={npc.ttsLines}
-            onSuspend={() => npc.send({ type: "suspend" })}
-            onResume={() => npc.send({ type: "resume" })}
-          />
-        )}
         {tab === "vision" && <VisionView visionLog={npc.visionLog} />}
         {tab === "action" && (
           <ActionView
@@ -128,7 +141,6 @@ export function App() {
           />
         )}
         {tab === "schedule" && <ScheduleView />}
-        {tab === "interpret" && <InterpretView translations={npc.translations} />}
         {tab === "brain" && (
           <BrainView affect={npc.affect} affectHistory={npc.affectHistory} memoryVersion={npc.memoryVersion} />
         )}

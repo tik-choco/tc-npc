@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use npc_core::config::PromptEntry;
 use npc_core::{msg, topic, Bus};
@@ -11,7 +12,7 @@ use npc_llm::{ChatContent, ChatMessage, LlmClient, ResponseMessage};
 use regex::Regex;
 use tokio::sync::Mutex;
 
-use crate::affect::AffectState;
+use crate::affect::{AffectState, PartnerAffect};
 use crate::tools::ToolRegistry;
 
 /// State mutated over the lifetime of a conversation: message history plus
@@ -30,7 +31,11 @@ struct ChatState {
     /// contract §6). Same "empty string when unset" treatment as
     /// `short_term_memory`/`long_term_memory`.
     person_memory: String,
-    affect: AffectState,
+    /// Per-partner drive state. Conversation `history` above stays shared
+    /// across partners on purpose — an NPC in a room hears everyone, so the
+    /// transcript is one thread — but the internal state follows whoever is
+    /// actually being spoken to (see [`PartnerAffect`]).
+    affect: PartnerAffect,
 }
 
 pub struct ChatEngine {
@@ -55,6 +60,9 @@ pub struct ChatEngine {
     /// calling the LLM" short-circuit. Only consulted when `affect_enabled`
     /// is also `true`.
     affect_forced_closure: bool,
+    /// `config.talk.affect.absence_timeout_secs` — silence past this counts
+    /// as the partner having left. Zero disables the check.
+    absence_timeout: Duration,
     state: Mutex<ChatState>,
 }
 
@@ -95,12 +103,13 @@ impl ChatEngine {
             language_instruction: npc_core::config::language_instruction(language),
             affect_enabled: affect_config.enabled,
             affect_forced_closure: affect_config.forced_closure,
+            absence_timeout: Duration::from_secs(affect_config.absence_timeout_secs),
             state: Mutex::new(ChatState {
                 history: Vec::new(),
                 short_term_memory: String::new(),
                 long_term_memory: String::new(),
                 person_memory: String::new(),
-                affect: AffectState::default(),
+                affect: PartnerAffect::default(),
             }),
         }
     }
@@ -108,11 +117,36 @@ impl ChatEngine {
     /// Publish the current [`AffectState`] snapshot on `npc:ui` /
     /// `affect_state` for the web UI's real-time affect panel. No-op when
     /// `config.talk.affect.enabled` is `false`.
-    fn publish_affect_snapshot(&self, affect: &AffectState) {
+    fn publish_affect_snapshot(&self, affect: &PartnerAffect) {
         if !self.affect_enabled {
             return;
         }
         self.bus.publish(topic::UI, msg::AFFECT_STATE, affect.snapshot());
+    }
+
+    /// Poll for the conversation partner having walked away, publishing an
+    /// updated affect frame if they have. Driven by a timer in
+    /// [`crate::module`] rather than by a turn, because the whole point is to
+    /// notice a turn that never came.
+    ///
+    /// Uses `try_lock` and gives up if a turn currently holds the state: the
+    /// partner is demonstrably not absent while their utterance is being
+    /// answered, and the next tick will pick it up anyway.
+    pub async fn check_partner_absence(&self) {
+        if !self.affect_enabled || self.absence_timeout.is_zero() {
+            return;
+        }
+        let Ok(mut guard) = self.state.try_lock() else {
+            return;
+        };
+        if let Some(absence) = guard.affect.check_absence(Instant::now(), self.absence_timeout) {
+            tracing::info!(
+                who = ?absence.who,
+                idle_secs = absence.idle.as_secs(),
+                "npc-talk: conversation partner went quiet, treating them as away",
+            );
+            self.publish_affect_snapshot(&guard.affect);
+        }
     }
 
     pub async fn set_short_term_memory(&self, content: String) {
@@ -152,14 +186,28 @@ impl ChatEngine {
         };
 
         if self.affect_enabled {
-            let own_turns = guard.history.iter().filter(|m| m.role == "assistant").count() as u32;
-            // `partner_known` (name-from-memory matching) is out of scope for
-            // this port; always `false` for now.
-            guard.affect.update(input, own_turns, false);
+            let now = Instant::now();
+            // Catch up on an absence the timer may not have run for (or that
+            // it skipped because a turn held the lock) before scoring this
+            // utterance, so a partner returning after a long gap resumes from
+            // a settled state rather than from mid-conversation.
+            guard.affect.check_absence(now, self.absence_timeout);
+            // Detect the partner changing *before* folding this utterance in,
+            // so the turn is scored against the new partner's state rather
+            // than the outgoing one's.
+            if let Some(switch) = guard.affect.observe(speaker) {
+                tracing::info!(
+                    from = ?switch.from,
+                    to = %switch.to,
+                    returning = switch.returning,
+                    "npc-talk: conversation partner changed",
+                );
+            }
+            guard.affect.update(input, now);
             self.publish_affect_snapshot(&guard.affect);
 
             if self.affect_forced_closure {
-                if let Some(reply) = guard.affect.forced_closure_reply(input) {
+                if let Some(reply) = guard.affect.state().forced_closure_reply(input) {
                     guard.history.push(ChatMessage::user(input.to_string()));
                     guard.history.push(ChatMessage::assistant(reply.clone()));
                     trim_history(&mut guard.history, self.history_size);
@@ -196,7 +244,7 @@ impl ChatEngine {
         }
 
         if self.affect_enabled {
-            messages.push(ChatMessage::system(guard.affect.to_prompt()));
+            messages.push(ChatMessage::system(guard.affect.state().to_prompt()));
         }
 
         if let Some(instruction) = self.language_instruction {

@@ -7,6 +7,44 @@
     "embedding_model": "text-embedding-3-small",
     "reasoning_effort": "none"
   },
+  "providers": [
+    {
+      "id": "default",
+      "label": "既定",
+      "base_url": "http://localhost:11434/v1",
+      "api_key": ""
+    },
+    {
+      "id": "vision",
+      "label": "Vision",
+      "base_url": "https://api.openai.com/v1",
+      "api_key": ""
+    }
+  ],
+  "presets": [
+    {
+      "id": "default",
+      "label": "gpt-4o-mini",
+      "provider_id": "default",
+      "model": "gpt-4o-mini",
+      "reasoning_effort": "none"
+    },
+    {
+      "id": "embedding",
+      "label": "text-embedding-3-small",
+      "provider_id": "default",
+      "model": "text-embedding-3-small",
+      "reasoning_effort": ""
+    },
+    {
+      "id": "vision",
+      "label": "gpt-4o-mini (Vision)",
+      "provider_id": "vision",
+      "model": "gpt-4o-mini",
+      "reasoning_effort": ""
+    }
+  ],
+  "default_preset_id": "default",
   "tts": {
     "enabled": false,
     "base_url": "",
@@ -14,7 +52,8 @@
     "model": "",
     "voice": "alloy",
     "speed": 1.0,
-    "max_len": 200
+    "max_len": 200,
+    "preset_id": ""
   },
   "stt": {
     "enabled": false,
@@ -22,7 +61,10 @@
     "api_key": "",
     "model": "whisper-1",
     "silence_duration": 1.5,
-    "input_threshold": 0.01
+    "input_threshold": 0.01,
+    "barge_in": true,
+    "barge_in_factor": 2.5,
+    "preset_id": ""
   },
   "talk": {
     "enabled": true,
@@ -36,8 +78,10 @@
     "filter_prompt_name": "",
     "affect": {
       "enabled": true,
-      "forced_closure": true
-    }
+      "forced_closure": true,
+      "absence_timeout_secs": 300
+    },
+    "preset_id": ""
   },
   "memory": {
     "enabled": true,
@@ -53,7 +97,9 @@
       "extract_prompt": "以下の会話から、登場した人物について新たに分かった事実だけを抽出してください。JSON配列で、各要素は {\"name\": \"人物名\", \"facts\": [\"事実1\", \"事実2\"]} の形式にしてください。人物が特定できない、または新しい情報がない場合は空配列 [] を返してください。説明や前置きは不要です。",
       "max_facts": 20,
       "link_vision": true
-    }
+    },
+    "preset_id": "",
+    "embedding_preset_id": "embedding"
   },
   "vision": {
     "enabled": false,
@@ -65,7 +111,8 @@
     "target_window_title": "",
     "system_prompt": "画面のスクリーンショットを簡潔に日本語で説明してください。",
     "debug_save": false,
-    "person_detection": false
+    "person_detection": false,
+    "preset_id": "vision"
   },
   "speech": {
     "input_device": "",
@@ -87,7 +134,8 @@
           { "location": "home", "seconds": 3.0, "wait": true }
         ]
       }
-    ]
+    ],
+    "preset_id": ""
   },
   "vrc": {
     "chatbox": false,
@@ -115,7 +163,8 @@
     "context_size": 3,
     "auto_reverse": true,
     "chatbox": false,
-    "model": ""
+    "model": "",
+    "preset_id": ""
   },
   "server": {
     "addr": "127.0.0.1:47950",

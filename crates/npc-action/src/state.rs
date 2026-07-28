@@ -81,6 +81,10 @@ pub struct ActionState {
     pub map_data: Arc<RwLock<MapData>>,
 
     pub llm: LlmClient,
+    /// Resolved once at startup via `Config::resolve_llm(LlmTask::Action)` —
+    /// see `ActionModule::run`. Kept alongside `llm` since `chat_with_action`
+    /// needs the model name on every request.
+    pub model: String,
     pub static_system_prompt: String,
     pub chat_history: AsyncMutex<Vec<ChatMessage>>,
     /// Guards `ChatWithAction`: only one NL round-trip runs at a time: new

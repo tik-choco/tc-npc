@@ -2562,6 +2562,7 @@ dependencies = [
  "npc-core",
  "npc-llm",
  "npc-scheduler",
+ "npc-speech",
  "open",
  "rust-embed",
  "serde",

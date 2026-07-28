@@ -30,6 +30,27 @@ export function putConfig(config: ConfigDocument): Promise<void> {
   });
 }
 
+/**
+ * GET /api/audio/devices — the audio endpoints the *server's* host can see
+ * (it owns the mic and the speakers; the browser is only a remote control,
+ * so this deliberately isn't navigator.mediaDevices).
+ *
+ * Names feed the 音声 panel's pickers and are saved verbatim into
+ * config.speech.{input,output}_device, which the server matches as a
+ * case-insensitive substring. `default_*` is what an empty setting resolves
+ * to, used only to label the "OS default" entry.
+ */
+export interface AudioDevices {
+  input: string[];
+  output: string[];
+  default_input: string | null;
+  default_output: string | null;
+}
+
+export function getAudioDevices(): Promise<AudioDevices> {
+  return request("/api/audio/devices");
+}
+
 export function getCharacters(): Promise<CharacterSummary[]> {
   return request("/api/characters");
 }
@@ -126,12 +147,17 @@ export function deletePerson(id: string): Promise<void> {
  * a successful non-empty listing doubles as the connection test (per the
  * tc-* suite's settings convention; no separate "test" button).
  *
- * `apiKey: "***"` means "use the key already saved in config for `section`".
+ * `apiKey: "***"` means "use the key already saved in config for `section`",
+ * unless `providerId` is given — in that case the server prefers the saved
+ * key for that provider id (config.providers[]) instead. `section` stays
+ * optional for backward compatibility with pre-provider/preset callers and
+ * defaults to `"api"` on the server when omitted.
  */
 export interface LlmProbeRequest {
   baseUrl: string;
   apiKey: string;
-  section: "api" | "tts" | "stt";
+  section?: "api" | "tts" | "stt";
+  providerId?: string;
 }
 
 export function listModels(body: LlmProbeRequest): Promise<{ models: string[] }> {

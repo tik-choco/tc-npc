@@ -7,6 +7,7 @@ use axum::extract::State;
 use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
 use npc_core::{msg, topic};
+use std::sync::atomic::Ordering;
 use uuid::Uuid;
 
 use crate::protocol::{now_ms, CharacterRef, ClientMsg, ModuleFlags, ServerMsg};
@@ -28,8 +29,8 @@ pub fn module_flags(config: &npc_core::Config) -> ModuleFlags {
     }
 }
 
-fn character_ref(ctx: &npc_core::ModuleCtx) -> Option<CharacterRef> {
-    npc_core::active_character(&ctx.data_dir, &ctx.config)
+fn character_ref(state: &AppState) -> Option<CharacterRef> {
+    npc_core::active_character(&state.ctx.data_dir, &state.current_config())
         .ok()
         .flatten()
         .map(|c| CharacterRef {
@@ -38,11 +39,14 @@ fn character_ref(ctx: &npc_core::ModuleCtx) -> Option<CharacterRef> {
         })
 }
 
-fn build_hello(ctx: &npc_core::ModuleCtx) -> ServerMsg {
+/// Built from the *current* config, not the startup snapshot: npc-speech
+/// starts and stops with `stt`/`tts` while the app runs, so a tab opened
+/// after that toggle has to see where the switch actually is.
+fn build_hello(state: &AppState) -> ServerMsg {
     ServerMsg::Hello {
         version: "1".to_string(),
-        modules: module_flags(&ctx.config),
-        character: character_ref(ctx),
+        modules: module_flags(&state.current_config()),
+        character: character_ref(state),
     }
 }
 
@@ -50,7 +54,15 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     let (mut sink, mut stream) = socket.split();
     let (client_id, mut rx) = state.hub.register();
 
-    state.hub.send_to(client_id, &build_hello(&state.ctx));
+    state.hub.send_to(client_id, &build_hello(&state));
+    // Right after hello so the チャット tab's 音声 開始/停止 toggle renders in
+    // the position the running agent is actually in, not a guessed default.
+    state.hub.send_to(
+        client_id,
+        &ServerMsg::Voice {
+            active: state.voice_active.load(Ordering::SeqCst),
+        },
+    );
 
     let shutdown = state.ctx.shutdown.clone();
     let writer_shutdown = shutdown.clone();
@@ -146,7 +158,7 @@ async fn handle_client_message(state: &AppState, client_id: u64, text: &str) {
             state
                 .ctx
                 .bus
-                .publish(topic::INTERRUPT, "interrupt", serde_json::json!({}));
+                .publish(topic::INTERRUPT, msg::INTERRUPT, serde_json::json!({}));
         }
         ClientMsg::Suspend => {
             state
@@ -160,6 +172,8 @@ async fn handle_client_message(state: &AppState, client_id: u64, text: &str) {
                 .bus
                 .publish(topic::INTERRUPT, msg::RESUME, serde_json::json!({}));
         }
+        ClientMsg::VoiceStart => set_voice_active(state, true),
+        ClientMsg::VoiceStop => set_voice_active(state, false),
         ClientMsg::Event {
             kind,
             user_name,
@@ -180,6 +194,27 @@ async fn handle_client_message(state: &AppState, client_id: u64, text: &str) {
             );
         }
     }
+}
+
+/// Flip the cascade voice loop on or off: tell npc-speech over the bus, then
+/// broadcast the new position so every open tab's toggle agrees (including
+/// the one that didn't click it).
+///
+/// The broadcast is unconditional rather than only-on-change: a client whose
+/// click raced another tab's still gets a frame confirming where the switch
+/// ended up, instead of being left showing its own optimistic guess.
+fn set_voice_active(state: &AppState, active: bool) {
+    state.voice_active.store(active, Ordering::SeqCst);
+    state.ctx.bus.publish(
+        topic::INTERRUPT,
+        if active {
+            msg::VOICE_START
+        } else {
+            msg::VOICE_STOP
+        },
+        serde_json::json!({}),
+    );
+    state.hub.broadcast(&ServerMsg::Voice { active });
 }
 
 /// Build the `agent:sense`/`speech` payload for `content`, attributing it to

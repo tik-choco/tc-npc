@@ -49,6 +49,8 @@ export interface TranslationSection {
   chatbox?: boolean;
   /** Model override; empty falls back to api.model. */
   model?: string;
+  /** "" follows default_preset_id (lib/llm-config.ts's resolvePreset). */
+  preset_id?: string;
 }
 
 /** config.action.locations[] — a named point in VRChat-world coordinates. */
@@ -78,6 +80,8 @@ export interface ActionSection {
   osc_address?: string;
   locations?: LocationEntry[];
   routes?: RouteEntry[];
+  /** "" follows default_preset_id (lib/llm-config.ts's resolvePreset). */
+  preset_id?: string;
 }
 
 /** config.api — OpenAI-compatible chat/embedding connection. */
@@ -91,6 +95,21 @@ export interface ApiSection {
    * requests ("none" is an explicit value, not "omit"); empty/missing is
    * treated as "none" by the server. */
   reasoning_effort?: string;
+  /** "" follows default_preset_id (lib/llm-config.ts's resolvePreset). */
+  preset_id?: string;
+}
+
+/** config.speech — local audio I/O: which mic/speaker the server opens, and
+ * the sample rates it resamples to. Device fields hold a device *name*, which
+ * the server matches case-insensitively as a substring; "" means "whatever
+ * the OS calls default". A change here restarts just the affected audio
+ * thread on the server, so it takes effect without an app restart. */
+export interface SpeechSection {
+  input_device?: string;
+  output_device?: string;
+  input_sample_rate?: number;
+  output_sample_rate?: number;
+  [key: string]: unknown;
 }
 
 /** config.tts / config.stt — speech synthesis / recognition connections. */
@@ -100,6 +119,58 @@ export interface SpeechEndpointSection {
   api_key?: string;
   model?: string;
   voice?: string;
+  /** "" follows default_preset_id (lib/llm-config.ts's resolvePreset). */
+  preset_id?: string;
+  [key: string]: unknown;
+}
+
+/** config.providers[] — "where to connect" (lib/llm-config.ts's shared
+ * provider/preset model, tc-docs/drafts/llm-settings-common-v1.md §2). */
+export interface ProviderEntry {
+  id: string;
+  label?: string;
+  base_url?: string;
+  /** Masked as "***" by GET /api/config; send "***" back to keep the saved value. */
+  api_key?: string;
+}
+
+/** config.presets[] — "how to call it": a model + reasoning effort bound to
+ * a provider. `reasoning_effort: ""` inherits config.api's reasoning_effort
+ * (lib/llm-config.ts). */
+export interface PresetEntry {
+  id: string;
+  label?: string;
+  provider_id?: string;
+  model?: string;
+  reasoning_effort?: string;
+}
+
+/** config.talk — chat/conversation task assignment. */
+export interface TalkSection {
+  /** "" follows default_preset_id (lib/llm-config.ts's resolvePreset). */
+  preset_id?: string;
+}
+
+/** config.memory — memory task + its embedding task, assigned independently. */
+export interface MemorySection {
+  enabled?: boolean;
+  /** "" follows default_preset_id (lib/llm-config.ts's resolvePreset). */
+  preset_id?: string;
+  /** "" follows default_preset_id, same as preset_id. */
+  embedding_preset_id?: string;
+  [key: string]: unknown;
+}
+
+/** config.vision — image-understanding task; has its own OpenAI-compatible
+ * connection fields alongside the shared preset assignment (mirrors
+ * SpeechEndpointSection's fallback-to-fields shape). */
+export interface VisionSection {
+  enabled?: boolean;
+  base_url?: string;
+  api_key?: string;
+  model?: string;
+  /** "" follows default_preset_id (lib/llm-config.ts's resolvePreset). */
+  preset_id?: string;
   [key: string]: unknown;
 }
 

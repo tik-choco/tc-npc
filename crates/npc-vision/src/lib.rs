@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use npc_core::{msg, topic, Module, ModuleCtx};
+use npc_core::{msg, topic, LlmTask, Module, ModuleCtx};
 use npc_llm::LlmClient;
 use tokio::sync::Mutex;
 use tokio::sync::broadcast::error::RecvError;
@@ -79,24 +79,13 @@ async fn run_vision(ctx: ModuleCtx) -> anyhow::Result<()> {
         });
     }
 
-    let base_url = if !config.vision.base_url.is_empty() {
-        config.vision.base_url.clone()
-    } else {
-        config.api.base_url.clone()
-    };
-    let api_key = if !config.vision.api_key.is_empty() {
-        config.vision.api_key.clone()
-    } else {
-        config.api.api_key.clone()
-    };
-    let model = if !config.vision.model.is_empty() {
-        config.vision.model.clone()
-    } else {
-        config.api.model.clone()
-    };
+    // 接続先・モデルの解決は npc-core の resolve_llm に一本化した(旧: vision.*
+    // が空なら api.* にフォールバックする自前ロジック)。
+    let resolved = config.resolve_llm(LlmTask::Vision);
+    let model = resolved.model;
 
-    let client = LlmClient::new(base_url, api_key)
-        .with_reasoning_effort(config.api.reasoning_effort.clone());
+    let client = LlmClient::new(resolved.base_url, resolved.api_key)
+        .with_reasoning_effort(resolved.reasoning_effort);
 
     // When person detection is on, tell the model about `observe_person`
     // *before* applying the language instruction rather than after: the

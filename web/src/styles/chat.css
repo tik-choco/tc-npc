@@ -1,21 +1,177 @@
-/* チャット view — transcript + composer. Layout-only; tokens/primitives
-   come from index.css and styles/components.css. */
+/* チャット view — two-column workspace: a flexible transcript+composer
+   column (.chat-main) on the left and a fixed 320px pill-tabbed sidebar
+   (.chat-sidebar, see styles/sidebar.css) on the right that holds the 音声 /
+   状態 / 通訳 panels. Layout-only; tokens/primitives come from index.css and
+   styles/components.css.
+
+   Spacing inside the transcript is driven by margins on the *heads* of
+   things rather than a uniform flex gap: consecutive bubbles from one
+   speaker are meant to sit almost flush (see .chat-turn), so the column's
+   own gap is deliberately tiny and each group/day/system line reintroduces
+   the breathing room it needs. */
 
 .chat-view {
+  height: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-5);
+}
+
+.chat-main {
+  min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
-  height: 100%;
-  max-width: 860px;
-  margin: 0 auto;
-  padding: var(--space-4) var(--space-5);
   gap: var(--space-3);
 }
+
+.chat-sidebar {
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+@media (max-width: 980px) {
+  .chat-view {
+    grid-template-columns: minmax(0, 1fr);
+    overflow-y: auto;
+  }
+
+  .chat-main {
+    min-height: 60vh;
+  }
+
+  .chat-sidebar {
+    overflow-y: visible;
+  }
+}
+
+/* --- Toolbar ------------------------------------------------------------- */
+/* Reads as a conversation header (who you're talking to + link state) with
+   the two live controls — the voice switch and 割り込み — on the right. */
 
 .chat-toolbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.chat-toolbar-identity {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.chat-toolbar-text {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.chat-toolbar-name {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chat-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-left: auto;
+}
+
+/* --- Voice 開始/停止 toggle ---------------------------------------------- */
+/* The button's label is always the *action* (開始 when off, 停止 when on);
+   current state is carried by the fill and by the halo, whose size/opacity
+   track the live mic level through the inline --voice-level (0..1) set by
+   VoiceToggle. That halo is the chat column's own evidence that the far-end
+   mic is being heard, so it must not be animation-driven — it's data. */
+
+.chat-voice {
+  --voice-level: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-4);
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 650;
+  color: var(--text-muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+}
+
+.chat-voice:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--surface-3);
+  border-color: var(--border-strong);
+}
+
+.chat-voice:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.chat-voice--on {
+  color: var(--primary);
+  background: var(--primary-soft);
+  border-color: var(--primary-border);
+}
+
+.chat-voice--on:hover:not(:disabled) {
+  color: var(--primary);
+  background: var(--primary-soft-strong);
+  border-color: var(--primary);
+}
+
+.chat-voice-glyph {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.chat-voice--on .chat-voice-glyph::after {
+  content: "";
+  position: absolute;
+  inset: -5px;
+  border-radius: var(--radius-pill);
+  border: 2px solid currentColor;
+  /* Always faintly present so "listening" reads even in silence, then
+     swells with the incoming level. */
+  opacity: calc(0.18 + var(--voice-level) * 0.7);
+  transform: scale(calc(1 + var(--voice-level) * 0.3));
+  transition: opacity var(--dur-fast) linear, transform var(--dur-fast) linear;
+  pointer-events: none;
+}
+
+/* --- Transcript ---------------------------------------------------------- */
+
+/* Positioning context for the floating jump-to-latest button, which has to
+   hover over the scroller rather than scroll with it. */
+.chat-transcript-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
 }
 
 .chat-transcript {
@@ -23,43 +179,182 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: 2px;
   padding: var(--space-4);
   overflow-y: auto;
+  overscroll-behavior: contain;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-l);
   box-shadow: var(--shadow-1);
 }
 
-.chat-bubble-row {
+/* Whatever lands first shouldn't push itself away from the top edge — the
+   group/day/system margins below are all top margins. */
+.chat-transcript > *:first-child {
+  margin-top: 0;
+}
+
+/* The empty state is the transcript's only content when it shows, so let it
+   take the whole box rather than perching at the top of an empty panel. */
+.chat-transcript > .empty-state {
+  margin: auto;
+}
+
+.chat-jump {
+  position: absolute;
+  left: 50%;
+  bottom: var(--space-4);
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-4);
+  font: inherit;
+  font-size: 0.76rem;
+  font-weight: 650;
+  color: var(--text);
+  background: var(--elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  box-shadow: var(--shadow-2);
+  cursor: pointer;
+  animation: chat-jump-in var(--dur) var(--ease-out);
+}
+
+.chat-jump:hover {
+  border-color: var(--primary-border);
+  color: var(--primary);
+}
+
+@keyframes chat-jump-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 6px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+
+/* --- Day separator ------------------------------------------------------- */
+
+.chat-day {
   display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin: var(--space-5) 0 var(--space-2);
 }
 
-.chat-bubble-row--assistant {
-  justify-content: flex-start;
+.chat-day::before,
+.chat-day::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border);
 }
 
-.chat-bubble-row--user {
+.chat-day span {
+  font-size: 0.7rem;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  color: var(--text-subtle);
+}
+
+/* --- Turns & bubbles ----------------------------------------------------- */
+/* A .chat-turn is one message *within* a same-speaker run. The run's first
+   message (.chat-turn--head) carries the avatar and name; its last
+   (.chat-turn--tail) carries the timestamp. Only
+   heads get top margin, so the messages inside a run stack nearly flush. */
+
+.chat-turn {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+
+.chat-turn--head {
+  margin-top: var(--space-4);
+}
+
+.chat-turn--user {
   justify-content: flex-end;
+}
+
+/* Fixed gutter under the avatar so every bubble in an assistant run lines
+   up with the first one, not just the one the avatar is next to. */
+.chat-turn-gutter {
+  flex: none;
+  width: 28px;
+}
+
+.chat-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-pill);
+  background: var(--primary-soft-strong);
+  color: var(--primary);
+  font-size: 0.8rem;
+  font-weight: 700;
+  line-height: 1;
+  user-select: none;
+}
+
+.chat-avatar--lg {
+  width: 34px;
+  height: 34px;
+  font-size: 0.95rem;
+}
+
+.chat-turn-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+  max-width: 72%;
+}
+
+.chat-turn--assistant .chat-turn-body {
+  align-items: flex-start;
+}
+
+.chat-turn--user .chat-turn-body {
+  align-items: flex-end;
+}
+
+.chat-turn-name {
+  padding: 0 var(--space-2);
+  font-size: 0.72rem;
+  font-weight: 650;
+  color: var(--text-muted);
+}
+
+.chat-turn-time {
+  padding: 0 var(--space-2);
+  font-size: 0.66rem;
+  color: var(--text-subtle);
+}
+
+/* Wraps the bubble together with its hover-revealed copy button. The button
+   is absolutely positioned off the bubble's outer edge so revealing it never
+   reflows the transcript. */
+.chat-turn-bubble {
+  position: relative;
+  max-width: 100%;
 }
 
 .chat-bubble {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  max-width: 72%;
   padding: var(--space-2) var(--space-4);
   border-radius: var(--radius-l);
   font-size: 0.9rem;
   line-height: 1.55;
-}
-
-.chat-bubble time {
-  align-self: flex-end;
-  font-size: 0.68rem;
-  color: inherit;
-  opacity: 0.65;
 }
 
 .chat-bubble-text {
@@ -71,22 +366,204 @@
   color: var(--text);
   background: var(--surface-2);
   border: 1px solid var(--border);
-  border-bottom-left-radius: var(--radius-xs);
 }
 
 .chat-bubble--user {
   color: var(--on-primary);
   background: var(--primary);
-  border-bottom-right-radius: var(--radius-xs);
+}
+
+/* No speech-bubble tail: every corner keeps the same radius whether the
+   message opens, continues, or closes a run. */
+
+.chat-copy {
+  position: absolute;
+  top: 2px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  color: var(--text-subtle);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+
+.chat-turn--assistant .chat-copy {
+  left: 100%;
+  margin-left: var(--space-1);
+}
+
+.chat-turn--user .chat-copy {
+  right: 100%;
+  margin-right: var(--space-1);
+}
+
+.chat-turn:hover .chat-copy,
+.chat-copy:focus-visible {
+  opacity: 1;
+}
+
+.chat-copy:hover {
+  color: var(--primary);
+  border-color: var(--primary-border);
+}
+
+/* Touch devices never fire hover, so the affordance would be unreachable —
+   show it at rest there instead. */
+@media (hover: none) {
+  .chat-copy {
+    opacity: 0.55;
+  }
+}
+
+/* --- 通訳 ---------------------------------------------------------------- */
+
+/* 通訳 results normally render *attached* under the row whose original
+   text they translate (.chat-translation-attached, below) — the source
+   text already shows once in the bubble or system line above it, so the
+   attached block only needs to show the languages, not repeat it. This
+   dashed "orphan" bubble is the fallback for a translation that can't be
+   matched back to a source row: it still needs to show the original text
+   itself (.chat-translation-original) and is styled as a standalone
+   system surface rather than a speech bubble, so it reads as an
+   annotation next to the turn, not another speaker. Mirrors agent-speech's
+   transcript.css `.bubble--translation` treatment, using this app's own
+   tokens. The row/pill/text/pending rules further below are shared with
+   the attached case. */
+.chat-bubble--translation {
+  gap: var(--space-1);
+  background: var(--surface-2);
+  border: 1px dashed var(--border-strong);
+  color: var(--text);
+  box-shadow: none;
+}
+
+.chat-translation-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: 0.72rem;
+  font-weight: 650;
+  color: var(--text-subtle);
+}
+
+.chat-translation-source-badge {
+  margin-left: var(--space-1);
+  padding: 0.05rem var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--surface-3);
+  color: var(--text-subtle);
+  font-size: 0.64rem;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+}
+
+.chat-translation-original {
+  margin: 0;
+  color: var(--text-subtle);
+  font-size: 0.82rem;
+  font-style: italic;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.chat-translation-pending {
+  margin: 0;
+  color: var(--text-subtle);
+  font-size: 0.82rem;
+  font-style: italic;
+}
+
+.chat-translation-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.chat-translation-lang-pill {
+  flex: none;
+  padding: 0.05rem var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--primary-soft);
+  color: var(--primary);
+  font-size: 0.68rem;
+  font-weight: 650;
+}
+
+.chat-translation-lang-pill--reversed {
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.chat-translation-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.88rem;
+}
+
+/* 通訳 attached under the row that already shows the original (see
+   ChatView) — a sibling of .chat-turn-bubble inside .chat-turn-body, or of
+   .chat-system-line inside .chat-system-group. No bubble surface here on
+   purpose: a fill or shadow would read as a second message, and the
+   original above already carries that weight. A single accent border
+   is enough to mark it as hanging off that row; it sits on whichever
+   edge the turn is aligned to (left for assistant/system, right for
+   user). */
+.chat-translation-attached {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  max-width: 100%;
+  padding: 2px var(--space-3);
+  border-left: 2px solid var(--border-strong);
+}
+
+.chat-turn--user .chat-translation-attached {
+  border-left: none;
+  border-right: 2px solid var(--border-strong);
+  text-align: right;
+}
+
+.chat-turn--user .chat-translation-row {
+  flex-direction: row-reverse;
+}
+
+/* --- System lines -------------------------------------------------------- */
+
+/* Wraps a .chat-system-line together with its attached 通訳 block, same
+   role as .chat-turn but for the heard-speech line instead of a bubble.
+   An unattached .chat-system-line renders without this wrapper and is
+   completely untouched by it. What does change when it IS wrapped: without
+   this align-items: flex-start, .chat-transcript's default stretch would
+   force the line to fill the transcript's full width instead of hugging its
+   content next to the attached block below it. */
+.chat-system-group {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-1);
+  margin-top: var(--space-3);
 }
 
 .chat-system-line {
   display: flex;
   align-items: center;
   gap: var(--space-2);
+  margin-top: var(--space-3);
   padding: 2px var(--space-2);
   font-size: 0.76rem;
   color: var(--text-subtle);
+}
+
+/* Already spaced by its group wrapper — don't stack both margins. */
+.chat-system-group .chat-system-line {
+  margin-top: 0;
 }
 
 .chat-system-line span {
@@ -95,21 +572,81 @@
   overflow-wrap: break-word;
 }
 
+/* Kind label ([短期記憶], [エラー]) as a small caps-ish tag rather than
+   literal brackets in the text. */
+.chat-system-tag {
+  margin-right: var(--space-2);
+  font-style: normal;
+  font-weight: 700;
+  font-size: 0.68rem;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  opacity: 0.8;
+}
+
 .chat-system-line time {
   flex-shrink: 0;
   font-size: 0.68rem;
 }
 
+/* Heard speech is the one system line that's part of the conversation
+   rather than commentary about it, so it gets a touch more presence. */
+.chat-system-line--sense {
+  color: var(--text-muted);
+}
+
+/* ...and it's the user's own turn, so it's mirrored to the right edge like
+   a user bubble instead of sitting in the left-aligned system column. The
+   row-reverse puts the ear glyph on the outer (right) edge and the
+   timestamp on the inner one, mirroring the left-aligned lines; dropping
+   the `flex: 1` on the text is what lets the line hug its content instead
+   of stretching the full transcript width. */
+.chat-system-line--speech {
+  align-self: flex-end;
+  max-width: 72%;
+  flex-direction: row-reverse;
+  text-align: right;
+}
+
+.chat-system-line--speech span {
+  flex: 0 1 auto;
+}
+
+/* Same mirroring for a speech line that carries an attached 通訳 block —
+   the group wrapper is the flex container in that case, so the alignment
+   has to be restated on it, and the attached block's accent border/rows
+   flip to the right edge exactly as they do under .chat-turn--user. */
+.chat-system-group--speech {
+  align-items: flex-end;
+  align-self: flex-end;
+  max-width: 72%;
+}
+
+.chat-system-group--speech .chat-translation-attached {
+  border-left: none;
+  border-right: 2px solid var(--border-strong);
+  text-align: right;
+}
+
+.chat-system-group--speech .chat-translation-row {
+  flex-direction: row-reverse;
+}
+
 .chat-system-line--error {
   color: var(--danger-text);
+  background: var(--danger-soft);
+  border-radius: var(--radius-s);
+  padding: var(--space-1) var(--space-2);
 }
+
+/* --- Typing indicator ---------------------------------------------------- */
 
 .chat-typing {
   display: inline-flex;
   align-items: center;
   gap: 4px;
   align-self: flex-start;
-  padding: var(--space-2) var(--space-4);
+  padding: var(--space-3) var(--space-4);
   border-radius: var(--radius-l);
   border-bottom-left-radius: var(--radius-xs);
   background: var(--surface-2);
@@ -145,23 +682,145 @@
   }
 }
 
-.chat-composer input:disabled {
+/* --- Composer ------------------------------------------------------------ */
+/* The textarea is chromeless and the surrounding shell carries the border,
+   focus ring and elevation, so the growing input and its send button read as
+   one control. The textarea's own height is set inline by ChatView as the
+   draft grows (up to COMPOSER_MAX_HEIGHT). */
+
+.chat-composer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.chat-composer-shell {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-l);
+  box-shadow: var(--shadow-1);
+  transition: border-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
+}
+
+.chat-composer-shell:focus-within {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary-soft);
+}
+
+/* Overrides the shared textarea shell from components.css — the border,
+   fill and focus ring belong to .chat-composer-shell here. The
+   :focus-visible rule is written at two classes deep on purpose so it
+   outranks components.css's `textarea:focus-visible` regardless of the
+   order the two stylesheets land in the bundle. */
+.chat-composer-shell textarea {
+  flex: 1;
+  min-width: 0;
+  padding: var(--space-2);
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  resize: none;
+  overflow-y: auto;
+  max-height: 168px;
+  line-height: 1.5;
+}
+
+.chat-composer-shell textarea:hover,
+.chat-composer-shell textarea:focus-visible {
+  border: none;
+  box-shadow: none;
+  outline: none;
+}
+
+.chat-composer-shell textarea:disabled {
   opacity: 0.6;
   cursor: not-allowed;
 }
 
-.chat-composer {
+.chat-send {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  color: var(--on-primary);
+  background: var(--primary);
+  border: 1px solid var(--primary);
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), opacity var(--dur-fast) var(--ease);
+}
+
+.chat-send:hover:not(:disabled) {
+  background: var(--primary-hover);
+}
+
+.chat-send:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.chat-composer-foot {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
-}
-
-.chat-composer input {
-  flex: 1;
-}
-
-.chat-speaker-input {
-  flex: 0 0 auto;
-  width: 8em;
+  gap: var(--space-3);
   min-width: 0;
+}
+
+/* Optional "speaking as" name, sent as the turn's `speaker`. Deliberately
+   small and unlabelled-by-default: it's a qualifier on the message above it,
+   not a field the operator has to fill in every turn. */
+.chat-composer-speaker {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex-shrink: 0;
+  padding: 0 var(--space-2);
+  color: var(--text-subtle);
+}
+
+.chat-composer-speaker input {
+  width: 10ch;
+  padding: 2px 0;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  font-size: 0.72rem;
+  color: var(--text);
+}
+
+.chat-composer-speaker input:focus {
+  outline: none;
+  border-bottom-color: var(--primary);
+}
+
+.chat-composer-speaker input::placeholder {
+  color: var(--text-subtle);
+}
+
+.chat-composer-hint {
+  padding: 0 var(--space-2);
+  font-size: 0.7rem;
+  color: var(--text-subtle);
+}
+
+@media (max-width: 640px) {
+  .chat-composer-hint {
+    display: none;
+  }
+
+  .chat-turn-body {
+    max-width: 86%;
+  }
+
+  .chat-system-line--speech,
+  .chat-system-group--speech {
+    max-width: 86%;
+  }
 }

@@ -16,7 +16,9 @@ pub use character::{
     save_character, Character, CharacterSheet,
 };
 pub use chatlog::ChatLogEntry;
-pub use config::{data_dir, Config};
+pub use config::{
+    data_dir, unmask_provider_keys, Config, LlmTask, PresetConfig, ProviderConfig, ResolvedLlm,
+};
 pub use module::{Module, ModuleCtx};
 pub use person::{
     delete_person, find_person, list_people, load_person, new_person, normalize_person_name,

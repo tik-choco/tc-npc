@@ -25,6 +25,12 @@ use crate::tools::ToolRegistry;
 /// Auto-resume timeout after a `suspend` with no matching `resume`.
 const SUSPEND_TIMEOUT: Duration = Duration::from_secs(600);
 
+/// How often to look for the conversation partner having gone quiet. Sets
+/// the lag between the configured `absence_timeout_secs` elapsing and the UI
+/// showing it, so it is much shorter than any sane timeout — but it is a
+/// poll that runs forever, so not so short that it costs anything either.
+const ABSENCE_CHECK_INTERVAL: Duration = Duration::from_secs(15);
+
 pub struct TalkModule;
 
 #[async_trait]
@@ -34,8 +40,11 @@ impl Module for TalkModule {
     }
 
     async fn run(self: Box<Self>, ctx: ModuleCtx) -> anyhow::Result<()> {
-        let llm = npc_llm::LlmClient::new(ctx.config.api.base_url.clone(), ctx.config.api.api_key.clone())
-            .with_reasoning_effort(ctx.config.api.reasoning_effort.clone());
+        // Resolved once at startup (no hot-reload for the talk connection
+        // itself, matching the pre-preset behavior).
+        let resolved = ctx.config.resolve_llm(npc_core::LlmTask::Talk);
+        let llm = npc_llm::LlmClient::new(resolved.base_url.clone(), resolved.api_key.clone())
+            .with_reasoning_effort(resolved.reasoning_effort.clone());
 
         let active_character = npc_core::active_character(&ctx.data_dir, &ctx.config)
             .ok()
@@ -44,7 +53,7 @@ impl Module for TalkModule {
 
         let engine = Arc::new(ChatEngine::new(
             llm,
-            ctx.config.api.model.clone(),
+            resolved.model,
             ctx.config.talk.prompts.clone(),
             ctx.config.talk.filter_prompt_name.clone(),
             ctx.config.talk.history_size as usize,
@@ -62,6 +71,14 @@ impl Module for TalkModule {
             interpret_mode: ctx.config.translation.suppresses_chat(),
         };
 
+        // Noticing that the partner stopped talking needs a clock of its own:
+        // no bus message arrives to announce silence. A fixed poll rather
+        // than a deadline computed from the last turn, because the engine's
+        // state sits behind an async mutex a chat turn may be holding — the
+        // check is a cheap no-op whenever nothing has expired.
+        let mut absence_check = tokio::time::interval(ABSENCE_CHECK_INTERVAL);
+        absence_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
         loop {
             let sleep = async {
                 match state.resume_deadline {
@@ -74,6 +91,12 @@ impl Module for TalkModule {
                 _ = ctx.shutdown.cancelled() => {
                     tracing::info!("npc-talk: shutdown requested, stopping");
                     break;
+                }
+                _ = absence_check.tick() => {
+                    let engine = engine.clone();
+                    tokio::spawn(async move {
+                        engine.check_partner_absence().await;
+                    });
                 }
                 _ = sleep, if state.resume_deadline.is_some() => {
                     tracing::debug!("npc-talk: auto-resuming after suspend timeout");

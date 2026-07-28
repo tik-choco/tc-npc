@@ -63,6 +63,8 @@ services: `{"type": "...", "payload": ...}`.
 | `TTS`                | `tts`                    |
 | `SUSPEND`            | `suspend`                |
 | `RESUME`             | `resume`                 |
+| `VOICE_START`        | `voice_start`            |
+| `VOICE_STOP`         | `voice_stop`             |
 | `PERSON_SEEN`        | `person_seen`            |
 | `PERSON_MEMORY`      | `person_memory`          |
 | `PERSON_UPDATED`     | `person_updated`         |
@@ -143,6 +145,41 @@ perfectly good "do something at 17:00"). Each entry is tagged on `kind`
 
 `npc_scheduler::fire_announcement` is the single place this happens, shared
 by the clock and `POST /api/scheduler/test`.
+
+## Voice cascade (`npc-speech`)
+
+The mic→reply loop ported from Go `agent-speech`:
+
+```
+mic (cpal capture thread) → resample to stt.input_sample_rate → RMS VAD
+  → WAV segment → POST /audio/transcriptions → agent:sense / speech
+  → npc-talk → LLM → agent:chat / chat_response
+  → POST /audio/speech → cpal playback thread
+```
+
+Two things about this module differ from the others:
+
+**It is always spawned.** `tts.enabled` / `stt.enabled` don't gate the spawn,
+they gate the two audio threads, which `apply_config` starts and stops on
+every `npc:config` `config_updated`. The same pass restarts the capture
+thread when `speech.input_device` / `input_sample_rate` changes and the
+playback thread when `speech.output_device` does, and leaves both alone
+otherwise so an unrelated config save can't cut a reply off mid-word.
+Endpoint, model, voice and the VAD knobs are read from the module's own copy
+of the latest config, so nothing under `stt`/`tts`/`speech` needs an app
+restart. (`ctx.config` remains the startup snapshot for every other module.)
+
+**Barge-in.** While a clip is playing, mic audio never reaches the VAD —
+transcribing the agent's own voice would have it talking to itself. With
+`stt.barge_in` on (the default) the mic is still *measured*, against
+`stt.input_threshold × stt.barge_in_factor`; sustained speech above that line
+stops playback and publishes `agent:interrupt` / `interrupt`, and the
+interruption is then picked up by the ordinary VAD path. The factor is above
+1.0 because an open mic next to speakers hears the agent at roughly speech
+level; raise it if replies interrupt themselves, or turn barge-in off to get
+the mic muted for the whole clip. Priority clips (`agent:interrupt` / `tts`
+— chimes, scheduler announcements) are exempt, matching the Go original's
+`!a.isPriorityPlaying.Load()`.
 
 ## Simultaneous interpretation (`npc-translate`)
 
@@ -267,6 +304,7 @@ reuses the same `metadata.person_id` field to list a person's memories.
 | `actionLog`       | `{text}`                                          |
 | `position`        | `{x, y, heading}`                                 |
 | `volume`          | `{level}`                                         |
+| `voice`           | `{active}` — position of the cascade voice loop's 開始/停止 switch; sent right after `hello` and broadcast on every change |
 | `status`          | `{modules}`                                       |
 | `error`           | `{message}`                                       |
 | `inputAccepted`   | `{requestId}`                                     |
@@ -280,9 +318,11 @@ reuses the same `metadata.person_id` field to list a person's memories.
 |--------------|-----------------------------------------------------|
 | `input`      | `{text, speaker?}` — `speaker`, if present, is attached to the resulting `agent:sense`/`speech` payload so npc-memory can resolve it to a person |
 | `command`    | `{text}`                                            |
-| `interrupt`  | `{}`                                                |
-| `suspend`    | `{}`                                                |
+| `interrupt`  | `{}` — published as `agent:interrupt` / `interrupt`; npc-speech emits the same envelope (with `{"source": "barge_in"}`) when the mic hears you talking over a reply |
+| `suspend`    | `{}` — pauses TTS playback only, auto-expiring (`npc-speech: SUSPEND_TIMEOUT`) |
 | `resume`     | `{}`                                                |
+| `voiceStart` | `{}` — master switch for the cascade voice loop: mic → VAD/STT resumes feeding `agent:sense`/`speech`, and `chat_response` replies are spoken again. Unlike `suspend`/`resume` it never expires |
+| `voiceStop`  | `{}` — mic stops reaching the STT pipeline and replies go unspoken; the cpal input stream stays open so restarting is instant |
 | `event`      | `{kind, userName?, text?, amount?}` — `userName` is also carried through as `speaker` |
 
 ### REST

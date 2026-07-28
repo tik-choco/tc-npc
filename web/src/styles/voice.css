@@ -1,19 +1,18 @@
-/* 音声 view — volume meter + suspend/resume + tts line log. */
+/* チャットサイドバーの「音声」パネル — volume meter + suspend/resume +
+   tts line log, sized for a narrow 320px sidebar column (the sidebar shell
+   owns the outer padding, not this stylesheet). */
 
-.voice-view {
+.voice-panel {
   display: flex;
   flex-direction: column;
-  gap: var(--space-5);
-  max-width: 720px;
-  margin: 0 auto;
-  padding: var(--space-5);
+  gap: var(--space-4);
 }
 
 .voice-meter-card {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
-  padding: var(--space-5);
+  padding: var(--space-4);
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-l);
@@ -36,6 +35,7 @@
 }
 
 .voice-meter-bar {
+  position: relative;
   height: 12px;
   overflow: hidden;
   background: var(--surface-2);
@@ -50,9 +50,183 @@
   transition: width 90ms linear;
 }
 
+/* Fill turns solid once the level clears the VAD threshold, so "am I loud
+   enough" is answerable without reading the marker's position. */
+.voice-meter-bar-fill--active {
+  background: var(--success);
+}
+
+/* The VAD threshold, drawn on the meter at the same gain the fill uses (see
+   VOLUME_UI_GAIN in VoicePanel.tsx). Sits above the fill and never
+   intercepts the pointer — the slider below is the control. */
+.voice-meter-threshold {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--text);
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+/* The barge-in line sits above the speech line by definition, so it is drawn
+   dashed rather than solid — two identical bars would read as a range. */
+.voice-meter-threshold--barge {
+  background: repeating-linear-gradient(
+    to bottom,
+    var(--text) 0 3px,
+    transparent 3px 6px
+  );
+  opacity: 0.4;
+}
+
+/* --- barge-in toggle ----------------------------------------------------- */
+
+.voice-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  cursor: pointer;
+}
+
+.voice-toggle input {
+  cursor: pointer;
+}
+
+.voice-toggle-label {
+  font-size: 12px;
+  color: var(--text);
+}
+
+/* --- threshold / silence sliders ---------------------------------------- */
+
+.voice-slider {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.voice-slider-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  font-size: 0.82rem;
+}
+
+.voice-slider-label {
+  color: var(--text);
+}
+
+.voice-slider-value {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-subtle);
+}
+
+.voice-slider input[type="range"] {
+  width: 100%;
+  accent-color: var(--primary);
+}
+
+.voice-slider input[type="range"]:disabled {
+  opacity: 0.5;
+}
+
+/* Holds only the SaveChip, reporting autosave for every field in the panel
+   (sliders and device pickers alike), so it's pinned top-right rather than
+   attached to one of them. Collapses to nothing while the chip is idle —
+   same shape as .interpret-panel-head. */
+.voice-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-height: 0;
+}
+
 .voice-controls {
   display: flex;
   gap: var(--space-2);
+}
+
+.voice-controls .btn {
+  flex: 1 1 0;
+  justify-content: center;
+}
+
+/* --- device pickers ------------------------------------------------------
+   Same card shell as the meter above it, so the panel reads as a stack of
+   two equal cards rather than a card plus a loose form. */
+
+.voice-device-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-l);
+  box-shadow: var(--shadow-1);
+}
+
+.voice-device-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.voice-device-title {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+/* Pushes the save chip + refresh button to the trailing edge. A margin-left:
+   auto on the chip itself wouldn't work: SaveChip renders nothing while idle,
+   which would leave the button unanchored most of the time. */
+.voice-device-header-spacer {
+  flex: 1 1 auto;
+}
+
+.voice-device-field select {
+  width: 100%;
+  /* Device names are long ("Headset Microphone (Realtek(R) Audio)") and this
+     column is 320px — let the control shrink instead of widening the panel. */
+  min-width: 0;
+}
+
+.voice-device-field > span {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.voice-device-error {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--danger-text);
+}
+
+/* Same rescan spinner the settings/people/characters stylesheets each
+   declare for their own <RefreshCw class="spin">; redeclared here so this
+   panel doesn't depend on one of those sheets happening to be in the
+   bundle. */
+.spin {
+  animation: tc-npc-voice-spin 0.9s linear infinite;
+}
+
+@keyframes tc-npc-voice-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .voice-log-section {
@@ -88,6 +262,7 @@
   display: flex;
   align-items: baseline;
   gap: var(--space-3);
+  min-width: 0;
 }
 
 .voice-log-item-text {
@@ -118,8 +293,14 @@
   display: flex;
   align-items: baseline;
   gap: var(--space-2);
+  min-width: 0;
   font-size: 0.8rem;
   color: var(--text-muted);
+}
+
+.voice-log-translations li span:last-child {
+  min-width: 0;
+  word-break: break-word;
 }
 
 .voice-log-translation-lang {

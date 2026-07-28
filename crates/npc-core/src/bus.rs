@@ -105,6 +105,23 @@ pub mod msg {
     pub const TTS: &str = "tts";
     pub const SUSPEND: &str = "suspend";
     pub const RESUME: &str = "resume";
+    /// Cut the turn that is in flight right now. Published on
+    /// [`super::topic::INTERRUPT`] by npc-server when the web UI's 割り込み
+    /// button is pressed, and by npc-speech when the mic hears the user
+    /// talking over a playing reply (barge-in). Unlike [`SUSPEND`] it carries
+    /// no notion of staying off — it is a one-shot "stop what you're doing".
+    pub const INTERRUPT: &str = "interrupt";
+    /// Turn the cascade voice loop (mic -> VAD/STT -> talk -> TTS) back on.
+    /// Published on [`super::topic::INTERRUPT`] by npc-server when the web
+    /// UI's voice toggle is switched on. Distinct from [`RESUME`], which only
+    /// un-pauses TTS playback and auto-expires after a timeout: the voice
+    /// gate is an explicit operator switch that also controls whether the mic
+    /// is listened to at all, and it stays where it's put.
+    pub const VOICE_START: &str = "voice_start";
+    /// Turn the cascade voice loop off — the mic stops feeding the VAD/STT
+    /// pipeline and `chat_response` replies stop being spoken. See
+    /// [`VOICE_START`].
+    pub const VOICE_STOP: &str = "voice_stop";
     /// See [`super::topic::CONFIG`].
     pub const CONFIG_UPDATED: &str = "config_updated";
     /// Published on [`super::topic::UI`] by npc-talk after every

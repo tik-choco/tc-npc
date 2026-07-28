@@ -261,6 +261,8 @@ a:hover {
   overflow-x: auto;
 }
 
+/* An <a href="#/tab"> rather than a button, so the header nav can be
+   ctrl/middle-clicked into a second window — see lib/router.ts. */
 .app-tab {
   display: flex;
   align-items: center;
@@ -271,6 +273,7 @@ a:hover {
   border-radius: var(--radius-s);
   color: var(--text-muted);
   cursor: pointer;
+  text-decoration: none;
   white-space: nowrap;
   transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
 }

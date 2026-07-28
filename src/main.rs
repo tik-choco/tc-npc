@@ -99,9 +99,12 @@ async fn run(config_path: Option<PathBuf>, no_open: bool) -> anyhow::Result<()> 
     if config.memory.enabled {
         spawn_module(&mut handles, &ctx, "npc-memory", npc_memory::module(&ctx));
     }
-    if config.tts.enabled || config.stt.enabled {
-        spawn_module(&mut handles, &ctx, "npc-speech", npc_speech::module(&ctx));
-    }
+    // Always spawned, like the scheduler and interpreter below: it idles with
+    // both audio threads stopped when `tts.enabled` / `stt.enabled` are off,
+    // and starts them the moment the web UI turns either on. Gating the spawn
+    // on the startup config meant the 音声 toggles did nothing until the app
+    // was restarted, which reads as the voice loop being broken.
+    spawn_module(&mut handles, &ctx, "npc-speech", npc_speech::module(&ctx));
     if config.vision.enabled {
         spawn_module(&mut handles, &ctx, "npc-vision", npc_vision::module(&ctx));
     }

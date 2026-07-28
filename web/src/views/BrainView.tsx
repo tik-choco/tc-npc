@@ -18,86 +18,30 @@ import {
   Database,
   Gauge,
   RefreshCw,
+  Repeat,
   ShieldAlert,
   Sparkles,
+  UserRound,
 } from "lucide-preact";
 
 import { getMemory } from "../lib/api";
 import type { MemoryDocument } from "../lib/types";
 import type { AffectSnapshot } from "../hooks/useNpcSocket";
 import { useI18n } from "../hooks/useI18n";
-import type { MessageKey, Translate } from "../lib/i18n";
+import type { Translate } from "../lib/i18n";
+// Drive order/labels/thresholds and the deviation ranking are shared with the
+// チャット tab's condensed 内心 block — see lib/affect.ts.
+import {
+  DRIVE_ORDER,
+  FAMILIARITY_WARY_THRESHOLD,
+  PROMPT_DRIVE_COUNT,
+  clampPct,
+  deltaDirection,
+  driveLabel,
+  rankDeviations,
+} from "../lib/affect";
 import "../styles/components.css";
 import "../styles/brain.css";
-
-/** Fixed display order for the 22 drives — matches the WS frame's own fixed
- *  order (see lib/types.ts's AffectMessage doc comment). Kept as an explicit
- *  list (rather than derived from the first frame) so the trend dropdown and
- *  legend have something to render before any frame has arrived. */
-const DRIVE_ORDER = [
-  "dopamine",
-  "serotonin",
-  "oxytocin",
-  "endorphin",
-  "cortisol",
-  "noradrenaline",
-  "adrenaline",
-  "acetylcholine",
-  "glutamate",
-  "gaba",
-  "glycine",
-  "melatonin",
-  "orexin",
-  "histamine",
-  "dynorphin",
-  "dhea",
-  "enkephalin",
-  "anandamide",
-  "substance_p",
-  "npy",
-  "cck",
-  "bdnf",
-] as const;
-
-const DRIVE_LABEL_KEYS: Record<string, MessageKey> = {
-  dopamine: "brain.drive.dopamine",
-  serotonin: "brain.drive.serotonin",
-  oxytocin: "brain.drive.oxytocin",
-  endorphin: "brain.drive.endorphin",
-  cortisol: "brain.drive.cortisol",
-  noradrenaline: "brain.drive.noradrenaline",
-  adrenaline: "brain.drive.adrenaline",
-  acetylcholine: "brain.drive.acetylcholine",
-  glutamate: "brain.drive.glutamate",
-  gaba: "brain.drive.gaba",
-  glycine: "brain.drive.glycine",
-  melatonin: "brain.drive.melatonin",
-  orexin: "brain.drive.orexin",
-  histamine: "brain.drive.histamine",
-  dynorphin: "brain.drive.dynorphin",
-  dhea: "brain.drive.dhea",
-  enkephalin: "brain.drive.enkephalin",
-  anandamide: "brain.drive.anandamide",
-  substance_p: "brain.drive.substance_p",
-  npy: "brain.drive.npy",
-  cck: "brain.drive.cck",
-  bdnf: "brain.drive.bdnf",
-};
-
-// The affect engine folds the 3 drives with |level - base| >= this threshold
-// into the persona prompt each turn — see the task brief; kept in sync by
-// convention with the Rust side rather than sent over the wire.
-const DEVIATION_THRESHOLD = 0.2;
-const FAMILIARITY_WARY_THRESHOLD = 0.4;
-
-function driveLabel(t: Translate, key: string): string {
-  const msgKey = DRIVE_LABEL_KEYS[key];
-  return msgKey ? t(msgKey) : key;
-}
-
-function clampPct(v: number): number {
-  return Math.round(Math.max(0, Math.min(1, v)) * 100);
-}
 
 function relativeTime(iso: string, t: Translate): string {
   const then = new Date(iso).getTime();
@@ -132,7 +76,7 @@ function DriveBar({
   const basePct = clampPct(base);
   const delta = level - base;
   const deltaPct = Math.round(delta * 100);
-  const direction = delta > 0.0005 ? "up" : delta < -0.0005 ? "down" : "flat";
+  const direction = deltaDirection(delta);
   const fillLeft = Math.min(level, base) * 100;
   const fillWidth = Math.abs(level - base) * 100;
 
@@ -276,13 +220,9 @@ export function BrainView({ affect, affectHistory, memoryVersion }: BrainViewPro
   const ranked = useMemo(() => {
     const activeKeys = new Set<string>();
     const topKeys = new Map<string, number>();
-    if (!affect) return { activeKeys, topKeys };
-    const withDev = affect.drives
-      .map((d) => ({ key: d.key, dev: Math.abs(d.level - d.base) }))
-      .filter((d) => d.dev >= DEVIATION_THRESHOLD)
-      .sort((a, b) => b.dev - a.dev);
+    const withDev = rankDeviations(affect);
     for (const d of withDev) activeKeys.add(d.key);
-    withDev.slice(0, 3).forEach((d, i) => topKeys.set(d.key, i + 1));
+    withDev.slice(0, PROMPT_DRIVE_COUNT).forEach((d, i) => topKeys.set(d.key, i + 1));
     return { activeKeys, topKeys };
   }, [affect]);
 
@@ -307,6 +247,35 @@ export function BrainView({ affect, affectHistory, memoryVersion }: BrainViewPro
         </h2>
         {affect ? (
           <>
+            {/* Whose state this is. The drive model is per conversation
+                partner (npc-talk's PartnerAffect), so every number below is
+                scoped to this person — a familiarity that reset is a
+                different partner, not a lost memory. */}
+            <div class={`brain-partner${affect.partnerAway ? " is-away" : ""}`}>
+              <UserRound size={16} aria-hidden="true" />
+              <span class="brain-partner-label">{t("brain.partner.label")}</span>
+              <span class={`brain-partner-name${affect.partner === null ? " is-unknown" : ""}`}>
+                {affect.partner ?? t("brain.partner.unknown")}
+              </span>
+              {affect.partnerAway ? (
+                <span class="badge brain-partner-badge brain-partner-badge--away">
+                  <Clock size={12} aria-hidden="true" />
+                  {t("brain.partner.away")}
+                </span>
+              ) : affect.partnerSwitched ? (
+                <span class="badge brain-partner-badge brain-partner-badge--switched">
+                  <Repeat size={12} aria-hidden="true" />
+                  {t("brain.partner.switched")}
+                </span>
+              ) : (
+                affect.partner !== null && (
+                  <span class="badge brain-partner-badge">
+                    {affect.partnerKnown ? t("brain.partner.known") : t("brain.partner.first")}
+                  </span>
+                )
+              )}
+            </div>
+            {affect.partnerAway && <p class="brain-hint">{t("brain.partner.away.hint")}</p>}
             <FamiliarityGauge value={affect.familiarity} t={t} />
             {(affect.closing || affect.inviteCaution) && (
               <div class="brain-status-badges">

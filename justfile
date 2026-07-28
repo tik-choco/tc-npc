@@ -46,3 +46,12 @@ watch:
 # /ws, /api and /healthz are proxied to the binary on 127.0.0.1:47950.
 dev-web:
     cd web && npm run dev
+
+# Rebuild web/dist on every web/src change, for when the UI has to be checked
+# through the Rust binary itself rather than the Vite dev server (`just run` /
+# `just watch` in another terminal). No Rust rebuild is needed to pick the
+# result up: rust-embed serves web/dist from disk in debug builds, so a browser
+# reload is enough. Skips the `tsc -b` that `just web-build` runs — use that (or
+# `npx tsc --noEmit`) for the type check.
+watch-web:
+    cd web && npx vite build --watch

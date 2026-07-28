@@ -12,6 +12,7 @@
 
 use std::collections::HashSet;
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
@@ -336,6 +337,21 @@ pub struct AffectSnapshot {
     pub familiarity: f32,
     pub closing: bool,
     pub invite_caution: bool,
+    /// Display name of whoever the NPC is currently talking to, or `None`
+    /// while nobody has identified themselves. Filled in by
+    /// [`PartnerAffect::snapshot`]; a bare [`AffectState::snapshot`] leaves
+    /// it empty because a lone `AffectState` has no notion of who it belongs
+    /// to.
+    pub partner: Option<String>,
+    /// The NPC has talked with this partner before in this session.
+    pub partner_known: bool,
+    /// True only on the frame published for the turn where the partner
+    /// changed, so the UI can call the switch out without diffing frames.
+    pub partner_switched: bool,
+    /// The partner has been silent past the absence timeout — as far as the
+    /// NPC is concerned they have left. Stays true until somebody speaks
+    /// again, unlike the one-frame `partner_switched`.
+    pub partner_away: bool,
 }
 
 // ---------------------------------------------------------------------
@@ -401,7 +417,30 @@ impl AffectState {
             familiarity: self.familiarity,
             closing: self.closing,
             invite_caution: self.invite_caution_turns > 0,
+            partner: None,
+            partner_known: false,
+            partner_switched: false,
+            partner_away: false,
         }
+    }
+
+    /// Wind the conversation down without ending the relationship: every
+    /// drive returns to its resting level and the closing/invite-caution
+    /// state machine clears, while `familiarity` — what the NPC has come to
+    /// feel about this person — is deliberately kept.
+    ///
+    /// Used when the partner has gone quiet long enough to count as having
+    /// left (see [`PartnerAffect::check_absence`]). Without it the NPC would
+    /// sit indefinitely in whatever state the conversation ended in: still
+    /// "closing" hours later, or still carrying the cortisol of an argument
+    /// that finished before anyone walked away.
+    pub fn relax(&mut self) {
+        for key in ALL_DRIVES {
+            self.levels[key as usize] = key.info().base;
+        }
+        self.invite_caution_turns = 0;
+        self.closing = false;
+        self.closing_turns = 0;
     }
 
     /// Update all drives from one partner utterance. `own_turns` is how
@@ -605,6 +644,248 @@ impl AffectState {
     }
 }
 
+// ---------------------------------------------------------------------
+// PartnerAffect
+// ---------------------------------------------------------------------
+
+/// How many partners' drive states are retained. Beyond this the
+/// least-recently-spoken-to partner is dropped and would be met "fresh"
+/// again. Bounded because the NPC runs indefinitely and every name that ever
+/// spoke to it would otherwise be kept forever.
+const MAX_TRACKED_PARTNERS: usize = 16;
+
+/// Key used for the partner nobody has named — the state the NPC starts in
+/// and the one every speaker-less turn (a message typed into the web UI, a
+/// mic utterance with no speaker attached) keeps using.
+const UNKNOWN_PARTNER: &str = "";
+
+/// The conversation partner went quiet long enough to count as gone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartnerAbsence {
+    /// Who fell silent, or `None` if it was the unnamed partner.
+    pub who: Option<String>,
+    /// How long they had been silent when this was noticed. Slightly longer
+    /// than the configured timeout, by however late the check ran.
+    pub idle: std::time::Duration,
+}
+
+/// What changed when the conversation partner switched, for logging and for
+/// the UI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartnerSwitch {
+    /// Display name of who the NPC was talking to, or `None` if that was the
+    /// unnamed partner.
+    pub from: Option<String>,
+    /// Display name of who it is talking to now.
+    pub to: String,
+    /// The NPC had a stored drive state for `to` — they are coming back, not
+    /// meeting for the first time.
+    pub returning: bool,
+}
+
+/// Per-partner [`AffectState`], plus the detection of the partner changing.
+///
+/// Without this the drive model is a single global state: familiarity built
+/// up with one person carries straight over to whoever speaks next, and a
+/// stranger inherits the warmth earned by a friend. Keying the state by
+/// speaker fixes both directions — a new person starts cold, and someone who
+/// comes back picks up where they left off rather than being re-met.
+///
+/// Identity is the speaker name normalized by
+/// [`npc_core::person::normalize_person_name`], so "太郎", "太郎さん" and
+/// "  太郎  " are one partner. Deliberately name-based rather than tied to a
+/// `Person` record id: the speaker field on a speech/sense frame is a name,
+/// and requiring a stored record first would mean the very first turn with
+/// someone could never be attributed.
+///
+/// Conversation *history* is not partitioned — see `ChatEngine`. An NPC in a
+/// room hears everyone, so the transcript stays shared; only the internal
+/// state follows the partner.
+#[derive(Debug, Clone)]
+pub struct PartnerAffect {
+    /// Normalized key of the current partner; [`UNKNOWN_PARTNER`] until
+    /// somebody is named.
+    current_key: String,
+    /// Display name as last given for the current partner (the un-normalized
+    /// form, so the UI shows "太郎さん" rather than "太郎" if that is how
+    /// they were introduced). `None` for the unnamed partner.
+    current_name: Option<String>,
+    /// Whether the current partner already had a state when they became
+    /// current. Held across their whole stretch of turns, not just the
+    /// switching one, so it can be passed as `partner_known` every turn.
+    current_known: bool,
+    /// Set by [`Self::observe`] when it detects a switch, cleared by the
+    /// next `observe`, so exactly one published frame carries the flag.
+    switched: bool,
+    /// The current partner has been silent past the absence timeout. Unlike
+    /// `switched` this is a lasting condition, not a one-frame event: it
+    /// stays true for as long as nobody is talking, and clears the moment
+    /// anyone speaks again.
+    away: bool,
+    /// When the current partner last said something. `None` before the first
+    /// turn and again after an absence has been noticed, which is what keeps
+    /// [`Self::check_absence`] from reporting the same silence twice.
+    last_activity: Option<Instant>,
+    states: std::collections::HashMap<String, PartnerEntry>,
+    /// Normalized keys, least-recently-current first — the eviction order.
+    recency: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PartnerEntry {
+    state: AffectState,
+    /// Turns the NPC has taken *with this partner*. `AffectState::update`
+    /// uses it for the slow oxytocin bond ramp, so it has to be per-partner:
+    /// counting turns globally would hand a brand-new partner a ramp earned
+    /// with somebody else.
+    own_turns: u32,
+}
+
+impl Default for PartnerAffect {
+    fn default() -> Self {
+        let mut states = std::collections::HashMap::new();
+        states.insert(UNKNOWN_PARTNER.to_string(), PartnerEntry::default());
+        Self {
+            current_key: UNKNOWN_PARTNER.to_string(),
+            current_name: None,
+            current_known: false,
+            switched: false,
+            away: false,
+            last_activity: None,
+            states,
+            recency: vec![UNKNOWN_PARTNER.to_string()],
+        }
+    }
+}
+
+impl PartnerAffect {
+    /// Note who is speaking this turn and switch state if it isn't who we
+    /// were talking to.
+    ///
+    /// `speaker` of `None` — or a name that normalizes to nothing — means
+    /// "unknown", which carries no information about a change and therefore
+    /// keeps the current partner. That matters because the web UI's own chat
+    /// box sends no speaker: without this, every operator message would
+    /// otherwise read as a switch away from whoever the NPC was talking to.
+    pub fn observe(&mut self, speaker: Option<&str>) -> Option<PartnerSwitch> {
+        self.switched = false;
+        // Somebody is talking, so whoever it is, the room is not empty.
+        self.away = false;
+
+        let name = speaker?.trim();
+        let key = npc_core::person::normalize_person_name(name);
+        if key.is_empty() || key == self.current_key {
+            return None;
+        }
+
+        let returning = self.states.contains_key(&key);
+        let from = self.current_name.clone();
+
+        self.states.entry(key.clone()).or_default();
+        self.current_key = key.clone();
+        self.current_name = Some(name.to_string());
+        self.current_known = returning;
+        self.switched = true;
+        self.touch(&key);
+
+        Some(PartnerSwitch {
+            from,
+            to: name.to_string(),
+            returning,
+        })
+    }
+
+    /// Fold one partner utterance into the current partner's state. `now`
+    /// stamps the turn so [`Self::check_absence`] can measure the silence
+    /// that follows it; it is passed in rather than read from the clock here
+    /// so this module stays free of `Instant::now()` and its tests stay
+    /// deterministic.
+    pub fn update(&mut self, partner_text: &str, now: Instant) -> &AffectState {
+        let known = self.current_known;
+        self.last_activity = Some(now);
+        self.away = false;
+        let entry = self
+            .states
+            .entry(self.current_key.clone())
+            .or_default();
+        entry.state.update(partner_text, entry.own_turns, known);
+        entry.own_turns = entry.own_turns.saturating_add(1);
+        &entry.state
+    }
+
+    /// Notice the partner having walked away: no turn for longer than
+    /// `timeout`.
+    ///
+    /// This is what turns "they stopped replying" into a state change rather
+    /// than the NPC waiting forever mid-conversation. The partner's drives
+    /// settle back to baseline and the closing/invite-caution machine clears
+    /// (see [`AffectState::relax`]), but the partner stays *current* and
+    /// keeps their familiarity — they left the room, they didn't become a
+    /// stranger. If they come back the conversation resumes warm and calm;
+    /// if somebody else speaks instead, [`Self::observe`] switches away as
+    /// usual.
+    ///
+    /// Reports at most once per silence: `last_activity` is cleared, so
+    /// repeated polling after a departure is a no-op until somebody speaks.
+    /// A zero `timeout` disables the check.
+    pub fn check_absence(&mut self, now: Instant, timeout: Duration) -> Option<PartnerAbsence> {
+        if timeout.is_zero() {
+            return None;
+        }
+        let last = self.last_activity?;
+        let idle = now.saturating_duration_since(last);
+        if idle < timeout {
+            return None;
+        }
+
+        self.last_activity = None;
+        self.away = true;
+        if let Some(entry) = self.states.get_mut(&self.current_key) {
+            entry.state.relax();
+        }
+
+        Some(PartnerAbsence {
+            who: self.current_name.clone(),
+            idle,
+        })
+    }
+
+    /// Current partner's drive state. Falls back to a default state rather
+    /// than panicking if the entry is somehow missing — a wrong-looking
+    /// affect reading is a far better failure than taking down a chat turn.
+    pub fn state(&self) -> &AffectState {
+        static FALLBACK: OnceLock<AffectState> = OnceLock::new();
+        self.states
+            .get(&self.current_key)
+            .map(|e| &e.state)
+            .unwrap_or_else(|| FALLBACK.get_or_init(AffectState::default))
+    }
+
+    /// Current partner's state plus who that partner is. `partnerSwitched`
+    /// is true only until the next [`Self::observe`], so it marks exactly the
+    /// one frame where the change happened.
+    pub fn snapshot(&self) -> AffectSnapshot {
+        let mut snapshot = self.state().snapshot();
+        snapshot.partner = self.current_name.clone();
+        snapshot.partner_known = self.current_known;
+        snapshot.partner_switched = self.switched;
+        snapshot.partner_away = self.away;
+        snapshot
+    }
+
+    /// Move `key` to the most-recent end and evict past the cap. The current
+    /// partner is never evicted — it sits at the most-recent end by
+    /// construction, and the cap is well above 1.
+    fn touch(&mut self, key: &str) {
+        self.recency.retain(|k| k != key);
+        self.recency.push(key.to_string());
+        while self.recency.len() > MAX_TRACKED_PARTNERS {
+            let evicted = self.recency.remove(0);
+            self.states.remove(&evicted);
+        }
+    }
+}
+
 /// `1.0`-typed condition helper, kept close to the TS `cond ? x : 0`
 /// one-liners it replaces so the delta block above reads line-for-line like
 /// the original.
@@ -779,6 +1060,220 @@ mod tests {
 
         state.update("じゃあね", 1, false);
         assert!(state.snapshot().closing);
+    }
+
+    // --- PartnerAffect --------------------------------------------------
+
+    /// Enough warm turns to move familiarity clearly off zero, so the tests
+    /// below can tell "carried over" from "started fresh" without asserting
+    /// on the exact tuned deltas.
+    fn warm_up(partners: &mut PartnerAffect) {
+        for _ in 0..3 {
+            partners.update("ありがとう、嬉しいです", Instant::now());
+        }
+    }
+
+    #[test]
+    fn unnamed_speaker_keeps_the_current_partner() {
+        let mut partners = PartnerAffect::default();
+        assert!(partners.observe(Some("太郎")).is_some());
+        warm_up(&mut partners);
+        let familiarity = partners.state().familiarity();
+
+        // The web UI's chat box sends no speaker, and a blank one is the same
+        // non-signal — neither may read as "the partner changed".
+        assert!(partners.observe(None).is_none());
+        assert!(partners.observe(Some("   ")).is_none());
+        assert_eq!(partners.snapshot().partner.as_deref(), Some("太郎"));
+        assert_eq!(partners.state().familiarity(), familiarity);
+    }
+
+    #[test]
+    fn a_new_partner_starts_from_a_fresh_state() {
+        let mut partners = PartnerAffect::default();
+        partners.observe(Some("太郎"));
+        warm_up(&mut partners);
+        assert!(partners.state().familiarity() > 0.0);
+
+        let switch = partners.observe(Some("花子")).expect("switch detected");
+        assert_eq!(switch.from.as_deref(), Some("太郎"));
+        assert_eq!(switch.to, "花子");
+        assert!(!switch.returning);
+        // The whole point: warmth earned with 太郎 must not transfer.
+        assert_eq!(partners.state().familiarity(), 0.0);
+        assert!(!partners.snapshot().partner_known);
+    }
+
+    #[test]
+    fn returning_partner_resumes_their_own_state() {
+        let mut partners = PartnerAffect::default();
+        partners.observe(Some("太郎"));
+        warm_up(&mut partners);
+        let taro_familiarity = partners.state().familiarity();
+
+        partners.observe(Some("花子"));
+        partners.update("こんにちは", Instant::now());
+
+        let switch = partners.observe(Some("太郎")).expect("switch detected");
+        assert!(switch.returning);
+        assert!(partners.snapshot().partner_known);
+        assert_eq!(partners.state().familiarity(), taro_familiarity);
+    }
+
+    #[test]
+    fn honorifics_and_spacing_do_not_look_like_a_different_partner() {
+        let mut partners = PartnerAffect::default();
+        partners.observe(Some("太郎"));
+        assert!(partners.observe(Some("太郎さん")).is_none());
+        assert!(partners.observe(Some("　太郎　")).is_none());
+    }
+
+    #[test]
+    fn switched_flag_marks_only_the_turn_the_partner_changed() {
+        let mut partners = PartnerAffect::default();
+        assert!(!partners.snapshot().partner_switched);
+
+        partners.observe(Some("太郎"));
+        assert!(partners.snapshot().partner_switched);
+
+        // Same partner again — no longer a switch.
+        partners.observe(Some("太郎"));
+        assert!(!partners.snapshot().partner_switched);
+    }
+
+    #[test]
+    fn tracking_is_bounded_and_drops_the_least_recent_partner() {
+        let mut partners = PartnerAffect::default();
+        partners.observe(Some("最初"));
+        warm_up(&mut partners);
+
+        // Push past the cap with distinct names.
+        for i in 0..MAX_TRACKED_PARTNERS {
+            partners.observe(Some(&format!("人{i}")));
+            partners.update("こんにちは", Instant::now());
+        }
+
+        // 最初 has been evicted, so coming back reads as a first meeting.
+        let switch = partners.observe(Some("最初")).expect("switch detected");
+        assert!(!switch.returning);
+        assert_eq!(partners.state().familiarity(), 0.0);
+    }
+
+    const ABSENCE: Duration = Duration::from_secs(300);
+
+    #[test]
+    fn silence_past_the_timeout_reads_as_the_partner_having_left() {
+        let start = Instant::now();
+        let mut partners = PartnerAffect::default();
+        partners.observe(Some("太郎"));
+        partners.update("一緒に行こう", start);
+        assert!(partners.snapshot().invite_caution);
+        assert!(!partners.snapshot().partner_away);
+
+        // Still within the timeout — nothing has happened yet.
+        assert!(partners
+            .check_absence(start + Duration::from_secs(299), ABSENCE)
+            .is_none());
+        assert!(!partners.snapshot().partner_away);
+
+        let absence = partners
+            .check_absence(start + Duration::from_secs(301), ABSENCE)
+            .expect("absence detected");
+        assert_eq!(absence.who.as_deref(), Some("太郎"));
+
+        let snapshot = partners.snapshot();
+        assert!(snapshot.partner_away);
+        // The conversation wound down: the state machine cleared and the
+        // drives went back to rest...
+        assert!(!snapshot.invite_caution);
+        assert!(!snapshot.closing);
+        assert_eq!(
+            partners.state().level(DriveKey::Cortisol),
+            DriveKey::Cortisol.info().base
+        );
+        // ...but the NPC still knows who 太郎 is, and still says so.
+        assert_eq!(snapshot.partner.as_deref(), Some("太郎"));
+    }
+
+    #[test]
+    fn familiarity_survives_the_partner_stepping_away() {
+        let start = Instant::now();
+        let mut partners = PartnerAffect::default();
+        partners.observe(Some("太郎"));
+        for _ in 0..3 {
+            partners.update("ありがとう、嬉しいです", start);
+        }
+        let familiarity = partners.state().familiarity();
+        assert!(familiarity > 0.0);
+
+        partners.check_absence(start + Duration::from_secs(600), ABSENCE);
+        assert_eq!(partners.state().familiarity(), familiarity);
+    }
+
+    #[test]
+    fn one_silence_is_reported_once_however_often_it_is_polled() {
+        let start = Instant::now();
+        let mut partners = PartnerAffect::default();
+        partners.observe(Some("太郎"));
+        partners.update("こんにちは", start);
+
+        assert!(partners.check_absence(start + Duration::from_secs(400), ABSENCE).is_some());
+        // A poll runs every few seconds forever; it must not keep firing.
+        assert!(partners.check_absence(start + Duration::from_secs(500), ABSENCE).is_none());
+        assert!(partners.check_absence(start + Duration::from_secs(9000), ABSENCE).is_none());
+    }
+
+    #[test]
+    fn speaking_again_clears_the_away_state() {
+        let start = Instant::now();
+        let mut partners = PartnerAffect::default();
+        partners.observe(Some("太郎"));
+        partners.update("こんにちは", start);
+        partners.check_absence(start + Duration::from_secs(400), ABSENCE);
+        assert!(partners.snapshot().partner_away);
+
+        let resumed = start + Duration::from_secs(500);
+        partners.observe(Some("太郎"));
+        partners.update("ただいま", resumed);
+        assert!(!partners.snapshot().partner_away);
+        // And the silence clock restarted from the new turn.
+        assert!(partners.check_absence(resumed + Duration::from_secs(100), ABSENCE).is_none());
+    }
+
+    #[test]
+    fn absence_check_is_disabled_by_a_zero_timeout() {
+        let start = Instant::now();
+        let mut partners = PartnerAffect::default();
+        partners.observe(Some("太郎"));
+        partners.update("こんにちは", start);
+        assert!(partners
+            .check_absence(start + Duration::from_secs(86_400), Duration::ZERO)
+            .is_none());
+        assert!(!partners.snapshot().partner_away);
+    }
+
+    #[test]
+    fn nothing_is_absent_before_anyone_has_spoken() {
+        let mut partners = PartnerAffect::default();
+        assert!(partners
+            .check_absence(Instant::now() + Duration::from_secs(9000), ABSENCE)
+            .is_none());
+    }
+
+    #[test]
+    fn bond_ramp_counts_turns_per_partner_not_globally() {
+        // own_turns feeds the slow oxytocin ramp. A partner met after a long
+        // conversation with someone else must start that ramp at zero.
+        let mut partners = PartnerAffect::default();
+        partners.observe(Some("太郎"));
+        for _ in 0..10 {
+            partners.update("ありがとう、嬉しいです", Instant::now());
+        }
+        let taro_oxytocin = partners.state().level(DriveKey::Oxytocin);
+
+        partners.observe(Some("花子"));
+        partners.update("ありがとう、嬉しいです", Instant::now());
+        assert!(partners.state().level(DriveKey::Oxytocin) < taro_oxytocin);
     }
 
     #[test]

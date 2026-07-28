@@ -30,7 +30,7 @@ pub async fn api_state(State(state): State<AppState>) -> impl IntoResponse {
         .map(|c| json!({ "id": c.id, "name": c.sheet.name }));
 
     Json(json!({
-        "modules": module_flags(&state.ctx.config),
+        "modules": module_flags(&state.current_config()),
         "character": character,
         "addr": state.addr,
     }))
@@ -51,10 +51,28 @@ pub async fn api_put_config(State(state): State<AppState>, body: String) -> Resp
         Err(err) => return error_response(StatusCode::BAD_REQUEST, format!("invalid JSON: {err}")),
     };
 
+    let current_config = state.current_config();
+
+    // `providers[]` needs its own pass: the web UI's provider list can be
+    // reordered independently of `current_config`, so it must be restored by
+    // matching `id`, not array position (npc_core::unmask_provider_keys).
+    // This runs BEFORE the generic positional `restore_masked_secrets` below
+    // on purpose: unmask_provider_keys turns a matched provider's "***" into
+    // its real key first, so by the time restore_masked_secrets walks the
+    // same array it finds a non-"***" value there and leaves it untouched —
+    // it never gets a chance to instead pair that provider with whatever
+    // happens to sit at the same index in `current_config`. Doing it in the
+    // other order would let a reordered provider's key get positionally
+    // clobbered before the id-based fix could see the still-masked "***".
+    npc_core::unmask_provider_keys(&mut incoming, &current_config);
+
     // Restore "***" placeholders from the latest saved config (not the
     // startup snapshot) so a key saved earlier in this session isn't rolled
-    // back to the boot-time value by a later round-trip.
-    let current = match serde_json::to_value(&*state.current_config()) {
+    // back to the boot-time value by a later round-trip. This still covers
+    // the legacy api/tts/stt/vision sections, plus any providers[] entry
+    // unmask_provider_keys above couldn't resolve (e.g. an id not present in
+    // current_config at all), as a positional best-effort fallback.
+    let current = match serde_json::to_value(&*current_config) {
         Ok(v) => v,
         Err(err) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
     };
@@ -80,10 +98,12 @@ pub async fn api_put_config(State(state): State<AppState>, body: String) -> Resp
 
     // Publish the full, unredacted new config on the internal `npc:config`
     // bus topic so modules that can hot-reload (npc-scheduler's
-    // announcements, npc-action's locations/routes) pick it up immediately.
-    // This does NOT update `state.ctx.config` itself — the in-memory
-    // `Arc<Config>` shared with already-running modules is still only
-    // refreshed by a restart, hence the note below.
+    // announcements, npc-action's locations/routes, npc-speech's whole
+    // stt/tts setup) pick it up immediately. This does NOT update
+    // `state.ctx.config` itself — the in-memory `Arc<Config>` shared with
+    // already-running modules is still only refreshed by a restart, hence the
+    // note below; hot-reloading modules keep their own copy of the latest
+    // config instead.
     state
         .ctx
         .bus
@@ -92,8 +112,9 @@ pub async fn api_put_config(State(state): State<AppState>, body: String) -> Resp
 
     Json(json!({
         "ok": true,
-        "note": "Schedule and location/route changes take effect immediately; \
-                 other changes (API connections, module on/off, etc.) require a restart to take effect."
+        "note": "Schedule, location/route and speech (stt/tts on-off, devices, endpoints, VAD) \
+                 changes take effect immediately; other changes (API connections, module on/off, \
+                 etc.) require a restart to take effect."
     }))
     .into_response()
 }
@@ -211,25 +232,51 @@ pub async fn api_scheduler_test(State(state): State<AppState>, body: String) -> 
 }
 
 /// Body shared by `POST /api/llm/models` and `POST /api/llm/voices`.
+///
+/// `provider_id` is the new provider/preset model's way of naming a saved
+/// connection; `section` is the pre-provider/preset spelling (`"api"` /
+/// `"tts"` / `"stt"`), kept optional rather than required so the AI settings
+/// screen's existing per-section callers (SettingsView's `ModelPicker`, not
+/// yet migrated) keep working unchanged. Both are only consulted when
+/// `api_key == "***"`; see [`resolve_probe_api_key`].
 #[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct LlmProbeRequest {
-    #[serde(rename = "baseUrl")]
     base_url: String,
-    #[serde(rename = "apiKey")]
     api_key: String,
-    section: String,
+    #[serde(default)]
+    section: Option<String>,
+    #[serde(default)]
+    provider_id: Option<String>,
 }
 
 /// If `api_key` is the redacted placeholder `"***"` (the AI settings screen
 /// round-tripping a value it fetched from `GET /api/config`), resolve it to
-/// the real, saved key for `section`. Otherwise pass it through unchanged —
-/// this lets the connection test also work for a key the user just typed in
-/// but hasn't saved yet.
-fn resolve_probe_api_key(section: &str, api_key: &str, config: &npc_core::Config) -> String {
+/// a real, saved key. Otherwise pass it through unchanged — this lets the
+/// connection test also work for a key the user just typed in but hasn't
+/// saved yet.
+///
+/// Resolution order for the placeholder: `provider_id` (looked up in
+/// `config.providers[]`) takes priority when present, since it names the
+/// specific connection the caller means; falling back to `section` keeps the
+/// pre-provider/preset callers working exactly as before. `section` itself
+/// defaults to `"api"` when omitted, matching the only section every legacy
+/// caller could previously reach without one.
+fn resolve_probe_api_key(
+    provider_id: Option<&str>,
+    section: Option<&str>,
+    api_key: &str,
+    config: &npc_core::Config,
+) -> String {
     if api_key != "***" {
         return api_key.to_string();
     }
-    match section {
+    if let Some(id) = provider_id {
+        if let Some(provider) = config.provider(id) {
+            return provider.api_key.clone();
+        }
+    }
+    match section.unwrap_or("api") {
         "api" => config.api.api_key.clone(),
         "tts" => config.tts.api_key.clone(),
         "stt" => config.stt.api_key.clone(),
@@ -246,7 +293,12 @@ pub async fn api_llm_models(State(state): State<AppState>, body: String) -> Resp
         Ok(r) => r,
         Err(err) => return error_response(StatusCode::BAD_REQUEST, err),
     };
-    let api_key = resolve_probe_api_key(&req.section, &req.api_key, &state.current_config());
+    let api_key = resolve_probe_api_key(
+        req.provider_id.as_deref(),
+        req.section.as_deref(),
+        &req.api_key,
+        &state.current_config(),
+    );
     let client = npc_llm::LlmClient::new(req.base_url, api_key);
     match client.list_models().await {
         Ok(models) => Json(json!({ "models": models })).into_response(),
@@ -259,11 +311,30 @@ pub async fn api_llm_voices(State(state): State<AppState>, body: String) -> Resp
         Ok(r) => r,
         Err(err) => return error_response(StatusCode::BAD_REQUEST, err),
     };
-    let api_key = resolve_probe_api_key(&req.section, &req.api_key, &state.current_config());
+    let api_key = resolve_probe_api_key(
+        req.provider_id.as_deref(),
+        req.section.as_deref(),
+        &req.api_key,
+        &state.current_config(),
+    );
     let client = npc_llm::LlmClient::new(req.base_url, api_key);
     match client.list_voices().await {
         Ok(voices) => Json(json!({ "voices": voices })).into_response(),
         Err(err) => error_response(StatusCode::BAD_GATEWAY, err.to_string()),
+    }
+}
+
+/// Input/output audio endpoints visible to the server's host, for the チャット
+/// sidebar's 音声 device pickers. What gets *saved* is a device name into
+/// `config.speech.{input,output}_device`, which npc-speech matches as a
+/// case-insensitive substring at startup (see npc-speech's device.rs) — so
+/// this listing is a convenience, not a handle the client has to hold on to.
+///
+/// cpal enumeration blocks on the OS audio API, hence the blocking pool.
+pub async fn api_audio_devices() -> Response {
+    match tokio::task::spawn_blocking(npc_speech::list_devices).await {
+        Ok(devices) => Json(devices).into_response(),
+        Err(err) => error_response(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
     }
 }
 
@@ -731,15 +802,45 @@ mod tests {
         config.tts.api_key = "sk-tts".to_string();
         config.stt.api_key = "sk-stt".to_string();
 
-        assert_eq!(resolve_probe_api_key("api", "***", &config), "sk-api");
-        assert_eq!(resolve_probe_api_key("tts", "***", &config), "sk-tts");
-        assert_eq!(resolve_probe_api_key("stt", "***", &config), "sk-stt");
+        assert_eq!(resolve_probe_api_key(None, Some("api"), "***", &config), "sk-api");
+        assert_eq!(resolve_probe_api_key(None, Some("tts"), "***", &config), "sk-tts");
+        assert_eq!(resolve_probe_api_key(None, Some("stt"), "***", &config), "sk-stt");
+    }
+
+    #[test]
+    fn resolve_probe_api_key_defaults_section_to_api_when_omitted() {
+        let mut config = npc_core::Config::default();
+        config.api.api_key = "sk-api".to_string();
+        assert_eq!(resolve_probe_api_key(None, None, "***", &config), "sk-api");
+    }
+
+    #[test]
+    fn resolve_probe_api_key_prefers_provider_id_over_section() {
+        let mut config = npc_core::Config::default();
+        config.api.api_key = "sk-api".to_string();
+        config.providers.push(npc_core::config::ProviderConfig {
+            id: "p1".to_string(),
+            label: "P1".to_string(),
+            base_url: "http://p1".to_string(),
+            api_key: "sk-provider".to_string(),
+        });
+        assert_eq!(resolve_probe_api_key(Some("p1"), Some("api"), "***", &config), "sk-provider");
+    }
+
+    #[test]
+    fn resolve_probe_api_key_falls_back_to_section_when_provider_id_unknown() {
+        let mut config = npc_core::Config::default();
+        config.tts.api_key = "sk-tts".to_string();
+        assert_eq!(resolve_probe_api_key(Some("missing"), Some("tts"), "***", &config), "sk-tts");
     }
 
     #[test]
     fn resolve_probe_api_key_passes_through_typed_key() {
         let config = npc_core::Config::default();
-        assert_eq!(resolve_probe_api_key("api", "sk-typed-just-now", &config), "sk-typed-just-now");
+        assert_eq!(
+            resolve_probe_api_key(None, Some("api"), "sk-typed-just-now", &config),
+            "sk-typed-just-now"
+        );
     }
 
     fn config_with_announcement() -> npc_core::Config {
@@ -850,7 +951,18 @@ mod tests {
         .unwrap();
         assert_eq!(req.base_url, "http://localhost:11434");
         assert_eq!(req.api_key, "***");
-        assert_eq!(req.section, "tts");
+        assert_eq!(req.section, Some("tts".to_string()));
+        assert_eq!(req.provider_id, None);
+    }
+
+    #[test]
+    fn parse_llm_probe_request_parses_provider_id_and_omitted_section() {
+        let req = parse_llm_probe_request(
+            r#"{"baseUrl": "http://localhost:11434", "apiKey": "***", "providerId": "p1"}"#,
+        )
+        .unwrap();
+        assert_eq!(req.provider_id, Some("p1".to_string()));
+        assert_eq!(req.section, None);
     }
 
     // -------------------------------------------------------------

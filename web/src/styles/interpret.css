@@ -1,156 +1,124 @@
-/* 通訳 view — simultaneous interpretation settings + live transcript. */
+/* 通訳 styles — shared by two homes now that the old top-level 通訳 tab is
+   dissolved: the チャット sidebar's 通訳 panel (mode switch + settings form,
+   see InterpretPanel.tsx) and the 設定 view's 通訳 tab. Both now render the
+   same form (components/InterpretSettings.tsx) rather than each hand-rolling
+   their own copy, so .interpret-fields / .interpret-fields--compact /
+   .interpret-lang-grid below are shared by both homes too — the `compact`
+   prop picks which one a given mount uses.
 
-.interpret-view {
+   The sidebar panel used to also host a live translation transcript below
+   the settings (.interpret-log and friends); that log is gone now that
+   interpretation results render inline in the チャット transcript instead, so
+   those rules were removed along with the markup. */
+
+/* --- Sidebar panel -------------------------------------------------------- */
+
+.interpret-panel {
   display: flex;
   flex-direction: column;
-  gap: var(--space-4);
-  max-width: 760px;
-  margin: 0 auto;
-  padding: var(--space-5);
+  gap: var(--space-3);
 }
 
-.interpret-header {
+/* Holds only the SaveChip, which reports autosave for every field in the
+   panel, so it's pinned to the top-right rather than attached to one of
+   them. Collapses to nothing while the chip is idle. */
+.interpret-panel-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
-  flex-wrap: wrap;
+  justify-content: flex-end;
+  min-height: 0;
 }
 
-.interpret-header-title {
+.interpret-panel-error {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  color: var(--primary);
-}
-
-.interpret-header-title h2 {
-  font-size: 1rem;
-  font-weight: 700;
-  color: var(--text);
-}
-
-.interpret-hint {
   font-size: 0.78rem;
-  color: var(--text-subtle);
-  line-height: 1.6;
+  color: var(--danger-text);
 }
 
-.interpret-settings {
+/* The three-option mode switch has to survive a 320px column: .segmented
+   already scrolls horizontally if it overflows (see components.css), but
+   wrapping to two rows reads better than a scroll hint in a strip this
+   narrow. */
+.interpret-panel .segmented {
+  flex-wrap: wrap;
+  overflow-x: visible;
+}
+
+.interpret-panel .segmented-option {
+  flex: 1 1 auto;
+}
+
+/* Outer wrapper for InterpretSettings' non-mode fields (languages, context
+   size, model, toggles). Plain flex column so compact mode can simply skip
+   the .interpret-lang-grid wrapper below and let the fields fall back to
+   this single-column stack. */
+.interpret-fields {
   display: flex;
   flex-direction: column;
-  gap: var(--space-4);
+  gap: var(--space-3);
 }
 
+/* Compact = rendered in the 320px チャット sidebar (InterpretPanel.tsx) via
+   InterpretSettings'/InterpretModeField's `compact` prop. Tighter type
+   throughout, the toggle grid forced to one column (its default
+   `flex-wrap: wrap` in settings.css could still land two short toggles side
+   by side), and text inputs/selects get `min-width: 0` so a long typed value
+   can't push the 320px column into horizontal scroll. */
+.interpret-fields--compact {
+  font-size: 0.8rem;
+}
+
+.interpret-fields--compact .settings-toggle-grid {
+  flex-direction: column;
+}
+
+.interpret-fields--compact input:not([type="checkbox"], [type="radio"]),
+.interpret-fields--compact select {
+  min-width: 0;
+  width: 100%;
+}
+
+/* Non-compact (設定 view) layout for source/target/target2/context_size. */
 .interpret-lang-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   gap: var(--space-3);
 }
 
-/* --- Transcript ---------------------------------------------------------- */
+/* The sidebar panel wraps the field set in a <details> so it can be folded
+   away when it isn't needed, keeping the panel compact. It reads as a
+   section divider rather than a control: a hairline above it separates it
+   from the always-visible mode switch, and the marker is left to the UA so
+   the disclosure triangle matches the platform. */
 
-.interpret-log {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  min-height: 0;
+.interpret-panel-settings {
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
 }
 
-.interpret-log-head {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-}
-
-.interpret-log-head h3 {
-  font-size: 0.86rem;
-  font-weight: 700;
-  color: var(--text);
-}
-
-.interpret-off-badge {
-  color: var(--text-subtle);
-}
-
-.interpret-transcript {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-  max-height: 46vh;
-  overflow-y: auto;
-  padding: var(--space-3);
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-l);
-}
-
-.interpret-empty {
-  font-size: 0.8rem;
-  color: var(--text-muted);
-  text-align: center;
-  padding: var(--space-4) 0;
-}
-
-.interpret-entry {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-  padding: var(--space-2) var(--space-3);
-  border-left: 3px solid var(--border);
-  border-radius: var(--radius-m);
-  background: var(--surface-2);
-}
-
-.interpret-entry--user {
-  border-left-color: var(--primary);
-}
-
-.interpret-entry-head {
+.interpret-panel-settings > summary {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  font-size: 0.72rem;
-  color: var(--text-subtle);
-}
-
-.interpret-entry-source {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  font-weight: 600;
-}
-
-.interpret-entry-time {
-  margin-left: auto;
-  font-variant-numeric: tabular-nums;
-  color: var(--text-muted);
-}
-
-.interpret-original {
-  font-size: 0.86rem;
-  color: var(--text);
-  line-height: 1.5;
-}
-
-.interpret-translated {
-  display: flex;
-  align-items: baseline;
-  gap: var(--space-2);
-  font-size: 0.86rem;
-  font-weight: 600;
-  color: var(--primary);
-  line-height: 1.5;
-}
-
-.interpret-lang {
-  flex-shrink: 0;
-  font-size: 0.7rem;
-  font-weight: 700;
-  color: var(--text-subtle);
-}
-
-.interpret-pending {
   font-size: 0.78rem;
+  font-weight: 600;
   color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.interpret-panel-settings > summary:hover {
+  color: var(--text);
+}
+
+.interpret-panel-settings > summary:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-xs);
+}
+
+.interpret-panel-settings[open] > summary {
+  margin-bottom: var(--space-3);
 }

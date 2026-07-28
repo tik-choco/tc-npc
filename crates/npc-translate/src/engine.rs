@@ -12,7 +12,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, RwLock};
 
 use futures_util::future::join_all;
-use npc_core::config::{Config, TranslationConfig, TranslationMode};
+use npc_core::config::{
+    ApiConfig, Config, LlmTask, PresetConfig, ProviderConfig, TranslationConfig, TranslationMode,
+};
 use npc_core::Bus;
 use npc_llm::{ChatMessage, ChatRequest, LlmClient};
 use serde_json::json;
@@ -55,8 +57,22 @@ impl Source {
 pub struct TranslationEngine {
     bus: Bus,
     llm: LlmClient,
-    /// `api.model`, used when `translation.model` is empty.
-    fallback_model: String,
+    /// Connection-resolution inputs frozen at construction — `providers` /
+    /// `presets` / `default_preset_id` / `api` all require a restart to
+    /// change, same as every other connection setting in this app. Combined
+    /// with the hot-reloaded `translation` section in `settings` (below) to
+    /// resolve `LlmTask::Translation` on each request via `resolve_llm`
+    /// (config resolution is centralized there, one preset/provider lookup
+    /// implementation instead of one per crate).
+    api: ApiConfig,
+    providers: Vec<ProviderConfig>,
+    presets: Vec<PresetConfig>,
+    default_preset_id: String,
+    /// The model and provider `self.llm` was built for. Frozen alongside the
+    /// endpoint so a live preset re-assignment can't send a new preset's
+    /// model name to the old provider's endpoint (see `resolve_model`).
+    model: String,
+    provider_id: String,
     /// `vrc.osc_address` — where chatbox subtitles go.
     osc_address: String,
     /// Hot-reloaded from `npc:config`; everything else above is fixed for the
@@ -70,18 +86,63 @@ pub struct TranslationEngine {
 
 impl TranslationEngine {
     pub fn new(bus: Bus, config: &Config) -> Self {
-        let llm = LlmClient::new(config.api.base_url.clone(), config.api.api_key.clone())
-            .with_reasoning_effort(config.api.reasoning_effort.clone());
+        // base_url/api_key/reasoning_effort の解決は npc-core の resolve_llm
+        // に一本化した。preset/provider の割り当ても他の接続設定と同じく
+        // 再起動要なので、ここで一度だけ解決して固定する。
+        let resolved = config.resolve_llm(LlmTask::Translation);
+        let model = resolved.model.clone();
+        let provider_id = config
+            .preset(config.task_preset_id(LlmTask::Translation))
+            .map(|preset| preset.provider_id.clone())
+            .unwrap_or_default();
+        let llm =
+            LlmClient::new(resolved.base_url, resolved.api_key).with_reasoning_effort(resolved.reasoning_effort);
         Self {
             bus,
             llm,
-            fallback_model: config.api.model.clone(),
+            api: config.api.clone(),
+            providers: config.providers.clone(),
+            presets: config.presets.clone(),
+            default_preset_id: config.default_preset_id.clone(),
+            model,
+            provider_id,
             osc_address: config.vrc.osc_address.clone(),
             settings: RwLock::new(config.translation.clone()),
             user_history: Mutex::new(Vec::new()),
             agent_history: Mutex::new(Vec::new()),
             seq: AtomicU64::new(0),
         }
+    }
+
+    /// The effective model for the current (possibly hot-reloaded)
+    /// `translation` settings, via `resolve_llm` over the frozen
+    /// providers/presets/api snapshot from construction.
+    ///
+    /// `self.llm` is pinned to the endpoint resolved at construction, so the
+    /// hot value is only adopted while it stays on that same provider. A live
+    /// re-assignment to a preset on a *different* provider keeps the frozen
+    /// model until restart — otherwise we'd send the new preset's model name
+    /// to the old provider's endpoint, which just errors. The no-preset case
+    /// (provider id `""` on both sides) is the legacy `translation.model`
+    /// path, which has always hot-reloaded against the fixed `api.*`
+    /// endpoint; that behaviour is preserved exactly.
+    fn resolve_model(&self, settings: &TranslationConfig) -> String {
+        let cfg = Config {
+            api: self.api.clone(),
+            providers: self.providers.clone(),
+            presets: self.presets.clone(),
+            default_preset_id: self.default_preset_id.clone(),
+            translation: settings.clone(),
+            ..Config::default()
+        };
+        let provider_id = cfg
+            .preset(cfg.task_preset_id(LlmTask::Translation))
+            .map(|preset| preset.provider_id.as_str())
+            .unwrap_or("");
+        if provider_id != self.provider_id {
+            return self.model.clone();
+        }
+        cfg.resolve_llm(LlmTask::Translation).model
     }
 
     pub fn mode(&self) -> TranslationMode {
@@ -122,11 +183,7 @@ impl TranslationEngine {
         // waiting on the LLM.
         self.publish(&id, source, &text, "", "", reversed);
 
-        let model = if settings.model.trim().is_empty() {
-            self.fallback_model.clone()
-        } else {
-            settings.model.clone()
-        };
+        let model = self.resolve_model(&settings);
 
         // Results accumulate as they arrive so each chatbox update is a
         // fuller version of the same text (ports `composeVRCChatbox`).
@@ -286,6 +343,7 @@ mod tests {
             auto_reverse: true,
             chatbox: false,
             model: String::new(),
+            preset_id: String::new(),
         }
     }
 

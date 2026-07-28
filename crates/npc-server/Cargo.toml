@@ -9,6 +9,9 @@ description = "HTTP/WebSocket server and embedded web UI host for tc-npc"
 npc-core = { workspace = true }
 npc-llm = { workspace = true }
 npc-scheduler = { workspace = true }
+# For host audio device enumeration only (GET /api/audio/devices) — the
+# module itself is wired by the binary, not by this crate.
+npc-speech = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 serde = { workspace = true }

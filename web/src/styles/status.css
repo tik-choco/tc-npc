@@ -1,0 +1,372 @@
+/* チャットサイドバーの「状態」パネル — a condensed 内心 (affect) card plus the
+   connection/version/character summary and the enabled module list, sized
+   for a narrow 320px sidebar column. */
+
+.status-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.status-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-4);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-l);
+  box-shadow: var(--shadow-1);
+}
+
+.status-card-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.status-rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+}
+
+.status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.status-row-label {
+  flex-shrink: 0;
+  font-size: 0.8rem;
+  color: var(--text-subtle);
+}
+
+.status-row-value {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 0.85rem;
+  color: var(--text);
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status-modules {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+}
+
+.status-modules-title {
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--text-subtle);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.status-modules-empty {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--text-subtle);
+}
+
+.status-modules-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.status-module-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) 0;
+  min-width: 0;
+}
+
+.status-module-dot {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--text-subtle);
+}
+
+.status-module-dot.is-on {
+  background: var(--success);
+}
+
+.status-module-dot.is-off {
+  background: var(--text-subtle);
+}
+
+.status-module-name {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 0.84rem;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- 内心 card ------------------------------------------------------------
+   The condensed affect readout that sits above the connection card. Colors
+   and bar geometry deliberately mirror brain.css (--primary above baseline,
+   --danger below, a 2px baseline tick) so a reading here and a reading in
+   the 感情 tab look like the same measurement, just at different zoom. The
+   bars are slimmer and the type smaller because this column is 320px and
+   shares space with the connection/module rows. */
+
+/* Who the readings belong to, above the numbers themselves. */
+.status-affect-partner {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  color: var(--text-subtle);
+}
+
+.status-affect-partner-label {
+  flex-shrink: 0;
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.status-affect-partner-name {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Nobody has identified themselves — a real state, but not a name, so it
+   reads as muted placeholder text rather than as someone called "未識別". */
+.status-affect-partner-name.is-unknown {
+  font-weight: 400;
+  font-style: italic;
+  color: var(--text-subtle);
+}
+
+.status-affect-partner-badge {
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+/* Nobody is talking: the row reads as inactive without disappearing, since
+   who the NPC was last with is still the state it is holding. */
+.status-affect-partner.is-away .status-affect-partner-name {
+  color: var(--text-subtle);
+}
+
+.status-affect-partner-badge--away {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.status-affect-partner-badge--switched {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--primary);
+  background: var(--primary-soft);
+}
+
+.status-affect-empty {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--text-subtle);
+}
+
+.status-affect-familiarity {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.status-affect-familiarity-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.status-affect-familiarity-label {
+  flex-shrink: 0;
+}
+
+/* Pushes the percentage to the right edge whether or not the wary badge is
+   present, so the number sits in a stable column. */
+.status-affect-familiarity-value {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-subtle);
+}
+
+.status-affect-wary {
+  color: var(--danger-text);
+  background: var(--danger-soft);
+}
+
+.status-affect-bar-track {
+  position: relative;
+  height: 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+}
+
+.status-affect-bar-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: var(--primary);
+  border-radius: var(--radius-pill);
+  transition:
+    left var(--dur) var(--ease),
+    width var(--dur) var(--ease);
+}
+
+.status-affect-bar-fill--up {
+  background: var(--primary);
+}
+
+.status-affect-bar-fill--down {
+  background: var(--danger);
+}
+
+/* A drive sitting exactly at baseline has zero width — draw nothing rather
+   than a 1px sliver of color. */
+.status-affect-bar-fill--flat {
+  background: transparent;
+}
+
+/* Baseline tick for a drive, and the wary threshold for familiarity. Both
+   overhang the track vertically so they stay visible over a full bar. */
+.status-affect-bar-base,
+.status-affect-bar-threshold {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 2px;
+  transform: translateX(-1px);
+}
+
+.status-affect-bar-base {
+  background: var(--text);
+  opacity: 0.55;
+}
+
+.status-affect-bar-threshold {
+  background: var(--text-subtle);
+}
+
+.status-affect-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.status-affect-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.status-affect-badge--caution {
+  color: var(--danger-text);
+  background: var(--danger-soft);
+}
+
+.status-affect-drives {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+}
+
+.status-affect-drives-title {
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--text-subtle);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.status-affect-drive-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.status-affect-drive {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.status-affect-drive-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.status-affect-drive-name {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 0.82rem;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status-affect-drive-delta {
+  flex-shrink: 0;
+  font-size: 0.78rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-subtle);
+}
+
+.status-affect-drive-delta--up {
+  color: var(--primary);
+}
+
+.status-affect-drive-delta--down {
+  color: var(--danger-text);
+}
+
+.status-affect-hint {
+  margin: 0;
+  font-size: 0.76rem;
+  line-height: 1.5;
+  color: var(--text-subtle);
+}

@@ -166,7 +166,7 @@ async fn do_chat_with_action(state: &Arc<ActionState>, query: &str) -> anyhow::R
     history.push(ChatMessage::user(query.to_string()));
     trim_history(&mut history, history_size);
 
-    let mut req = ChatRequest::new(state.config.api.model.clone(), history.clone());
+    let mut req = ChatRequest::new(state.model.clone(), history.clone());
     req.response_format = Some(ResponseFormat::json_object());
 
     let resp = state

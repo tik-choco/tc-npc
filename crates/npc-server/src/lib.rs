@@ -41,6 +41,11 @@ struct AppState {
     /// `short_term_memory` bus traffic by `bus_forward` so `GET /api/memory`
     /// can answer it without its own bus subscription.
     short_term_memory: Arc<std::sync::Mutex<String>>,
+    /// Whether the cascade voice loop is currently running. npc-speech owns
+    /// the real gate; this is the server-side mirror so a newly-connected
+    /// client can be told the switch position, and so every open tab sees
+    /// the same one. Starts `true`, matching npc-speech's own default.
+    voice_active: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AppState {
@@ -88,6 +93,7 @@ async fn run_server(ctx: ModuleCtx) -> anyhow::Result<()> {
         echo,
         addr: bound_addr.to_string(),
         short_term_memory,
+        voice_active: Arc::new(std::sync::atomic::AtomicBool::new(true)),
     };
 
     if ctx.config.server.auto_open {
@@ -124,6 +130,7 @@ async fn run_server(ctx: ModuleCtx) -> anyhow::Result<()> {
                 .patch(rest::api_update_person)
                 .delete(rest::api_delete_person),
         )
+        .route("/api/audio/devices", get(rest::api_audio_devices))
         .route("/api/llm/models", post(rest::api_llm_models))
         .route("/api/llm/voices", post(rest::api_llm_voices))
         .fallback(assets::static_handler)

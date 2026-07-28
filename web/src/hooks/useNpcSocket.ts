@@ -2,8 +2,8 @@
 // frames out into per-view state slices: a merged `timeline` for the chat
 // view (chat + sense + memory + actionLog, in arrival order) plus dedicated
 // lists/scalars for the views that only care about one frame kind (音声's
-// ttsLines/volume, 視覚's visionLog, 行動's actionLogEntries/position, 通訳's
-// translations).
+// ttsLines/volume, 視覚's visionLog, 行動's actionLogEntries/position,
+// translations merged into the チャット transcript by `seq`).
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import { NpcSocket, type ConnectionState } from "../lib/ws";
 import { getChatHistory } from "../lib/api";
@@ -34,6 +34,12 @@ export interface TtsLineEntry {
  */
 export interface TranslationEntry {
   id: string;
+  /** Monotonic arrival sequence, drawn from the same `seqRef` counter as
+   *  `TimelineEntry` ids, so the チャット transcript can merge translation
+   *  rows into its id-ordered row list. Assigned once when the entry is
+   *  first created and never reassigned by later per-language frames, so a
+   *  translation keeps the position it first appeared at. */
+  seq: number;
   source: "user" | "agent";
   original: string;
   translations: Record<string, string>;
@@ -73,6 +79,11 @@ export interface AffectSnapshot {
   familiarity: number;
   closing: boolean;
   inviteCaution: boolean;
+  /** Conversation partner these readings belong to — see AffectMessage. */
+  partner: string | null;
+  partnerKnown: boolean;
+  partnerSwitched: boolean;
+  partnerAway: boolean;
   drives: DriveState[];
 }
 
@@ -89,6 +100,12 @@ export interface UseNpcSocketResult {
   position: PositionState | null;
   volume: number;
   errors: ErrorEntry[];
+  /** Whether the cascade voice loop (mic -> STT -> talk -> TTS) is running,
+   *  as last reported by the server's `voice` frame. Server-authoritative:
+   *  the チャット tab's 開始/停止 toggle sends `voiceStart`/`voiceStop` and
+   *  waits for the echoed frame rather than flipping optimistically, so two
+   *  open tabs can't disagree about the switch position. */
+  voiceActive: boolean;
   /** True from the moment an `input`/`command` is acked (`inputAccepted`)
    *  until the resulting `chat` reply (or a failure) lands — drives the
    *  チャット typing indicator. */
@@ -127,6 +144,7 @@ export function useNpcSocket(): UseNpcSocketResult {
   const [position, setPosition] = useState<PositionState | null>(null);
   const [volume, setVolume] = useState(0);
   const [errors, setErrors] = useState<ErrorEntry[]>([]);
+  const [voiceActive, setVoiceActive] = useState(true);
   const [pending, setPending] = useState(false);
   const [affect, setAffect] = useState<AffectSnapshot | null>(null);
   const [affectHistory, setAffectHistory] = useState<AffectSnapshot[]>([]);
@@ -248,6 +266,12 @@ export function useNpcSocket(): UseNpcSocketResult {
             familiarity: msg.familiarity,
             closing: msg.closing,
             inviteCaution: msg.inviteCaution,
+            // Normalized to null so consumers have one "nobody named" value
+            // rather than having to check for both undefined and "".
+            partner: msg.partner ?? null,
+            partnerKnown: msg.partnerKnown,
+            partnerSwitched: msg.partnerSwitched,
+            partnerAway: msg.partnerAway,
             drives: msg.drives,
           };
           setAffect(snapshot);
@@ -277,6 +301,7 @@ export function useNpcSocket(): UseNpcSocketResult {
                   ...prev,
                   {
                     id: msg.id,
+                    seq: nextId(),
                     source: msg.source,
                     original: msg.original,
                     translations: msg.lang === "" ? {} : { [msg.lang]: msg.text },
@@ -303,6 +328,10 @@ export function useNpcSocket(): UseNpcSocketResult {
 
         case "volume":
           setVolume(msg.level);
+          break;
+
+        case "voice":
+          setVoiceActive(msg.active);
           break;
 
         case "error":
@@ -379,6 +408,7 @@ export function useNpcSocket(): UseNpcSocketResult {
     position,
     volume,
     errors,
+    voiceActive,
     pending,
     affect,
     affectHistory,

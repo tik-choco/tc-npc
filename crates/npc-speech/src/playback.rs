@@ -41,8 +41,21 @@ enum PlayOutcome {
     Shutdown,
 }
 
-/// Entry point run on a dedicated `std::thread`.
-pub fn run_playback_thread(speech: SpeechConfig, rx: Receiver<PlaybackCmd>, is_playing: Arc<AtomicBool>) {
+/// One queued clip plus whether it arrived as a priority (`agent:interrupt`
+/// "tts") item. Scheduler announcements and chimes are priority, and
+/// barge-in deliberately does not cut those short — same carve-out as the Go
+/// original's `!a.isPriorityPlaying.Load()`.
+type QueuedClip = (Vec<u8>, bool);
+
+/// Entry point run on a dedicated `std::thread`. `is_playing` is the mic's
+/// echo/barge-in gate; `is_priority_playing` narrows it to "and the clip is
+/// one the user isn't allowed to talk over".
+pub fn run_playback_thread(
+    speech: SpeechConfig,
+    rx: Receiver<PlaybackCmd>,
+    is_playing: Arc<AtomicBool>,
+    is_priority_playing: Arc<AtomicBool>,
+) {
     let host = cpal::default_host();
     let device = match select_output_device(&host, &speech.output_device) {
         Ok(d) => d,
@@ -56,11 +69,14 @@ pub fn run_playback_thread(speech: SpeechConfig, rx: Receiver<PlaybackCmd>, is_p
         "npc-speech: TTS playback device ready"
     );
 
-    let mut queue: VecDeque<Vec<u8>> = VecDeque::new();
+    let mut queue: VecDeque<QueuedClip> = VecDeque::new();
 
     'outer: loop {
-        if let Some(wav) = queue.pop_front() {
-            match play_wav_blocking(&device, &wav, &rx, &mut queue, &is_playing) {
+        if let Some((wav, priority)) = queue.pop_front() {
+            is_priority_playing.store(priority, Ordering::SeqCst);
+            let outcome = play_wav_blocking(&device, &wav, &rx, &mut queue, &is_playing);
+            is_priority_playing.store(false, Ordering::SeqCst);
+            match outcome {
                 PlayOutcome::Shutdown => break 'outer,
                 PlayOutcome::Done => {}
             }
@@ -68,10 +84,10 @@ pub fn run_playback_thread(speech: SpeechConfig, rx: Receiver<PlaybackCmd>, is_p
         }
 
         match rx.recv() {
-            Ok(PlaybackCmd::Enqueue(wav)) => queue.push_back(wav),
+            Ok(PlaybackCmd::Enqueue(wav)) => queue.push_back((wav, false)),
             Ok(PlaybackCmd::Priority(items)) => {
                 queue.clear();
-                queue.extend(items);
+                queue.extend(items.into_iter().map(|wav| (wav, true)));
             }
             Ok(PlaybackCmd::Stop) => queue.clear(),
             Ok(PlaybackCmd::Shutdown) | Err(_) => break 'outer,
@@ -86,7 +102,7 @@ fn play_wav_blocking(
     device: &cpal::Device,
     wav: &[u8],
     rx: &Receiver<PlaybackCmd>,
-    queue: &mut VecDeque<Vec<u8>>,
+    queue: &mut VecDeque<QueuedClip>,
     is_playing: &Arc<AtomicBool>,
 ) -> PlayOutcome {
     let (samples, src_rate, src_channels) = match decode_wav(wav) {
@@ -180,10 +196,10 @@ fn play_wav_blocking(
             break;
         }
         match rx.recv_timeout(POLL_INTERVAL) {
-            Ok(PlaybackCmd::Enqueue(w)) => queue.push_back(w),
+            Ok(PlaybackCmd::Enqueue(w)) => queue.push_back((w, false)),
             Ok(PlaybackCmd::Priority(items)) => {
                 queue.clear();
-                queue.extend(items);
+                queue.extend(items.into_iter().map(|wav| (wav, true)));
                 break;
             }
             Ok(PlaybackCmd::Stop) => {
@@ -213,10 +229,10 @@ fn play_wav_blocking(
     // without blocking further.
     loop {
         match rx.try_recv() {
-            Ok(PlaybackCmd::Enqueue(w)) => queue.push_back(w),
+            Ok(PlaybackCmd::Enqueue(w)) => queue.push_back((w, false)),
             Ok(PlaybackCmd::Priority(items)) => {
                 queue.clear();
-                queue.extend(items);
+                queue.extend(items.into_iter().map(|wav| (wav, true)));
             }
             Ok(PlaybackCmd::Stop) => queue.clear(),
             Ok(PlaybackCmd::Shutdown) => {

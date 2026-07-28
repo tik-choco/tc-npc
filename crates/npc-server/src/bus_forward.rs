@@ -150,6 +150,10 @@ fn handle_ui(hub: &Hub, volume_limiter: &RateLimiter, msg_type: &str, payload: &
                         familiarity: p.familiarity,
                         closing: p.closing,
                         invite_caution: p.invite_caution,
+                        partner: p.partner,
+                        partner_known: p.partner_known,
+                        partner_switched: p.partner_switched,
+                        partner_away: p.partner_away,
                         drives: p
                             .drives
                             .into_iter()
@@ -213,6 +217,14 @@ struct AffectStatePayload {
     closing: bool,
     #[serde(default, rename = "inviteCaution")]
     invite_caution: bool,
+    #[serde(default)]
+    partner: Option<String>,
+    #[serde(default, rename = "partnerKnown")]
+    partner_known: bool,
+    #[serde(default, rename = "partnerSwitched")]
+    partner_switched: bool,
+    #[serde(default, rename = "partnerAway")]
+    partner_away: bool,
     #[serde(default)]
     drives: Vec<AffectDrivePayload>,
 }

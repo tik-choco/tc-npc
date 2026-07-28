@@ -1,0 +1,90 @@
+/* チャット sidebar tab bar — a pill-shaped segmented control that sits at
+   the top of the 320px `.chat-sidebar` column and switches between the
+   panel(s) below it. Ported from agent-speech's styles/tabs.css onto
+   tc-npc's design tokens (same token names: --surface-2/--surface,
+   --radius-pill, --primary/--primary-soft, --shadow-1). The container is
+   `position: sticky; top: 0` so it stays put while `.chat-sidebar` itself
+   scrolls, which means it needs an opaque background or the panel content
+   behind it would show through as it scrolls under it.
+
+   `.chat-sidebar-panel[hidden]` is required because the base
+   `.chat-sidebar-panel` rule sets `display: flex` — without an explicit
+   override, that flex display would win over the browser's default
+   `[hidden] { display: none }` UA rule and the inactive panel would stay
+   visible. */
+
+/* `flex-shrink: 0` is load-bearing, not defensive. `.chat-sidebar` is a flex
+   column that scrolls, so when a panel is taller than the column the flex
+   algorithm looks for something to shrink — and `overflow-x: auto` below
+   makes this bar a scroll container, which drops its automatic minimum size
+   to zero. Without this the whole tab bar gets crushed to a sliver the
+   moment the 音声 panel (meter + sliders + device pickers + log) outgrows
+   the viewport, instead of the column simply scrolling. Same reason
+   `.chat-sidebar-panel` pins its own shrink below. */
+.chat-sidebar-tabs {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 2px;
+  padding: 4px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  overflow-x: auto;
+  scrollbar-width: thin;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  box-shadow: var(--shadow-1);
+}
+
+.chat-sidebar-tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1 1 0;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    color var(--dur-fast) var(--ease),
+    background-color var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease);
+}
+
+.chat-sidebar-tab:hover {
+  color: var(--text);
+  background: var(--surface-3);
+}
+
+.chat-sidebar-tab--active,
+.chat-sidebar-tab--active:hover {
+  color: var(--primary);
+  background: var(--surface);
+  box-shadow: var(--shadow-1);
+}
+
+.chat-sidebar-tab:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--primary-soft);
+}
+
+.chat-sidebar-panel {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+.chat-sidebar-panel[hidden] {
+  display: none;
+}

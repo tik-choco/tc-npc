@@ -72,7 +72,11 @@ pub enum ServerMsg {
     #[serde(rename = "memory")]
     Memory { kind: String, text: String },
     /// The NPC's internal affect/drive state, published by npc-talk after
-    /// every conversation turn (see `npc_talk::affect::AffectState::snapshot`).
+    /// every conversation turn (see `npc_talk::affect::PartnerAffect::snapshot`).
+    /// The drive state is per conversation partner: `partner` names who it
+    /// belongs to (absent while nobody has identified themselves), and
+    /// `partnerSwitched` marks the single frame on which npc-talk detected
+    /// the partner changing.
     #[serde(rename = "affect")]
     Affect {
         ts: i64,
@@ -80,6 +84,16 @@ pub enum ServerMsg {
         closing: bool,
         #[serde(rename = "inviteCaution")]
         invite_caution: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        partner: Option<String>,
+        #[serde(rename = "partnerKnown")]
+        partner_known: bool,
+        #[serde(rename = "partnerSwitched")]
+        partner_switched: bool,
+        /// The partner has been silent past `talk.affect.absence_timeout_secs`
+        /// and is treated as having left. Stays set until somebody speaks.
+        #[serde(rename = "partnerAway")]
+        partner_away: bool,
         drives: Vec<DriveLevel>,
     },
     #[serde(rename = "actionLog")]
@@ -88,6 +102,11 @@ pub enum ServerMsg {
     Position { x: f64, y: f64, heading: f64 },
     #[serde(rename = "volume")]
     Volume { level: f64 },
+    /// Current state of the cascade voice loop's 開始/停止 switch. Sent to a
+    /// client right after `hello` so its toggle starts in the right position,
+    /// and broadcast on every change so every open tab agrees.
+    #[serde(rename = "voice")]
+    Voice { active: bool },
     #[allow(dead_code)]
     #[serde(rename = "status")]
     Status { modules: ModuleFlags },
@@ -142,6 +161,14 @@ pub enum ClientMsg {
     Suspend,
     #[serde(rename = "resume")]
     Resume,
+    /// Flip the cascade voice loop's master switch. Unlike `suspend`/`resume`
+    /// (TTS-only, auto-expiring) this also controls whether the mic is fed to
+    /// the VAD/STT pipeline, so the user can start and stop talking to the
+    /// NPC from the チャット tab.
+    #[serde(rename = "voiceStart")]
+    VoiceStart,
+    #[serde(rename = "voiceStop")]
+    VoiceStop,
     #[serde(rename = "event")]
     Event {
         kind: String,

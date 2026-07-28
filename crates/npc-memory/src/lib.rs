@@ -100,12 +100,28 @@ impl Module for MemoryModule {
 
     async fn run(self: Box<Self>, ctx: ModuleCtx) -> anyhow::Result<()> {
         let cfg = ctx.config.clone();
+
+        // Resolved once at startup (no hot-reload for either connection,
+        // matching the pre-preset behavior). Chat (summarize/consolidate)
+        // and embedding can now point at different providers, so they're
+        // resolved independently; a second `LlmClient` is only built when
+        // they actually differ, so the common case (same provider, as with
+        // every pre-preset config) still shares one client/connection pool.
+        let resolved_chat = cfg.resolve_llm(npc_core::LlmTask::Memory);
+        let resolved_embedding = cfg.resolve_llm(npc_core::LlmTask::Embedding);
         let llm = Arc::new(
-            LlmClient::new(cfg.api.base_url.clone(), cfg.api.api_key.clone())
-                .with_reasoning_effort(cfg.api.reasoning_effort.clone()),
+            LlmClient::new(resolved_chat.base_url.clone(), resolved_chat.api_key.clone())
+                .with_reasoning_effort(resolved_chat.reasoning_effort.clone()),
         );
-        let chat_model = cfg.api.model.clone();
-        let embedding_model = cfg.api.embedding_model.clone();
+        let embed_llm = if resolved_embedding.base_url == resolved_chat.base_url
+            && resolved_embedding.api_key == resolved_chat.api_key
+        {
+            llm.clone()
+        } else {
+            Arc::new(LlmClient::new(resolved_embedding.base_url.clone(), resolved_embedding.api_key.clone()))
+        };
+        let chat_model = resolved_chat.model;
+        let embedding_model = resolved_embedding.model;
 
         // Summaries are fed back to npc-talk as `{{short_term_memory}}` /
         // `{{long_term_memory}}`, so they follow `config.language` too — a
@@ -181,6 +197,7 @@ impl Module for MemoryModule {
                         let prev_summary = summary.clone();
                         let consolidate = consolidate_long_term(
                             &llm,
+                            &embed_llm,
                             &chat_model,
                             &embedding_model,
                             &consolidate_prompt,
@@ -215,6 +232,7 @@ impl Module for MemoryModule {
                         if !embedding_model.is_empty() {
                             consolidate_long_term(
                                 &llm,
+                                &embed_llm,
                                 &chat_model,
                                 &embedding_model,
                                 &consolidate_prompt,
@@ -320,7 +338,7 @@ impl Module for MemoryModule {
                                     if let Some(content) = parse_sense_content(&bus_msg.env.payload) {
                                         tokio::spawn(handle_sense(
                                             content,
-                                            llm.clone(),
+                                            embed_llm.clone(),
                                             embedding_model.clone(),
                                             store.clone(),
                                             ctx.bus.clone(),
@@ -613,6 +631,7 @@ async fn run_summarize(
 #[allow(clippy::too_many_arguments)]
 async fn consolidate_long_term(
     llm: &LlmClient,
+    embed_llm: &LlmClient,
     chat_model: &str,
     embedding_model: &str,
     consolidate_prompt: &str,
@@ -633,7 +652,7 @@ async fn consolidate_long_term(
     }
 
     let chunks = store::split_text(&consolidated, chunk_size, chunk_overlap);
-    let embeddings = match llm.embed(embedding_model, chunks.clone()).await {
+    let embeddings = match embed_llm.embed(embedding_model, chunks.clone()).await {
         Ok(embeddings) => embeddings,
         Err(err) => {
             tracing::warn!(error = %err, "npc-memory: failed to embed consolidated long-term memory");
