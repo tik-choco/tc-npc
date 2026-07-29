@@ -96,6 +96,14 @@ pub mod topic {
 /// Canonical envelope `type` values carried inside [`Envelope::r#type`].
 pub mod msg {
     pub const CHAT_RESPONSE: &str = "chat_response";
+    /// npc-talk answered a turn by *not* speaking (see
+    /// `npc_talk::style::is_silence`): the conversation is over, or the
+    /// utterance wasn't for the NPC. Published on
+    /// [`super::topic::CHAT`] instead of [`CHAT_RESPONSE`], so nothing is
+    /// spoken and no bubble is drawn — payload `{"reason": "...", "input":
+    /// "..."}`. npc-server forwards it so the web UI can drop its typing
+    /// indicator and show that the turn was deliberately left unanswered.
+    pub const CHAT_SILENT: &str = "chat_silent";
     pub const CHAT_LOG: &str = "chat_log";
     pub const SHORT_TERM_MEMORY: &str = "short_term_memory";
     pub const LONG_TERM_MEMORY: &str = "long_term_memory";

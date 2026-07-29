@@ -329,6 +329,27 @@ pub struct TalkConfig {
     pub prompts: Vec<PromptEntry>,
     #[serde(default)]
     pub filter_prompt_name: String,
+    /// Inject npc-talk's built-in spoken-reply rules (no stage directions, no
+    /// markdown, short spoken-register sentences — see
+    /// `npc_talk::SPOKEN_REPLY_RULES`) on every turn.
+    ///
+    /// Default on, including for a config written before this field existed:
+    /// `prompts` is empty out of the box, so leaving the rules to the config
+    /// file means routinely running with none at all — which is what makes
+    /// the NPC narrate "（ふっと視線を緩め…）" into a TTS stream. Turn it off
+    /// only when `prompts` carries an equivalent set.
+    #[serde(default = "default_true")]
+    pub style_rules: bool,
+    /// Let a turn end with the NPC saying nothing at all — the conversation
+    /// is over, the mic caught somebody else's sentence, the utterance wasn't
+    /// for the NPC (`npc_talk::is_silence`). Without it every single
+    /// utterance gets an answer, which is what makes a conversation
+    /// impossible to end.
+    ///
+    /// Default on. Turn it off for a deployment where the NPC must visibly
+    /// respond to everything it hears.
+    #[serde(default = "default_true")]
+    pub allow_silence: bool,
     #[serde(default)]
     pub affect: AffectConfig,
     /// 使用する preset の id。空なら `default_preset_id` に追従。
@@ -343,6 +364,8 @@ impl Default for TalkConfig {
             history_size: default_history_size(),
             prompts: Vec::new(),
             filter_prompt_name: String::new(),
+            style_rules: true,
+            allow_silence: true,
             affect: AffectConfig::default(),
             preset_id: String::new(),
         }
@@ -1441,6 +1464,12 @@ mod tests {
     fn affect_config_defaults_to_enabled_for_an_old_config() {
         // A config.json written before `talk.affect` existed.
         let config: Config = serde_json::from_str(r#"{"talk": {"enabled": true}}"#).unwrap();
+        // Same treatment for the built-in reply rules: an old config predates
+        // the field and must still get them.
+        assert!(config.talk.style_rules);
+        assert!(Config::default().talk.style_rules);
+        assert!(config.talk.allow_silence);
+        assert!(Config::default().talk.allow_silence);
         assert!(config.talk.affect.enabled);
         assert!(config.talk.affect.forced_closure);
         assert!(Config::default().talk.affect.enabled);

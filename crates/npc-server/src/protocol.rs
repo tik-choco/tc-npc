@@ -47,6 +47,13 @@ pub enum ServerMsg {
     },
     #[serde(rename = "chat")]
     Chat { role: String, text: String, ts: i64 },
+    /// npc-talk took a turn without speaking (`agent:chat` / `chat_silent`):
+    /// the conversation is over (`reason: "closing"`) or the NPC declined to
+    /// answer this utterance (`"declined"`). Carries no text — the point is
+    /// that there isn't any — and stands in for the `chat` frame that would
+    /// otherwise end the turn.
+    #[serde(rename = "silent")]
+    Silent { reason: String, ts: i64 },
     #[serde(rename = "ttsLine")]
     TtsLine {
         text: String,

@@ -1,10 +1,12 @@
 // チャット tab: a two-column workspace. The left column (.chat-main) is the
-// merged transcript (user/assistant bubbles, sense/memory/action/error
-// entries rendered as muted system lines) + composer + interrupt. Since
-// translations were pulled out of the 通訳 sidebar tab, each translation
-// entry attaches its per-language rows directly beneath the transcript row
-// that already shows its original text — the bubble/system-line above it
-// already displays the original once, so it isn't repeated. A translation
+// merged transcript (user/assistant bubbles, memory/action/vision/error
+// entries rendered as muted system lines) + composer + interrupt. Speech
+// heard through the mic is a user bubble here, identical to a typed one
+// apart from a small ear glyph on the turn's name row — see `speechAsChat`.
+// Since translations were pulled out of the 通訳 sidebar tab, each
+// translation entry attaches its per-language rows directly beneath the row
+// that already shows its original text — the bubble above it already
+// displays the original once, so it isn't repeated. A translation
 // only falls back to its own standalone dashed bubble when no such source
 // row can be found (see `attachTranslations` below). The right column is a
 // 320px sidebar (ChatSidebar) that carries 音声 / 状態 / 通訳: it pill-tabs
@@ -40,6 +42,7 @@ import {
   Eye,
   Languages,
   MessageSquare,
+  MessageSquareOff,
   Mic,
   MicOff,
   OctagonX,
@@ -73,8 +76,33 @@ type ErrorRow = { id: number; kind: "error"; text: string; ts: number };
  *  `TimelineEntry.id`/`ErrorEntry.id`, so sorting all three by `id` below
  *  reproduces arrival order. */
 type TranslationRow = { id: number; kind: "translation"; entry: TranslationEntry };
-type Row = TimelineEntry | ErrorRow | TranslationRow;
-type ChatRow = Extract<TimelineEntry, { kind: "chat" }>;
+/** A chat row, plus the marker `speechAsChat` sets on a turn that arrived
+ *  through the mic rather than the composer. */
+type ChatRow = Extract<TimelineEntry, { kind: "chat" }> & { spoken?: boolean };
+type Row = ChatRow | Exclude<TimelineEntry, { kind: "chat" }> | ErrorRow | TranslationRow;
+
+/**
+ * Recasts a heard-speech `sense` row as the user turn it actually is.
+ *
+ * Speech reaches the UI on its own frame (`sense`/`speech`, see
+ * crates/npc-server/src/bus_forward.rs) rather than as a `chat` row, because
+ * the server only mints a `chat` frame for input it received over the socket
+ * — but from the transcript's point of view a sentence the NPC heard is the
+ * same turn as one that was typed, and used to be drawn as a muted system
+ * line mirrored to the right edge to half-suggest that. Now it just becomes a
+ * user bubble; only the small ear glyph on the turn's name row says it was
+ * spoken. Nothing is duplicated by this: `EchoGuard` already suppresses the
+ * `sense` frame for speech the socket itself sent (typing), so exactly one of
+ * the two shapes exists per turn.
+ *
+ * History rows backfilled from chat-log.jsonl have no such marker — the log
+ * records what was said, not which input device it came from — so a reloaded
+ * transcript shows those turns as plain user bubbles.
+ */
+function speechAsChat(entry: TimelineEntry): TimelineEntry | ChatRow {
+  if (entry.kind !== "sense" || entry.senseKind !== "speech") return entry;
+  return { id: entry.id, kind: "chat", role: "user", text: entry.text, ts: entry.ts, spoken: true };
+}
 
 // How far back `attachTranslations` is willing to scan for a translation's
 // source row. The source frame (a `sense`/`chat` row) reaches the UI only a
@@ -113,7 +141,7 @@ const COMPOSER_MAX_HEIGHT = 168;
  * for every entry in one pass.
  */
 function attachTranslations(
-  base: (TimelineEntry | ErrorRow)[],
+  base: Exclude<Row, TranslationRow>[],
   translations: TranslationEntry[],
 ): { attachments: Map<number, TranslationEntry>; orphans: TranslationRow[] } {
   const attachments = new Map<number, TranslationEntry>();
@@ -132,10 +160,10 @@ function attachTranslations(
       // A row must never take two translations, so a claimed row is skipped
       // (not un-skipped later) but still counts against the scan window.
       if (claimed.has(row.id)) continue;
+      // Heard speech is a user-role chat row by the time it gets here (see
+      // `speechAsChat`), so one check covers both typed and spoken turns.
       const fits =
-        entry.source === "agent"
-          ? row.kind === "chat" && row.role === "assistant"
-          : (row.kind === "sense" && row.senseKind === "speech") || (row.kind === "chat" && row.role === "user");
+        row.kind === "chat" && (entry.source === "agent" ? row.role === "assistant" : row.role === "user");
       if (fits && row.text.trim() === original) {
         matchId = row.id;
         break;
@@ -207,6 +235,10 @@ function describeRows(rows: Row[], attachments: Map<number, TranslationEntry>, l
   const continues = (prev: Row | undefined, row: Row | undefined): boolean => {
     if (!prev || !row || !groupable(prev) || !groupable(row)) return false;
     if (prev.role !== row.role) return false;
+    // A spoken turn and a typed one are both "you", but only the run's head
+    // carries the ear glyph — grouping them would file one under the other's
+    // marker. Switching input mid-conversation starts a new run instead.
+    if (Boolean(prev.spoken) !== Boolean(row.spoken)) return false;
     if (attachments.has(prev.id)) return false;
     if (prev.ts && row.ts && !isSameDay(prev.ts, row.ts)) return false;
     return !prev.ts || !row.ts || row.ts - prev.ts <= GROUP_GAP_MS;
@@ -239,73 +271,81 @@ function initialOf(name: string): string {
   return [...name.trim()][0] ?? "N";
 }
 
-// `attached` is set when `rows`/`attachTranslations` matched a translation
-// to this exact system line (only possible for a `sense`/speech row — see
-// the fits check in `attachTranslations`). When unset, the function returns
-// the same bare `.chat-system-line` markup as before, so an unattached
-// system line is untouched by this change.
-//
-// Heard speech is the one system line that is the *user's own turn* rather
-// than commentary about the conversation, so it (and anything attached to
-// it) is mirrored to the right edge like a user bubble via the `--speech`
-// modifiers — every other system line keeps the left-aligned treatment.
+/** Memory writes are whole documents — a short-term summary or the entire
+ *  consolidated long-term memory — so printing one in full buries the
+ *  conversation it is supposed to annotate. Clamped to a couple of lines
+ *  with a toggle; only long entries get the toggle at all, and expansion is
+ *  per-entry state so re-reading one doesn't unfold the rest. */
+function MemoryLine({ entry, t }: { entry: Extract<Row, { kind: "memory" }>; t: Translate }) {
+  const [expanded, setExpanded] = useState(false);
+  // Cheap proxy for "this will wrap past the clamp": either it is long or it
+  // is multi-line. A single short line never gets a toggle it doesn't need.
+  const long = entry.text.length > 60 || entry.text.includes("\n");
+  return (
+    <div class="chat-system-line chat-system-line--memory">
+      <Brain size={13} aria-hidden="true" />
+      <span class={long && !expanded ? "chat-system-clamp" : undefined}>
+        <em class="chat-system-tag">
+          {entry.memoryKind === "short" ? t("chat.memory.short") : t("chat.memory.long")}
+        </em>
+        {entry.text}
+      </span>
+      {long && (
+        <button type="button" class="chat-system-toggle" onClick={() => setExpanded((v) => !v)}>
+          {expanded ? t("chat.collapse") : t("chat.expand")}
+        </button>
+      )}
+      <time>{formatTime(entry.ts)}</time>
+    </div>
+  );
+}
+
+// Commentary *about* the conversation — what the NPC saw, what it committed
+// to memory, errors, action log — as a muted left-aligned line rather than a
+// bubble. Heard speech used to come through here too, mirrored to the right
+// edge to hint that it was the user's own turn; it is now rendered as an
+// actual user bubble instead (see `speechAsChat`), so this handles only the
+// non-turn kinds and never carries an attached translation.
 function SystemLine({
   entry,
   t,
-  attached,
 }: {
   entry: Exclude<Row, { kind: "chat" } | { kind: "translation" }>;
   t: Translate;
-  attached?: TranslationEntry;
 }) {
-  const speech = entry.kind === "sense" && entry.senseKind === "speech";
-  const line =
-    entry.kind === "sense" ? (
-      (() => {
-        const Icon = entry.senseKind === "vision" ? Eye : Ear;
-        return (
-          <div class={`chat-system-line chat-system-line--sense${speech ? " chat-system-line--speech" : ""}`}>
-            <Icon size={13} aria-hidden="true" />
-            <span>{entry.text}</span>
-            <time>{formatTime(entry.ts)}</time>
-          </div>
-        );
-      })()
-    ) : entry.kind === "memory" ? (
-      <div class="chat-system-line">
-        <Brain size={13} aria-hidden="true" />
-        <span>
-          <em class="chat-system-tag">
-            {entry.memoryKind === "short" ? t("chat.memory.short") : t("chat.memory.long")}
-          </em>
-          {entry.text}
-        </span>
-        <time>{formatTime(entry.ts)}</time>
-      </div>
-    ) : entry.kind === "error" ? (
-      <div class="chat-system-line chat-system-line--error">
-        <AlertTriangle size={13} aria-hidden="true" />
-        <span>
-          <em class="chat-system-tag">{t("chat.error")}</em>
-          {entry.text}
-        </span>
-        <time>{formatTime(entry.ts)}</time>
-      </div>
-    ) : (
-      <div class="chat-system-line">
-        <Activity size={13} aria-hidden="true" />
-        <span>{entry.text}</span>
-        <time>{formatTime(entry.ts)}</time>
-      </div>
-    );
-
-  if (!attached) return line;
-  return (
-    <div class={`chat-system-group${speech ? " chat-system-group--speech" : ""}`}>
-      {line}
-      <div class="chat-translation-attached">
-        <TranslationLines entry={attached} t={t} />
-      </div>
+  return entry.kind === "sense" ? (
+    (() => {
+      const Icon = entry.senseKind === "vision" ? Eye : Ear;
+      return (
+        <div class="chat-system-line chat-system-line--sense">
+          <Icon size={13} aria-hidden="true" />
+          <span>{entry.text}</span>
+          <time>{formatTime(entry.ts)}</time>
+        </div>
+      );
+    })()
+  ) : entry.kind === "memory" ? (
+    <MemoryLine entry={entry} t={t} />
+  ) : entry.kind === "silent" ? (
+    <div class="chat-system-line chat-system-line--silent">
+      <MessageSquareOff size={13} aria-hidden="true" />
+      <span>{entry.reason === "closing" ? t("chat.silent.closing") : t("chat.silent.declined")}</span>
+      <time>{formatTime(entry.ts)}</time>
+    </div>
+  ) : entry.kind === "error" ? (
+    <div class="chat-system-line chat-system-line--error">
+      <AlertTriangle size={13} aria-hidden="true" />
+      <span>
+        <em class="chat-system-tag">{t("chat.error")}</em>
+        {entry.text}
+      </span>
+      <time>{formatTime(entry.ts)}</time>
+    </div>
+  ) : (
+    <div class="chat-system-line">
+      <Activity size={13} aria-hidden="true" />
+      <span>{entry.text}</span>
+      <time>{formatTime(entry.ts)}</time>
     </div>
   );
 }
@@ -447,7 +487,14 @@ function ChatTurn({
         </div>
       )}
       <div class="chat-turn-body">
-        {head && <div class="chat-turn-name">{isUser ? t("chat.speaker.you") : speaker}</div>}
+        {head && (
+          <div class="chat-turn-name">
+            {isUser ? t("chat.speaker.you") : speaker}
+            {/* The only thing left distinguishing a spoken turn from a typed
+                one — the bubble itself is deliberately identical. */}
+            {row.spoken && <Ear size={12} aria-label={t("chat.speaker.heard")} />}
+          </div>
+        )}
         <div class="chat-turn-bubble">
           <div class={`chat-bubble chat-bubble--${row.role}`}>
             <div class="chat-bubble-text">{row.text}</div>
@@ -595,7 +642,9 @@ export function ChatView({
   // orphans) alongside the usual timeline/error rows.
   const { items, attachments, lastId } = useMemo(() => {
     const errorRows: ErrorRow[] = errors.map((e) => ({ id: e.id, kind: "error", text: e.message, ts: e.ts }));
-    const base: (TimelineEntry | ErrorRow)[] = [...entries, ...errorRows].sort((a, b) => a.id - b.id);
+    const base: Exclude<Row, TranslationRow>[] = [...entries.map(speechAsChat), ...errorRows].sort(
+      (a, b) => a.id - b.id,
+    );
     const { attachments, orphans } = attachTranslations(base, translations);
     const rows: Row[] = [...base, ...orphans].sort((a, b) => a.id - b.id);
     return {
@@ -717,7 +766,7 @@ export function ChatView({
                 ) : row.kind === "translation" ? (
                   <TranslationBubble entry={row.entry} t={t} />
                 ) : (
-                  <SystemLine entry={row} t={t} attached={attachments.get(row.id)} />
+                  <SystemLine entry={row} t={t} />
                 )}
               </Fragment>
             ))}

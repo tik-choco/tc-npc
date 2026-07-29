@@ -18,7 +18,10 @@ export type TimelineEntry =
   | { id: number; kind: "chat"; role: "user" | "assistant"; text: string; ts: number }
   | { id: number; kind: "sense"; senseKind: "vision" | "speech"; text: string; ts: number }
   | { id: number; kind: "memory"; memoryKind: "short" | "long"; text: string; ts: number }
-  | { id: number; kind: "actionLog"; text: string; ts: number };
+  | { id: number; kind: "actionLog"; text: string; ts: number }
+  /** A turn the NPC deliberately left unanswered — nothing was said, so
+   *  there is no text, only why it stayed quiet. */
+  | { id: number; kind: "silent"; reason: string; ts: number };
 
 export interface TtsLineEntry {
   id: number;
@@ -237,6 +240,16 @@ export function useNpcSocket(): UseNpcSocketResult {
             cap([...prev, { id: nextId(), kind: "chat", role: msg.role, text: msg.text, ts: msg.ts }], MAX_ENTRIES),
           );
           if (msg.role === "assistant") setPending(false);
+          break;
+
+        case "silent":
+          // Stands in for the assistant `chat` frame this turn didn't
+          // produce: it ends the turn (typing indicator off) and leaves a
+          // muted line so an unanswered message doesn't look like a hang.
+          setTimeline((prev) =>
+            cap([...prev, { id: nextId(), kind: "silent", reason: msg.reason, ts: msg.ts }], MAX_ENTRIES),
+          );
+          setPending(false);
           break;
 
         case "sense":

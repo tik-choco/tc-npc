@@ -16,6 +16,16 @@ export interface ChatMessage {
   ts: number;
 }
 
+/** The NPC took a turn without saying anything: the conversation is over
+ *  (`closing`) or it declined to answer this utterance (`declined`). Sent
+ *  instead of the `chat` frame that would normally end the turn — see
+ *  crates/npc-talk/src/style.rs. */
+export interface SilentMessage {
+  type: "silent";
+  reason: string;
+  ts: number;
+}
+
 export interface TtsLineMessage {
   type: "ttsLine";
   text: string;
@@ -184,6 +194,7 @@ export interface PersonDeletedMessage {
 export type ServerMessage =
   | HelloMessage
   | ChatMessage
+  | SilentMessage
   | TtsLineMessage
   | SenseMessage
   | TranslationMessage

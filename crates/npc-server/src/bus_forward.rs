@@ -69,6 +69,18 @@ fn handle(
                     text: Some(content),
                     message: None,
                 });
+            } else if env.r#type == msg::CHAT_SILENT {
+                // The turn was deliberately left unanswered (npc-talk's
+                // `publish_silence`). No `chat`/`ttsLine` frame — nothing was
+                // said — but the client still needs to know the turn is over,
+                // otherwise its typing indicator spins forever.
+                let reason = env
+                    .payload
+                    .get("reason")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                hub.broadcast(&ServerMsg::Silent { reason, ts: now_ms() });
             }
         }
         t if t == topic::SENSE => {

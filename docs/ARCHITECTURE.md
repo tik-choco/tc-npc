@@ -54,6 +54,7 @@ services: `{"type": "...", "payload": ...}`.
 | Constant             | Value                 |
 |----------------------|-----------------------|
 | `CHAT_RESPONSE`      | `chat_response`       |
+| `CHAT_SILENT`        | `chat_silent`          |
 | `CHAT_LOG`           | `chat_log`             |
 | `SHORT_TERM_MEMORY`  | `short_term_memory`    |
 | `LONG_TERM_MEMORY`   | `long_term_memory`     |
@@ -124,6 +125,50 @@ Prompt templates in `talk.prompts[].content` support placeholders:
 way as the other memory placeholders — empty string when there's nothing to
 say — and templates written before it existed keep working unchanged (an
 unknown placeholder is a no-op, not an error).
+
+## Spoken-reply discipline (`npc-talk`)
+
+A reply is read aloud (npc-speech turns `chat_response` straight into TTS) and
+shown as a chat bubble, so it has to be *speech*, not prose. Two halves, both
+in `crates/npc-talk/src/style.rs`:
+
+- **`SPOKEN_REPLY_RULES`** — a built-in system message pushed after
+  `talk.prompts` and before the affect state: no stage directions or
+  narration, no markdown/emoji/speaker prefix, no line breaks, 1–2 short
+  sentences, plus the turn-taking / grounding / closure rules adapted from
+  the conversation-quality work in `tik-choco-lab/archives/agent-conversation`.
+  It lives in the binary rather than in `config.json` because `talk.prompts`
+  is *empty* by default — rules kept only in config are rules the NPC
+  routinely runs without. `talk.style_rules: false` turns it off for a setup
+  whose own prompts already cover this.
+- **`sanitize_reply`** — applied to the finished reply (after any filter
+  pass, before publish/history): strips parenthesized stage directions
+  ("（ふっと視線を緩め…）"), asterisk roleplay markup, markdown line markers,
+  and blank lines. Small local models leak these however the prompt is
+  worded.
+
+### Silence (`talk.allow_silence`, default on)
+
+A turn may end with the NPC saying nothing — without it every utterance gets
+an answer and a conversation can never actually end. Three routes into
+[`is_silence`], all treated alike:
+
+- the model emits the `<silence>` tag the reply rules define (conversation
+  over, speech not addressed to the NPC, an unintelligible STT fragment);
+- the affect model's closing state machine produces its wordless "……" (a
+  farewell was already returned and the partner is just acking);
+- the reply has nothing sayable left after sanitizing (it was all stage
+  direction).
+
+A silent turn publishes `agent:chat` / `chat_silent` `{reason, input}`
+instead of `chat_response`: nothing is spoken, no bubble is drawn, and no
+assistant turn goes into the history — but `chat_log` is still published with
+an empty output, so npc-memory records what was said even though it went
+unanswered. npc-server relays it as the WS `silent` frame, which is what
+stops the web UI's typing indicator and leaves the muted "応答しませんでした"
+line. `talk.allow_silence: false` restores the always-answer behavior.
+
+[`is_silence`]: ../crates/npc-talk/src/style.rs
 
 ## Scheduled actions
 

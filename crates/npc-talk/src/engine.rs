@@ -13,6 +13,7 @@ use regex::Regex;
 use tokio::sync::Mutex;
 
 use crate::affect::{AffectState, PartnerAffect};
+use crate::style::{is_silence, sanitize_reply, SPOKEN_REPLY_RULES};
 use crate::tools::ToolRegistry;
 
 /// State mutated over the lifetime of a conversation: message history plus
@@ -52,6 +53,17 @@ pub struct ChatEngine {
     /// after the configured prompts so it isn't buried mid-persona. `None`
     /// when the language is `auto`.
     language_instruction: Option<&'static str>,
+    /// `config.talk.style_rules` — gates the built-in
+    /// [`SPOKEN_REPLY_RULES`] system message. On by default because
+    /// `talk.prompts` is empty out of the box: without it the model is left
+    /// with the persona alone and writes prose (stage directions, markdown,
+    /// written register) into what is about to be read aloud.
+    style_rules: bool,
+    /// `config.talk.allow_silence` — lets a turn end without the NPC saying
+    /// anything (see [`crate::style::is_silence`]). Off restores the old
+    /// always-answer behavior, where a wordless reply was published as a
+    /// single space.
+    allow_silence: bool,
     /// `config.talk.affect.enabled` — gates both the `AffectState::update`
     /// call and the `to_prompt()` system message. When `false`, behavior is
     /// bit-for-bit identical to a build without the affect model.
@@ -79,6 +91,8 @@ impl ChatEngine {
         language: &str,
         bus: Bus,
         affect_config: npc_core::config::AffectConfig,
+        style_rules: bool,
+        allow_silence: bool,
     ) -> Self {
         let filter_prompt = prompts
             .iter()
@@ -101,6 +115,8 @@ impl ChatEngine {
             bus,
             persona,
             language_instruction: npc_core::config::language_instruction(language),
+            style_rules,
+            allow_silence,
             affect_enabled: affect_config.enabled,
             affect_forced_closure: affect_config.forced_closure,
             absence_timeout: Duration::from_secs(affect_config.absence_timeout_secs),
@@ -208,6 +224,18 @@ impl ChatEngine {
 
             if self.affect_forced_closure {
                 if let Some(reply) = guard.affect.state().forced_closure_reply(input) {
+                    // The state machine's own "……" (the conversation is over
+                    // and the partner is just acking) is a wordless line: with
+                    // silence enabled it ends the turn outright instead of
+                    // handing TTS something with nothing in it to say.
+                    if self.allow_silence && is_silence(&reply) {
+                        guard.history.push(ChatMessage::user(input.to_string()));
+                        trim_history(&mut guard.history, self.history_size);
+                        drop(guard);
+                        self.publish_silence(input, "closing", speaker);
+                        return Ok(String::new());
+                    }
+
                     guard.history.push(ChatMessage::user(input.to_string()));
                     guard.history.push(ChatMessage::assistant(reply.clone()));
                     trim_history(&mut guard.history, self.history_size);
@@ -241,6 +269,10 @@ impl ChatEngine {
                 continue;
             }
             messages.push(ChatMessage::system(content));
+        }
+
+        if let Some(rules) = self.style_message() {
+            messages.push(rules);
         }
 
         if self.affect_enabled {
@@ -318,6 +350,28 @@ impl ChatEngine {
             }
         }
 
+        // Last line of defence for the spoken-output rules above: the reply
+        // is about to be read aloud by TTS and shown as a chat bubble, and a
+        // small local model leaks stage directions ("（微笑む）"), markdown,
+        // and leading blank lines however the prompt is worded. Applied after
+        // the filter pass so a rewrite can't reintroduce them, and before the
+        // history push so the model doesn't learn from its own leftovers.
+        final_content = sanitize_reply(&final_content);
+
+        // The NPC decided not to speak — either explicitly (the `<silence>`
+        // tag from the reply rules: the conversation is over, the utterance
+        // wasn't addressed to it, the mic caught a fragment) or by producing
+        // nothing sayable. Publish no reply at all: nothing spoken, no
+        // bubble, and no assistant turn in the history, since it didn't take
+        // one. The user's utterance is still recorded, so what was said is
+        // still remembered even though it went unanswered.
+        if self.allow_silence && is_silence(&final_content) {
+            trim_history(&mut guard.history, self.history_size);
+            drop(guard);
+            self.publish_silence(input, "declined", speaker);
+            return Ok(String::new());
+        }
+
         if final_content.is_empty() {
             final_content = " ".to_string();
         }
@@ -339,6 +393,31 @@ impl ChatEngine {
         );
 
         Ok(final_content)
+    }
+
+    /// Announce a turn the NPC chose not to answer: `chat_silent` for the
+    /// web UI (so its typing indicator stops and the operator can see the
+    /// turn was deliberately left alone), plus the usual `chat_log` with an
+    /// empty output so npc-memory still records what was said to it.
+    ///
+    /// `reason` is `"closing"` (the farewell state machine) or `"declined"`
+    /// (the reply itself asked for silence).
+    fn publish_silence(&self, input: &str, reason: &str, speaker: Option<&str>) {
+        tracing::info!(reason, input = %input, "npc-talk: staying silent this turn");
+        self.bus.publish(
+            topic::CHAT,
+            msg::CHAT_SILENT,
+            serde_json::json!({ "reason": reason, "input": input }),
+        );
+        self.bus.publish(topic::CHAT, msg::CHAT_LOG, chat_log_payload(input, "", speaker));
+    }
+
+    /// The built-in spoken-reply rules as a system message, or `None` when
+    /// `config.talk.style_rules` is off. Pushed after the configured
+    /// `talk.prompts` (so a hand-written prompt is read first) and before the
+    /// affect state, which speaks in the same voice about the same turn.
+    fn style_message(&self) -> Option<ChatMessage> {
+        self.style_rules.then(|| ChatMessage::system(SPOKEN_REPLY_RULES.to_string()))
     }
 
     fn build_vars(
@@ -549,7 +628,92 @@ mod tests {
             "auto",
             npc_core::Bus::new(),
             npc_core::config::AffectConfig::default(),
+            true,
+            true,
         )
+    }
+
+    /// Drives the real turn path (the forced-closure branch returns before
+    /// any LLM call, so this needs no network) to check the whole
+    /// end-a-conversation story: the farewell is answered, and the "うん"
+    /// after it is met with silence instead of a spoken "……".
+    #[tokio::test]
+    async fn a_conversation_that_has_ended_stops_producing_replies() {
+        let bus = npc_core::Bus::new();
+        let engine = ChatEngine::new(
+            npc_llm::LlmClient::new("http://localhost:0/v1", ""),
+            "test-model".to_string(),
+            Vec::new(),
+            String::new(),
+            10,
+            crate::tools::ToolRegistry::new(),
+            None,
+            "auto",
+            bus.clone(),
+            npc_core::config::AffectConfig::default(),
+            true,
+            true,
+        );
+        let mut rx = bus.subscribe();
+
+        assert_eq!(engine.chat("じゃあね").await.unwrap(), "またね。");
+        assert_eq!(engine.chat("うん").await.unwrap(), "");
+
+        let types: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok())
+            .map(|m| m.env.r#type)
+            .collect();
+        // The farewell was spoken; the ack that followed produced a
+        // `chat_silent` and no `chat_response` of its own.
+        assert_eq!(
+            types.iter().filter(|t| *t == msg::CHAT_RESPONSE).count(),
+            1,
+            "only the farewell should be spoken: {types:?}"
+        );
+        assert_eq!(types.iter().filter(|t| *t == msg::CHAT_SILENT).count(), 1, "{types:?}");
+        // Both turns are still logged, so what was said is remembered even
+        // though the second went unanswered.
+        assert_eq!(types.iter().filter(|t| *t == msg::CHAT_LOG).count(), 2, "{types:?}");
+    }
+
+    #[tokio::test]
+    async fn allow_silence_off_keeps_answering_every_turn() {
+        let bus = npc_core::Bus::new();
+        let engine = ChatEngine::new(
+            npc_llm::LlmClient::new("http://localhost:0/v1", ""),
+            "test-model".to_string(),
+            Vec::new(),
+            String::new(),
+            10,
+            crate::tools::ToolRegistry::new(),
+            None,
+            "auto",
+            bus.clone(),
+            npc_core::config::AffectConfig::default(),
+            true,
+            false,
+        );
+        let mut rx = bus.subscribe();
+
+        engine.chat("じゃあね").await.unwrap();
+        assert_eq!(engine.chat("うん").await.unwrap(), "……");
+
+        let types: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok())
+            .map(|m| m.env.r#type)
+            .collect();
+        assert_eq!(types.iter().filter(|t| *t == msg::CHAT_RESPONSE).count(), 2, "{types:?}");
+        assert!(!types.iter().any(|t| t == msg::CHAT_SILENT), "{types:?}");
+    }
+
+    #[test]
+    fn style_rules_are_injected_by_default_and_can_be_turned_off() {
+        let engine = test_engine();
+        let message = engine.style_message().expect("rules injected by default");
+        assert!(message.content.as_text().contains("ト書き"));
+        assert_eq!(message.role, "system");
+
+        let mut engine = test_engine();
+        engine.style_rules = false;
+        assert!(engine.style_message().is_none());
     }
 
     #[test]

@@ -326,11 +326,20 @@
   align-items: flex-end;
 }
 
+/* Flex so the ear glyph marking a spoken turn sits on the name's baseline
+   row rather than dropping the line height around it. */
 .chat-turn-name {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
   padding: 0 var(--space-2);
   font-size: 0.72rem;
   font-weight: 650;
   color: var(--text-muted);
+}
+
+.chat-turn-name svg {
+  color: var(--text-subtle);
 }
 
 .chat-turn-time {
@@ -508,8 +517,8 @@
 }
 
 /* 通訳 attached under the row that already shows the original (see
-   ChatView) — a sibling of .chat-turn-bubble inside .chat-turn-body, or of
-   .chat-system-line inside .chat-system-group. No bubble surface here on
+   ChatView) — a sibling of .chat-turn-bubble inside .chat-turn-body. No
+   bubble surface here on
    purpose: a fill or shadow would read as a second message, and the
    original above already carries that weight. A single accent border
    is enough to mark it as hanging off that row; it sits on whichever
@@ -535,21 +544,10 @@
 }
 
 /* --- System lines -------------------------------------------------------- */
-
-/* Wraps a .chat-system-line together with its attached 通訳 block, same
-   role as .chat-turn but for the heard-speech line instead of a bubble.
-   An unattached .chat-system-line renders without this wrapper and is
-   completely untouched by it. What does change when it IS wrapped: without
-   this align-items: flex-start, .chat-transcript's default stretch would
-   force the line to fill the transcript's full width instead of hugging its
-   content next to the attached block below it. */
-.chat-system-group {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: var(--space-1);
-  margin-top: var(--space-3);
-}
+/* Commentary about the conversation (vision, memory, action log, errors).
+   Heard speech is NOT one of these — it renders as a user bubble like any
+   other turn (see ChatView's speechAsChat), which is why nothing here has a
+   right-aligned variant or carries an attached 通訳 block anymore. */
 
 .chat-system-line {
   display: flex;
@@ -561,15 +559,52 @@
   color: var(--text-subtle);
 }
 
-/* Already spaced by its group wrapper — don't stack both margins. */
-.chat-system-group .chat-system-line {
-  margin-top: 0;
-}
-
 .chat-system-line span {
   flex: 1;
   min-width: 0;
   overflow-wrap: break-word;
+}
+
+/* A memory write can be a whole document. Clamped to two lines by default
+   (MemoryLine's toggle switches the class off) so it annotates the
+   transcript instead of flooding it. `align-items: flex-start` on the row
+   keeps the glyph, toggle and timestamp on the first line while the text
+   grows downward once expanded. */
+.chat-system-line--memory {
+  align-items: flex-start;
+}
+
+.chat-system-clamp {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.chat-system-toggle {
+  flex: none;
+  padding: 0 var(--space-1);
+  font: inherit;
+  font-size: 0.7rem;
+  font-weight: 650;
+  color: var(--text-muted);
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.chat-system-toggle:hover {
+  color: var(--primary);
+}
+
+/* A turn the NPC chose not to answer — quieter than the other system lines,
+   since "nothing happened" shouldn't draw the eye. */
+.chat-system-line--silent {
+  font-style: italic;
+  opacity: 0.85;
 }
 
 /* Kind label ([短期記憶], [エラー]) as a small caps-ish tag rather than
@@ -589,47 +624,10 @@
   font-size: 0.68rem;
 }
 
-/* Heard speech is the one system line that's part of the conversation
-   rather than commentary about it, so it gets a touch more presence. */
+/* What the NPC saw is closer to the conversation than a memory write or an
+   action log entry, so it gets a touch more presence. */
 .chat-system-line--sense {
   color: var(--text-muted);
-}
-
-/* ...and it's the user's own turn, so it's mirrored to the right edge like
-   a user bubble instead of sitting in the left-aligned system column. The
-   row-reverse puts the ear glyph on the outer (right) edge and the
-   timestamp on the inner one, mirroring the left-aligned lines; dropping
-   the `flex: 1` on the text is what lets the line hug its content instead
-   of stretching the full transcript width. */
-.chat-system-line--speech {
-  align-self: flex-end;
-  max-width: 72%;
-  flex-direction: row-reverse;
-  text-align: right;
-}
-
-.chat-system-line--speech span {
-  flex: 0 1 auto;
-}
-
-/* Same mirroring for a speech line that carries an attached 通訳 block —
-   the group wrapper is the flex container in that case, so the alignment
-   has to be restated on it, and the attached block's accent border/rows
-   flip to the right edge exactly as they do under .chat-turn--user. */
-.chat-system-group--speech {
-  align-items: flex-end;
-  align-self: flex-end;
-  max-width: 72%;
-}
-
-.chat-system-group--speech .chat-translation-attached {
-  border-left: none;
-  border-right: 2px solid var(--border-strong);
-  text-align: right;
-}
-
-.chat-system-group--speech .chat-translation-row {
-  flex-direction: row-reverse;
 }
 
 .chat-system-line--error {
@@ -819,8 +817,4 @@
     max-width: 86%;
   }
 
-  .chat-system-line--speech,
-  .chat-system-group--speech {
-    max-width: 86%;
-  }
 }

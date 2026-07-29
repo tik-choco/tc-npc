@@ -62,6 +62,8 @@ impl Module for TalkModule {
             &ctx.config.language,
             ctx.bus.clone(),
             ctx.config.talk.affect.clone(),
+            ctx.config.talk.style_rules,
+            ctx.config.talk.allow_silence,
         ));
 
         let mut rx = ctx.bus.subscribe();
@@ -258,6 +260,8 @@ mod tests {
             "auto",
             Bus::new(),
             npc_core::config::AffectConfig::default(),
+            true,
+            true,
         ))
     }
 
