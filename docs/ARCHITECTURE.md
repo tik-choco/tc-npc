@@ -55,6 +55,7 @@ services: `{"type": "...", "payload": ...}`.
 |----------------------|-----------------------|
 | `CHAT_RESPONSE`      | `chat_response`       |
 | `CHAT_SILENT`        | `chat_silent`          |
+| `CHAT_ERROR`         | `chat_error`           |
 | `CHAT_LOG`           | `chat_log`             |
 | `SHORT_TERM_MEMORY`  | `short_term_memory`    |
 | `LONG_TERM_MEMORY`   | `long_term_memory`     |
@@ -261,6 +262,59 @@ connection (`api.*`) is still startup-only.
 sectioned system-prompt format tc-town itself uses (skipping empty
 sections).
 
+A character id lands in a file path, so `load_character`/`save_character`
+reject one containing a separator, `..`, or `:` — `PUT
+/api/characters/{id}/avatar` puts the id straight into a write path.
+
+**Switching characters is live.** `POST /api/characters/{id}/activate`
+publishes `config_updated` on `npc:config`; npc-talk's existing subscriber
+(`npc_talk::module`) compares `character.active_id` against the one it last
+applied, and on a change reloads the sheet, re-renders it with
+`persona_prompt`, and installs it on the engine via `set_persona`. The
+persona lives on the engine's `ChatState`, behind the same mutex a chat turn
+holds for its whole duration, so a switch can never tear the persona out
+from under a turn already in flight — it lands on the next one. Clearing
+`active_id`, or a character whose file has gone missing, resets the persona
+to none: continuing to role-play someone the operator just deactivated is
+the worse failure. Conversation history and the per-partner affect state are
+deliberately left alone (wiping them would reintroduce exactly the
+disruption that removing the restart was meant to avoid).
+
+### Avatars (VRM)
+
+A character may carry `avatar: {kind: "vrm", file}`, naming a `.vrm` in the
+model folder `{data_dir}/vrm/` (`npc_core::vrm`). **The folder is the
+library**: tc-npc runs on the operator's own machine, so a model copied in
+by hand is available immediately, and `POST /api/vrm/{file}` is only a way
+to do that copy from the browser. This is deliberately unlike tc-town, which
+has no server to write files with and therefore keeps its models in
+IndexedDB; the two libraries are separate (they aren't even the same origin).
+
+The reference is by **file name**, not content hash, so it is stable across a
+replaced file and survives a deleted one: a character pointing at a model
+that is not in the folder is not an error anywhere — the web UI falls back to
+the plain initial glyph. `import_tc_town_export` therefore also carries a
+tc-town VRM avatar's `fileName` through, so dropping the same `.vrm` into the
+folder attaches the avatar to an imported character with no further step.
+Every name is validated (`validate_vrm_file_name`) before touching disk.
+
+A character is not required. `config.character.avatar_file` names a model to
+show when no active character supplies one, so a `.vrm` can be dropped in and
+talked to without importing a tc-town export first — the NPC holds a
+conversation with no character sheet either way. Resolution order is: the
+active character's own `avatar`, else `character.avatar_file`, and in both
+cases the reference is dropped if the file isn't in the folder
+(`npc_server::ws::avatar_ref`).
+
+Anything that changes that answer broadcasts an `avatar` frame, since `hello`
+carries it only at connect time.
+
+The model is rendered browser-side (three.js + `@pixiv/three-vrm`, see
+`web/src/vrm/`, loaded as its own chunk via a dynamic `import()` so sessions
+that never show an avatar don't download it), which is also where lip-sync is
+driven from — see the `speaking` frame under
+[Voice cascade](#voice-cascade-npc-speech).
+
 ## Person memory
 
 Memories can be tied to an individual, not just to the conversation as a
@@ -336,13 +390,48 @@ reuses the same `metadata.person_id` field to list a person's memories.
 
 ## WS / REST protocol (implemented by `npc-server`)
 
+The WS surface is deliberately a superset of the "extension API" a sibling
+app (`tc-assistant2`) defines, so a client written against that spec works
+here unchanged — see [Request correlation](#request-correlation) and the
+`event`/ack rows below for the parts that exist purely for that
+compatibility. Discovery works the same way too: the port actually bound is
+written to `{data_dir}/server-port.txt` as decimal text, because
+`bind_with_retry` may have had to fall back off the configured one and an
+out-of-process client would otherwise have no way to find the server.
+
+### Request correlation
+
+A client's `input` is acked with `inputAccepted {requestId}`, and the
+`response` that eventually answers it carries the same `requestId`. That id
+has to survive a trip across three crates, since the reply is produced
+asynchronously by a different module than the one that received the request:
+
+1. `npc-server`'s `ws.rs` stamps the id onto the `agent:sense`/`speech`
+   payload it publishes, as `request_id` — a sibling of the existing optional
+   `speaker` field.
+2. `npc-talk` reads it (`module::extract_request_id`) and carries it **as a
+   call parameter**, not in `ChatState`: two turns can be queued at once, and
+   shared state would let the second overwrite the first's id before it
+   published — the exact bug this plumbing exists to prevent.
+3. Whichever of the three outcomes ends the turn puts it back on the bus:
+   `chat_response` (spoke), `chat_silent` (deliberately said nothing — this
+   still has to release the waiting client), or `chat_error` (the turn failed
+   outright, so neither of the others is coming). `bus_forward` turns each
+   into a `response` frame.
+
+A turn the NPC started by itself — a scheduled announcement, a remark
+triggered by vision — has no requester, so the field is **absent** rather
+than empty, and `bus_forward` reports `requestId: "-"`. `chat_error` isn't
+published at all in that case: an error nobody is waiting on is a log line,
+not a broadcast.
+
 ### WebSocket, server → client (`/ws`)
 
 | Frame            | Fields                                          |
 |-------------------|--------------------------------------------------|
-| `hello`           | `{version, modules, character}`                  |
+| `hello`           | `{version, modules, character, avatar?}` — `avatar` is `{kind: "vrm", file}` when one resolves. It is a sibling of `character`, not a field on it: the NPC chats with no character sheet loaded, so the avatar resolves to the active character's own assignment *or* the standalone `config.character.avatar_file` (see [Avatars](#avatars-vrm)) |
 | `chat`            | `{role: "user"\|"assistant", text, ts}`          |
-| `ttsLine`         | `{text, translations?}`                          |
+| `ttsLine`         | `{text, translations?}` — one frame **per sentence**, published by npc-speech as it is about to speak that sentence (not once per reply). Correctly absent while TTS is off: nothing is being read aloud |
 | `sense`           | `{kind: "vision"\|"speech", text, ts}`            |
 | `translation`     | `{id, source: "user"\|"agent", original, lang, text, reversed, ts}` |
 | `memory`          | `{kind: "short"\|"long", text}`                   |
@@ -350,10 +439,17 @@ reuses the same `metadata.person_id` field to list a person's memories.
 | `position`        | `{x, y, heading}`                                 |
 | `volume`          | `{level}`                                         |
 | `voice`           | `{active}` — position of the cascade voice loop's 開始/停止 switch; sent right after `hello` and broadcast on every change |
+| `avatar`          | `{avatar}` — which VRM to display has changed (assigned/cleared, model added/removed, or a different character activated); `null` for none. Broadcast because `hello` carries the avatar only at connect time, so an already-open tab would otherwise not notice until reloaded |
+| `speakingLevel`   | `{level}` — how loud the voice audible right now is (0..=1), published by npc-speech's playback thread roughly every 50ms while a clip plays and once as `0` when it ends. Drives how far the VRM avatar's mouth opens, so it tracks the real speech envelope instead of a fixed oscillation. Separate from `speaking`, which stays the authoritative on/off: a client that ignores this frame still animates correctly |
+| `speaking`        | `{active}` — the synthesized voice is (or is no longer) audible on the host's speakers. Published by npc-speech's playback thread on each transition only, and used by the web UI to lip-sync the VRM avatar: the browser never receives the audio, and `ttsLine` fires when the *text* is ready (before synthesis is even requested), so neither can stand in for it |
 | `status`          | `{modules}`                                       |
 | `error`           | `{message}`                                       |
 | `inputAccepted`   | `{requestId}`                                     |
-| `response`        | `{requestId, status: "done"\|"error", text?, message?}` |
+| `eventAccepted`   | `{kind}` — ack for a client `event` |
+| `interruptAccepted` | `{}` |
+| `suspendAccepted`  | `{}` |
+| `resumeAccepted`   | `{}` |
+| `response`        | `{requestId, status: "done"\|"error", text?, message?}` — `requestId` is the id from the `inputAccepted` that started the turn, carried across the bus (see [Request correlation](#request-correlation)). `"-"` means the turn was self-initiated (a scheduled announcement, a vision remark) and nobody was waiting on it |
 | `person`          | `{person: PersonRecord}` — sent for both create and update, relayed from `person_updated` (`agent:mem`/`npc-server` handlers, see [Person memory](#person-memory)) |
 | `personDeleted`   | `{id}` — relayed from `person_deleted`                |
 
@@ -364,11 +460,11 @@ reuses the same `metadata.person_id` field to list a person's memories.
 | `input`      | `{text, speaker?}` — `speaker`, if present, is attached to the resulting `agent:sense`/`speech` payload so npc-memory can resolve it to a person |
 | `command`    | `{text}`                                            |
 | `interrupt`  | `{}` — published as `agent:interrupt` / `interrupt`; npc-speech emits the same envelope (with `{"source": "barge_in"}`) when the mic hears you talking over a reply |
-| `suspend`    | `{}` — pauses TTS playback only, auto-expiring (`npc-speech: SUSPEND_TIMEOUT`) |
+| `suspend`    | `{}` — holds incoming `input`/`event` at the WS layer until `resume` (bounded queue, oldest dropped on overflow) **and** pauses TTS playback. The playback half auto-expires after `npc-speech: SUSPEND_TIMEOUT`; the input gate does not, but is released if the client that suspended disconnects — so a crashed extension can't wedge the NPC, while an unrelated tab closing doesn't resume it |
 | `resume`     | `{}`                                                |
 | `voiceStart` | `{}` — master switch for the cascade voice loop: mic → VAD/STT resumes feeding `agent:sense`/`speech`, and `chat_response` replies are spoken again. Unlike `suspend`/`resume` it never expires |
 | `voiceStop`  | `{}` — mic stops reaching the STT pipeline and replies go unspoken; the cpal input stream stays open so restarting is instant |
-| `event`      | `{kind, userName?, text?, amount?}` — `userName` is also carried through as `speaker` |
+| `event`      | `{kind, userName?, text?, amount?, tier?, message?, rewardTitle?}` — `userName` is also carried through as `speaker`. Kinds: `follow`, `subscribe`, `resub`, `gift`, `cheer`, `raid`, `points`; an unknown kind falls back to `text` as its description. `amount` means whatever the kind says it means (months, bits, viewers, gift count) — it is deliberately **not** rendered as currency except for an actual donation |
 
 ### REST
 
@@ -377,12 +473,49 @@ reuses the same `metadata.person_id` field to list a person's memories.
 - `GET /api/config` (redacted) / `PUT /api/config`
 - `GET /api/characters`
 - `POST /api/characters/import` (tc-town export JSON body)
-- `POST /api/characters/{id}/activate`
+- `POST /api/characters/{id}/activate` — writes `character.active_id` and
+  publishes `config_updated` on `npc:config`, the same way `PUT /api/config`
+  does, so npc-talk swaps the persona live (see [Characters](#characters)).
+  No restart.
+- `PUT /api/characters/{id}/avatar` → body `{file}` points the character at a
+  model in the VRM folder; `{file: null}` (or `""`) clears it. The model must
+  already be in the folder — a name that isn't there is a 404 rather than a
+  stored reference that could never resolve.
+- `GET /api/vrm` → `{models: [{file, name, size}], dir, default}` — a listing
+  of `{data_dir}/vrm/`, plus its absolute path (shown in the キャラ tab so the
+  operator knows where to drop files directly) and the standalone default
+  avatar's file name (`""` for none).
+- `PUT /api/vrm/default` → body `{file}` sets `config.character.avatar_file`,
+  the avatar used when no active character supplies one; `{file: null}` (or
+  `""`) clears it. This is what lets a VRM be used with no character sheet at
+  all. Registered before `/api/vrm/:file` so `default` isn't read as a model
+  name.
+- `GET /api/vrm/file/{file}` → the raw `.vrm` bytes
+  (`model/gltf-binary`), for the browser's VRM loader. Sends a strong `ETag`
+  built from the file's size and mtime and honours `If-None-Match` with a
+  bodyless `304`, which for a 10-50 MB model is the difference that makes
+  caching worth having. `Cache-Control` is `private, no-cache` — "revalidate
+  every time", not "don't cache": with a validator in place the revalidation
+  costs a `304`, and unlike a `max-age` it leaves no window in which
+  overwriting a model (uploading the same file name) keeps serving the old
+  bytes.
+- `POST /api/vrm/{file}` (raw model bytes) copies a `.vrm` into the folder,
+  replacing one of the same name. This route alone raises axum's body limit
+  (`MAX_VRM_UPLOAD_BYTES`, 200 MB) — the 2 MB default won't pass a model.
+- `DELETE /api/vrm/{file}`. Characters pointing at the deleted model keep the
+  reference: restoring the file restores the avatar.
 - `POST /api/scheduler/test` → `{index?, text?, chime_file?, actions?}` fires
   one announcement immediately (ignoring the clock and `scheduler.enabled`)
   via `npc_scheduler::fire_announcement`; responds `{ok, fired, spoke,
   actions}`, where `fired: false` means the entry is a no-op (neither text
   nor actions).
+- `GET /api/affect/history?limit=N` → `{entries: [...]}`, oldest-first, each
+  entry carrying the same camelCase fields as the `affect` WS frame. npc-server
+  keeps a bounded rolling buffer of recent snapshots (filled in `bus_forward`
+  beside the live broadcast, same trick as the `shortTerm` cache), because the
+  browser's own affect history is live-frames-only and therefore empty on every
+  page load — the 感情 tab's trend line seeds itself from this and then extends
+  it with live frames, de-duplicating on `ts`.
 - `GET /api/memory` → `{shortTerm, longTerm}`; each `longTerm` entry now also
   carries `personId` (the chunk's `metadata.person_id`, or `""` if none —
   see [Person memory](#person-memory)).
@@ -419,7 +552,8 @@ P2P network (MPL-2.0). It's excluded from the default build — `cargo check
 --workspace`/`cargo build --workspace` never touch it. Building with
 `cargo build --features mist` (or `just check-mist` / `just build-mist`)
 pulls in `mistlib-core`/`mistlib-native` as git dependencies pinned to a
-specific commit and compiles the module in; it's a heavy build (mistlib
+specific tag (currently v0.6.0) and compiles the module in; it's a heavy
+build (mistlib
 bundles a WebRTC stack). `src/main.rs` only spawns the module when both the
 `mist` feature is enabled at compile time *and* `config.mist.enabled` is
 true at runtime (see `config.mist` in `crates/npc-core/src/config.rs`:
@@ -443,7 +577,7 @@ When running, it:
     operator hasn't chosen to import yet. Each discovery logs at info and
     publishes an `npc:ui`/`action_log` bus message so it shows up in the web
     UI's log.
-  - mistlib-native's engine, at the pinned commit this crate depends on,
+  - mistlib-native's engine, at the pinned tag this crate depends on,
     tracks only **one** joined room per process, so setting
     `config.mist.room_id` disables catalog discovery for that run (logged
     as a warning) — see the module doc comment in

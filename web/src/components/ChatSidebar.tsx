@@ -42,6 +42,9 @@ export interface ChatSidebarProps {
   /** Forwarded to VoicePanel so the mic meter can explain a zero reading
    *  while the チャット header's 音声 master switch is off. */
   voiceActive: boolean;
+  /** Whether the server acknowledged the last 一時停止/再開 this UI sent, so
+   *  those buttons can stop being fire-and-forget. Null until one is sent. */
+  ttsSuspended: boolean | null;
   /** Active pill, owned by the router (`#/chat/<panel>`). */
   activePanel: ChatPanel;
   onPanelChange: (panel: ChatPanel) => void;
@@ -66,6 +69,7 @@ export function ChatSidebar({
   volume,
   ttsLines,
   voiceActive,
+  ttsSuspended,
   activePanel,
   onPanelChange,
   onSuspend,
@@ -116,6 +120,7 @@ export function ChatSidebar({
           volume={volume}
           ttsLines={ttsLines}
           voiceActive={voiceActive}
+          ttsSuspended={ttsSuspended}
           config={config}
           onSuspend={onSuspend}
           onResume={onResume}

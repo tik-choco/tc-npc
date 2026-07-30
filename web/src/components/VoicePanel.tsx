@@ -20,7 +20,7 @@ import type { TtsLineEntry } from "../hooks/useNpcSocket";
 import type { ConfigDocHandle } from "../hooks/useConfigDoc";
 import type { SpeechEndpointSection, SpeechSection } from "../lib/config-types";
 import type { ConfigDocument } from "../lib/types";
-import type { Translate } from "../lib/i18n";
+import type { MessageKey, Translate } from "../lib/i18n";
 import { getAudioDevices, type AudioDevices } from "../lib/api";
 import { useI18n } from "../hooks/useI18n";
 import { SaveChip } from "./SaveChip";
@@ -77,6 +77,33 @@ function readStt(config: ConfigDocument | null): SpeechEndpointSection {
 function readNumber(section: SpeechEndpointSection, field: string, fallback: number): number {
   const value = section[field];
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+/** config.tts, or {} when absent. Only `enabled` is read here (for the log's
+ *  empty state below) -- the connection fields live in 設定 › タスク /
+ *  provider cards, same split as `readStt`. */
+function readTts(config: ConfigDocument | null): SpeechEndpointSection {
+  return (config?.tts as SpeechEndpointSection | undefined) ?? {};
+}
+
+/**
+ * Which empty-state line belongs under the TTS log when there's nothing in
+ * it yet. With `ttsLine` now sent per sentence (see TtsLineMessage), an
+ * empty log is the *expected* state whenever TTS is off -- config.tts.enabled
+ * follows the same "absent means off" convention as SettingsView's own
+ * `tts.enabled ?? false` toggle -- and saying so plainly beats leaving a
+ * panel that looks like it stopped working. `config === null` (still
+ * loading, or the fetch failed) deliberately falls back to the generic
+ * "nothing spoken yet" line rather than claiming TTS is off: that claim
+ * would be a guess until the document actually says so.
+ *
+ * A standalone exported function (rather than inlined at the call site) so
+ * this one small piece of decision logic is a plain function vitest can
+ * exercise without rendering the component -- see VoicePanel.test.ts.
+ */
+export function ttsLogEmptyKey(config: ConfigDocument | null): MessageKey {
+  if (config === null) return "voice.log.empty";
+  return (readTts(config).enabled ?? false) ? "voice.log.empty" : "voice.log.empty.ttsOff";
 }
 
 /** One labelled range slider with a live numeric readout.
@@ -286,9 +313,27 @@ export interface VoicePanelProps {
   config: ConfigDocHandle;
   onSuspend: () => void;
   onResume: () => void;
+  /**
+   * Server-confirmed result of the last suspend/resume this client sent (see
+   * useNpcSocket's `ttsSuspended`) -- null when unknown (nothing sent or
+   * acked yet) or when a caller doesn't forward it. Optional so this panel
+   * still renders exactly as before for any caller that hasn't wired it
+   * through yet; when present it turns the Pause/Resume buttons from
+   * fire-and-forget into something that shows whether the last click
+   * actually landed.
+   */
+  ttsSuspended?: boolean | null;
 }
 
-export function VoicePanel({ volume, ttsLines, voiceActive, config, onSuspend, onResume }: VoicePanelProps) {
+export function VoicePanel({
+  volume,
+  ttsLines,
+  voiceActive,
+  config,
+  onSuspend,
+  onResume,
+  ttsSuspended,
+}: VoicePanelProps) {
   const { t } = useI18n();
   const pct = Math.max(0, Math.min(1, volume)) * 100;
 
@@ -432,6 +477,15 @@ export function VoicePanel({ volume, ttsLines, voiceActive, config, onSuspend, o
             {t("voice.pause")}
           </button>
         </div>
+        {/* Only rendered once a caller actually forwards ttsSuspended and an
+            ack has landed (see the prop's doc comment) -- null covers both
+            "not wired up" and "nothing acked yet" on purpose, since neither
+            has anything honest to display. */}
+        {ttsSuspended != null && (
+          <span class="field-hint" title={t("voice.suspend.status.tooltip")}>
+            {ttsSuspended ? t("voice.suspend.status.suspended") : t("voice.suspend.status.resumed")}
+          </span>
+        )}
       </section>
 
       <VoiceDeviceCard doc={config} />
@@ -440,7 +494,7 @@ export function VoicePanel({ volume, ttsLines, voiceActive, config, onSuspend, o
         <h2 class="voice-log-title">{t("voice.log.title")}</h2>
         {ttsLines.length === 0 && (
           <div class="empty-state">
-            <div class="empty-state-title">{t("voice.log.empty")}</div>
+            <div class="empty-state-title">{t(ttsLogEmptyKey(config.config))}</div>
           </div>
         )}
         <ul class="voice-log-list">

@@ -10,7 +10,14 @@
 //! dropped for as long as that mode is on. It's tracked from `npc:config`
 //! updates rather than read once at startup so the 通訳 tab can switch modes
 //! without a restart.
+//!
+//! The same `npc:config` subscription also carries the active character:
+//! `config.character.active_id` is likewise re-read on every `CONFIG_UPDATED`
+//! rather than only at startup, so switching characters in the web UI's
+//! キャラ tab takes effect on the engine's very next turn instead of needing
+//! the binary restarted. See [`apply_character_switch`].
 
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -71,6 +78,7 @@ impl Module for TalkModule {
             suspended: false,
             resume_deadline: None,
             interpret_mode: ctx.config.translation.suppresses_chat(),
+            active_character_id: ctx.config.character.active_id.clone(),
         };
 
         // Noticing that the partner stopped talking needs a clock of its own:
@@ -108,7 +116,7 @@ impl Module for TalkModule {
                 received = rx.recv() => {
                     match received {
                         Ok(bus_msg) => {
-                            handle_bus_message(&engine, &mut state, bus_msg);
+                            handle_bus_message(&engine, &mut state, bus_msg, &ctx.data_dir);
                         }
                         Err(RecvError::Lagged(skipped)) => {
                             tracing::warn!(skipped, "npc-talk: bus receiver lagged, messages were dropped");
@@ -136,9 +144,19 @@ struct TalkState {
     /// `config.translation.mode == "interpret"` — heard speech belongs to
     /// npc-translate, not to a chat turn.
     interpret_mode: bool,
+    /// `config.character.active_id` as last applied to the engine's
+    /// persona. Compared against every incoming `CONFIG_UPDATED`'s value so
+    /// the many config saves that have nothing to do with the character tab
+    /// (every `PUT /api/config` publishes the same message) don't trigger a
+    /// reload. Updated synchronously the moment a real change is detected —
+    /// before the slower file read and engine update that follow it (see
+    /// [`apply_character_switch`]) have even started — so a second change
+    /// arriving while the first is still loading is judged against the
+    /// right target instead of a now-stale one.
+    active_character_id: String,
 }
 
-fn handle_bus_message(engine: &Arc<ChatEngine>, state: &mut TalkState, bus_msg: BusMessage) {
+fn handle_bus_message(engine: &Arc<ChatEngine>, state: &mut TalkState, bus_msg: BusMessage, data_dir: &Path) {
     match bus_msg.topic.as_str() {
         topic::MEM => match bus_msg.env.r#type.as_str() {
             msg::SHORT_TERM_MEMORY => {
@@ -174,15 +192,27 @@ fn handle_bus_message(engine: &Arc<ChatEngine>, state: &mut TalkState, bus_msg: 
             if bus_msg.env.r#type == msg::SPEECH {
                 if let Some(content) = extract_content(&bus_msg.env.payload) {
                     let speaker = extract_speaker(&bus_msg.env.payload);
+                    // The WS API's per-request correlation id, if npc-server
+                    // minted one for the `input` frame that produced this
+                    // utterance (its `ws.rs` stamps it onto this same payload
+                    // as `request_id`, a sibling of `speaker`). Absent for a
+                    // self-initiated turn — a scheduler announcement, a vision
+                    // remark — which is exactly what must reach the engine as
+                    // `None` rather than an empty string (see
+                    // `ChatEngine::chat_with_context`).
+                    let request_id = extract_request_id(&bus_msg.env.payload);
                     if state.interpret_mode {
                         tracing::debug!(content = %content, "npc-talk: interpretation mode, leaving speech to npc-translate");
                     } else if state.suspended {
                         tracing::debug!(content = %content, "npc-talk: suspended, dropping speech input");
                     } else {
-                        tracing::info!(content = %content, speaker = ?speaker, "npc-talk: received speech input");
+                        tracing::info!(content = %content, speaker = ?speaker, request_id = ?request_id, "npc-talk: received speech input");
                         let engine = engine.clone();
                         tokio::spawn(async move {
-                            if let Err(err) = engine.chat_with_speaker(&content, speaker.as_deref()).await {
+                            if let Err(err) = engine
+                                .chat_with_context(&content, speaker.as_deref(), request_id.as_deref())
+                                .await
+                            {
                                 tracing::error!(error = %err, "npc-talk: chat turn failed");
                             }
                         });
@@ -216,6 +246,26 @@ fn handle_bus_message(engine: &Arc<ChatEngine>, state: &mut TalkState, bus_msg: 
                             );
                         }
                         state.interpret_mode = interpret_mode;
+
+                        // `POST /api/characters/{id}/activate` publishes this
+                        // same `CONFIG_UPDATED` message (see npc-server), but
+                        // so does every unrelated `PUT /api/config` save —
+                        // most of these carry `active_id` unchanged. Only
+                        // react when it actually moved, both to skip a
+                        // needless file read on the common case and so the
+                        // log line in `apply_character_switch` means
+                        // something when it does fire.
+                        if new_config.character.active_id != state.active_character_id {
+                            let old_id = std::mem::replace(
+                                &mut state.active_character_id,
+                                new_config.character.active_id.clone(),
+                            );
+                            let engine = engine.clone();
+                            let data_dir = data_dir.to_path_buf();
+                            tokio::spawn(async move {
+                                apply_character_switch(&engine, &data_dir, &new_config, &old_id).await;
+                            });
+                        }
                     }
                     Err(err) => {
                         tracing::warn!(error = %err, "npc-talk: failed to deserialize updated config, keeping current mode");
@@ -225,6 +275,67 @@ fn handle_bus_message(engine: &Arc<ChatEngine>, state: &mut TalkState, bus_msg: 
         }
         _ => {}
     }
+}
+
+/// Load whatever character `new_config.character.active_id` now names and
+/// install it as the engine's persona — or clear the persona entirely if the
+/// id is empty or names a character that can't be loaded. Spawned by
+/// [`handle_bus_message`] rather than run inline, because it does a file
+/// read and takes the engine's per-turn lock (via [`ChatEngine::set_persona`]),
+/// neither of which the bus-dispatch loop may block on.
+///
+/// Clearing on a load failure — rather than leaving `old_id`'s persona in
+/// place — is deliberate: [`npc_core::active_character`] already collapses
+/// "no such file" and "unreadable/corrupt" into a plain `Ok(None)`, and this
+/// function has no way to tell those apart from "explicitly cleared" except
+/// by checking whether `active_id` is empty. Either way, silently continuing
+/// to role-play a character the operator just deactivated (or that vanished
+/// from disk) is a worse failure mode than answering with no persona at all.
+///
+/// `old_id` is used only for the log line: the *decision* to switch (and the
+/// bookkeeping in `TalkState::active_character_id`) already happened
+/// synchronously in [`handle_bus_message`] before this task was spawned.
+///
+/// Deliberately touches nothing else in `ChatEngine`'s per-conversation
+/// state: `history` (the running message list) and the per-partner
+/// [`crate::affect::PartnerAffect`] drives both stay exactly as they were.
+/// The alternative — wiping them, the way a full binary restart used to —
+/// would make the "no more restart" feature swap in a fresh persona while
+/// still throwing away the one thing a restart-free switch is supposed to
+/// preserve: an ongoing conversation. A little residual confusion (the model
+/// briefly seeing history from the outgoing persona) is a smaller cost than
+/// that, and it self-corrects within a turn or two once the new persona
+/// system message dominates generation. If a future persona ever needs a
+/// harder reset (e.g. an operator-facing "also clear history" toggle), that
+/// belongs in the server route that publishes the activation, not here —
+/// this function only ever reacts to whatever `CONFIG_UPDATED` says.
+async fn apply_character_switch(
+    engine: &Arc<ChatEngine>,
+    data_dir: &Path,
+    new_config: &npc_core::Config,
+    old_id: &str,
+) {
+    let character = npc_core::active_character(data_dir, new_config).ok().flatten();
+    let from = if old_id.is_empty() { "(none)" } else { old_id };
+
+    match &character {
+        Some(c) => {
+            tracing::info!(from, to = %c.sheet.name, "npc-talk: active character switched, persona reloaded");
+        }
+        None if new_config.character.active_id.is_empty() => {
+            tracing::info!(from, "npc-talk: active character cleared, persona reset to none");
+        }
+        None => {
+            tracing::warn!(
+                from,
+                active_id = %new_config.character.active_id,
+                "npc-talk: active character could not be loaded, clearing persona instead of keeping the previous one",
+            );
+        }
+    }
+
+    let persona = character.map(|c| npc_core::persona_prompt(&c.sheet));
+    engine.set_persona(persona).await;
 }
 
 /// Payload may be `{"content": "..."}` or a bare JSON string, matching Go's
@@ -241,6 +352,19 @@ fn extract_content(payload: &serde_json::Value) -> Option<String> {
 /// string or simply has no `speaker` key — both mean "speaker unknown".
 fn extract_speaker(payload: &serde_json::Value) -> Option<String> {
     payload.get("speaker").and_then(|v| v.as_str()).map(str::to_string)
+}
+
+/// Pull the optional `request_id` field off a `topic::SENSE`/`msg::SPEECH`
+/// payload — npc-server's `ws.rs` stamps the WS API's per-request id here (a
+/// sibling of `speaker` above) when the utterance came from a client `input`
+/// frame. Absent for a bare-string payload or one with no `request_id` key,
+/// both of which mean "nobody is waiting on this turn" (a scheduler
+/// announcement, a vision-triggered remark, or any other self-initiated
+/// speech) rather than "the id is the empty string" — the distinction
+/// `ChatEngine::chat_with_context` and npc-server's `bus_forward` both rely
+/// on to decide whether a reply needs a `request_id` at all.
+fn extract_request_id(payload: &serde_json::Value) -> Option<String> {
+    payload.get("request_id").and_then(|v| v.as_str()).map(str::to_string)
 }
 
 #[cfg(test)]
@@ -280,7 +404,16 @@ mod tests {
             suspended: false,
             resume_deadline: None,
             interpret_mode: false,
+            active_character_id: String::new(),
         }
+    }
+
+    /// A `data_dir` for tests that don't exercise the character-reload path
+    /// at all (nothing under it is ever read): `handle_bus_message` only
+    /// touches its `data_dir` argument when `active_id` actually changes,
+    /// and none of these do.
+    fn unused_data_dir() -> std::path::PathBuf {
+        std::env::temp_dir()
     }
 
     #[test]
@@ -290,12 +423,12 @@ mod tests {
 
         let mut config = Config::default();
         config.translation.mode = "interpret".to_string();
-        handle_bus_message(&engine, &mut state, config_updated(&config));
+        handle_bus_message(&engine, &mut state, config_updated(&config), &unused_data_dir());
         assert!(state.interpret_mode);
 
         // `assist` keeps npc-talk answering — only `interpret` silences it.
         config.translation.mode = "assist".to_string();
-        handle_bus_message(&engine, &mut state, config_updated(&config));
+        handle_bus_message(&engine, &mut state, config_updated(&config), &unused_data_dir());
         assert!(!state.interpret_mode);
     }
 
@@ -315,6 +448,7 @@ mod tests {
                     payload: serde_json::json!("not a config"),
                 },
             },
+            &unused_data_dir(),
         );
         assert!(state.interpret_mode);
     }
@@ -332,11 +466,11 @@ mod tests {
             },
         };
 
-        handle_bus_message(&engine, &mut state, interrupt(msg::SUSPEND));
+        handle_bus_message(&engine, &mut state, interrupt(msg::SUSPEND), &unused_data_dir());
         assert!(state.suspended);
         assert!(state.resume_deadline.is_some());
 
-        handle_bus_message(&engine, &mut state, interrupt(msg::RESUME));
+        handle_bus_message(&engine, &mut state, interrupt(msg::RESUME), &unused_data_dir());
         assert!(!state.suspended);
         assert!(state.resume_deadline.is_none());
     }
@@ -361,6 +495,26 @@ mod tests {
         assert_eq!(extract_speaker(&payload), None);
     }
 
+    #[test]
+    fn extract_request_id_reads_request_id_field() {
+        let payload = serde_json::json!({"content": "hi", "request_id": "req-123"});
+        assert_eq!(extract_request_id(&payload), Some("req-123".to_string()));
+    }
+
+    #[test]
+    fn extract_request_id_none_when_field_absent() {
+        // A self-initiated turn (scheduler, vision) has no client waiting,
+        // so npc-server never stamps a `request_id` onto its payload.
+        let payload = serde_json::json!({"content": "hi"});
+        assert_eq!(extract_request_id(&payload), None);
+    }
+
+    #[test]
+    fn extract_request_id_none_for_bare_string_payload() {
+        let payload = serde_json::json!("hi");
+        assert_eq!(extract_request_id(&payload), None);
+    }
+
     #[tokio::test]
     async fn person_memory_message_is_dispatched_without_panicking() {
         let engine = engine();
@@ -377,8 +531,113 @@ mod tests {
                 }),
             },
         };
-        handle_bus_message(&engine, &mut state, msg);
+        handle_bus_message(&engine, &mut state, msg, &unused_data_dir());
         // Let the tokio::spawn'd `engine.set_person_memory` task actually run.
         tokio::task::yield_now().await;
+    }
+
+    /// The "decision" half of the reload, isolated from the file-loading
+    /// half: a changed `active_id` must update `TalkState`'s tracked id
+    /// immediately (synchronously, before whatever `apply_character_switch`
+    /// does), an unchanged one (the common case — most config saves have
+    /// nothing to do with characters) must not spuriously re-trigger, and
+    /// clearing `active_id` back to empty must be tracked just like any
+    /// other change. Uses `#[tokio::test]` only because a real change makes
+    /// `handle_bus_message` call `tokio::spawn`, which needs a runtime to
+    /// exist — the assertions themselves are all synchronous.
+    #[tokio::test]
+    async fn active_character_id_changes_are_tracked_and_no_op_changes_are_not() {
+        let engine = engine();
+        let mut state = state();
+        assert_eq!(state.active_character_id, "");
+
+        let mut config = Config::default();
+        config.character.active_id = "abc".to_string();
+        handle_bus_message(&engine, &mut state, config_updated(&config), &unused_data_dir());
+        assert_eq!(state.active_character_id, "abc");
+
+        // Same id coming back around (an unrelated settings save) must read
+        // as "nothing to do", not as a fresh switch.
+        handle_bus_message(&engine, &mut state, config_updated(&config), &unused_data_dir());
+        assert_eq!(state.active_character_id, "abc");
+
+        config.character.active_id = String::new();
+        handle_bus_message(&engine, &mut state, config_updated(&config), &unused_data_dir());
+        assert_eq!(state.active_character_id, "");
+    }
+
+    /// End-to-end: a real character file on disk, activated then
+    /// deactivated through the same `CONFIG_UPDATED` path npc-server uses,
+    /// actually lands on (and later clears off) the engine — this is the
+    /// restart this whole feature exists to remove. Polls `engine.persona()`
+    /// for a few yields rather than asserting immediately, since the reload
+    /// itself runs in a `tokio::spawn`'d task (a file read plus an
+    /// uncontended lock — fast, but not guaranteed to have run yet the
+    /// instant `handle_bus_message` returns).
+    #[tokio::test]
+    async fn character_switch_installs_the_new_persona_and_clearing_resets_it() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "npc-talk-persona-switch-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let sheet = npc_core::CharacterSheet {
+            name: "アリス".to_string(),
+            summary: "元気な図書委員".to_string(),
+            ..Default::default()
+        };
+        npc_core::save_character(
+            &data_dir,
+            &npc_core::Character {
+                id: "alice".to_string(),
+                created_at: String::new(),
+                updated_at: String::new(),
+                sheet: sheet.clone(),
+                voice_model: None,
+                voice_name: None,
+                avatar: None,
+            },
+        )
+        .unwrap();
+
+        let engine = engine();
+        let mut state = state();
+        assert_eq!(engine.persona().await, None);
+
+        let mut config = Config::default();
+        config.character.active_id = "alice".to_string();
+        handle_bus_message(&engine, &mut state, config_updated(&config), &data_dir);
+        assert_eq!(state.active_character_id, "alice");
+
+        let mut installed = engine.persona().await;
+        for _ in 0..50 {
+            if installed.is_some() {
+                break;
+            }
+            tokio::task::yield_now().await;
+            installed = engine.persona().await;
+        }
+        assert_eq!(installed, Some(npc_core::persona_prompt(&sheet)));
+
+        // Deactivating (active_id back to empty) must clear the persona
+        // rather than leave アリス's in place — the whole point of clearing
+        // on anything but a clean load, spelled out on
+        // `apply_character_switch`.
+        config.character.active_id = String::new();
+        handle_bus_message(&engine, &mut state, config_updated(&config), &data_dir);
+
+        let mut cleared = engine.persona().await;
+        for _ in 0..50 {
+            if cleared.is_none() {
+                break;
+            }
+            tokio::task::yield_now().await;
+            cleared = engine.persona().await;
+        }
+        assert_eq!(cleared, None);
+
+        let _ = std::fs::remove_dir_all(&data_dir);
     }
 }

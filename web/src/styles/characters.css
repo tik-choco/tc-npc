@@ -1,4 +1,5 @@
-/* キャラ view — import dropzone + character list. */
+/* キャラ view — import dropzone, character list, and the VRM model library
+   (the server's own `{data_dir}/vrm/` folder). */
 
 .characters-view {
   display: flex;
@@ -89,6 +90,24 @@
   box-shadow: var(--shadow-1);
 }
 
+/* Only the *character* rows are clickable — selecting one picks the
+   character the VRM library assigns to. The model rows below reuse the same
+   row shell but aren't selectable, so the affordance is opt-in rather than
+   riding on `.character-row` itself. */
+.character-row--clickable {
+  cursor: pointer;
+  transition: border-color var(--dur) var(--ease), background var(--dur) var(--ease);
+}
+
+.character-row--clickable:hover {
+  border-color: var(--border-strong);
+}
+
+.character-row--selected {
+  border-color: var(--primary-border);
+  background: var(--primary-soft);
+}
+
 .character-row-main {
   display: flex;
   flex-direction: column;
@@ -106,6 +125,72 @@
   font-size: 0.72rem;
   color: var(--text-subtle);
   font-family: var(--mono);
+}
+
+/* --- VRM model library --------------------------------------------------- */
+
+.vrm-desc {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+/* The folder path is shown because it is a real place on this machine the
+   operator can drop files into — the browser upload is only a shortcut. */
+.vrm-dir {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  font-size: 0.75rem;
+  color: var(--text-subtle);
+}
+
+.vrm-dir code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: var(--mono);
+}
+
+.vrm-hint {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--text-subtle);
+}
+
+/* Bust thumbnail (vrm/thumbnail.ts) shown at the start of each model row, so
+   picking a model doesn't mean reading file names. A dedicated rule rather
+   than reusing .vrm-stage-fallback from styles/avatar.css: that class is
+   sized for the full avatar stage (72px), while this is a fixed-size list
+   glyph, but it deliberately matches its look (pill shape, --surface-2
+   plate, muted bold letter) so the placeholder reads as "the same kind of
+   thing, smaller" rather than a different component. */
+.vrm-thumb {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+
+.vrm-thumb-img {
+  width: 100%;
+  height: 100%;
+  /* The renderer clears to transparent (alpha + clear colour 0 in
+     thumbnail.ts), so this shows the row's own background through around
+     the model in both themes rather than a baked-in black square. */
+  object-fit: cover;
+}
+
+.vrm-thumb-fallback {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-muted);
+  user-select: none;
 }
 
 .spin {

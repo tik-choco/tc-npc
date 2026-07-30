@@ -32,6 +32,16 @@ struct ChatState {
     /// contract §6). Same "empty string when unset" treatment as
     /// `short_term_memory`/`long_term_memory`.
     person_memory: String,
+    /// Rendered persona prompt for the active character, or `None` when no
+    /// character is active. Lives here rather than as a plain `ChatEngine`
+    /// field so a live character switch (`crate::module`'s `CONFIG_UPDATED`
+    /// handler, via [`ChatEngine::set_persona`]) goes through the same lock
+    /// an in-progress turn already holds for its whole duration, instead of
+    /// racing it: a turn in flight finishes with whichever persona it
+    /// started with, and the very next turn picks up the new one. Without
+    /// this, switching mid-turn would let one turn observe a persona for
+    /// part of message-building and a different one for the rest.
+    persona: Option<String>,
     /// Per-partner drive state. Conversation `history` above stays shared
     /// across partners on purpose — an NPC in a room hears everyone, so the
     /// transcript is one thread — but the internal state follows whoever is
@@ -47,8 +57,6 @@ pub struct ChatEngine {
     history_size: usize,
     tools: ToolRegistry,
     bus: Bus,
-    /// Rendered persona prompt for the active character, if any.
-    persona: Option<String>,
     /// `config.language` reply instruction, pushed as its own system message
     /// after the configured prompts so it isn't buried mid-persona. `None`
     /// when the language is `auto`.
@@ -113,7 +121,6 @@ impl ChatEngine {
             history_size,
             tools,
             bus,
-            persona,
             language_instruction: npc_core::config::language_instruction(language),
             style_rules,
             allow_silence,
@@ -125,6 +132,7 @@ impl ChatEngine {
                 short_term_memory: String::new(),
                 long_term_memory: String::new(),
                 person_memory: String::new(),
+                persona,
                 affect: PartnerAffect::default(),
             }),
         }
@@ -180,6 +188,32 @@ impl ChatEngine {
         guard.person_memory = content;
     }
 
+    /// Install a new persona prompt, or clear it entirely with `None`.
+    /// Called from `crate::module`'s `CONFIG_UPDATED` handler when
+    /// `config.character.active_id` changes, so a switch made in the web
+    /// UI's キャラ tab takes effect on the next turn instead of requiring the
+    /// binary to be restarted.
+    ///
+    /// Takes the same lock a chat turn holds for its whole duration (see
+    /// [`ChatState::persona`]), so a switch arriving mid-turn simply waits
+    /// for that turn to finish rather than swapping the persona out from
+    /// under it.
+    pub async fn set_persona(&self, persona: Option<String>) {
+        let mut guard = self.state.lock().await;
+        guard.persona = persona;
+    }
+
+    /// Current persona prompt, if any. Only compiled for tests: production
+    /// code has no need to read this back (it is consumed inside
+    /// `chat_with_speaker`), but `crate::module`'s tests need some way to
+    /// confirm a `CONFIG_UPDATED` character switch actually reached the
+    /// engine, since there is no other externally observable sign of it
+    /// until the next LLM request goes out.
+    #[cfg(test)]
+    pub async fn persona(&self) -> Option<String> {
+        self.state.lock().await.persona.clone()
+    }
+
     /// Run one full conversation turn: system prompts -> history -> user
     /// input -> tool-call loop -> optional filter pass -> publish +
     /// history update. Ported from Go `ChatAgent.Chat`.
@@ -192,7 +226,77 @@ impl ChatEngine {
     /// `speaker` field) threaded through to the published `chat_log` so
     /// npc-memory can attribute the turn to a person. `chat` itself stays
     /// speaker-less so every existing call site keeps behaving identically.
+    ///
+    /// Delegates to [`Self::chat_with_context`] with no `request_id` — the
+    /// two remaining production call sites (`chat`'s own callers, none of
+    /// which currently exist outside tests, and any future self-initiated
+    /// turn) have no WS client waiting on them.
     pub async fn chat_with_speaker(&self, input: &str, speaker: Option<&str>) -> anyhow::Result<String> {
+        self.chat_with_context(input, speaker, None).await
+    }
+
+    /// Same as [`Self::chat_with_speaker`], plus an optional `request_id`:
+    /// the WS API's per-request correlation id (npc-server's `ws.rs` mints
+    /// one per `input` frame and stamps it onto the `agent:sense`/`speech`
+    /// payload as `request_id`; see `crate::module::extract_request_id`).
+    ///
+    /// Carried purely as a call parameter, *not* through [`ChatState`] the
+    /// way `speaker` conceptually informs `affect` or `persona` informs the
+    /// system prompt: unlike those, `request_id` has no bearing on what gets
+    /// said, only on which reply the id belongs to, and it only needs to
+    /// live for the duration of this one call. Stashing it in shared state
+    /// instead would risk a second queued turn's id clobbering this one's
+    /// before this turn gets around to publishing — the whole failure mode
+    /// this plumbing exists to avoid. Passing it down the call stack alongside
+    /// `input`/`speaker` sidesteps that entirely: it travels with the
+    /// utterance it belongs to, all the way to whichever of `chat_response`
+    /// or `chat_silent` ends this turn.
+    ///
+    /// A turn the NPC started on its own (a scheduler announcement, a vision
+    /// remark) has no requester and passes `None` here; that `None` is
+    /// carried through to the published payload as a missing `request_id`
+    /// field rather than an empty string, matching how npc-server's
+    /// `bus_forward` distinguishes "nobody is waiting" from "waiting on the
+    /// empty-string request".
+    pub async fn chat_with_context(
+        &self,
+        input: &str,
+        speaker: Option<&str>,
+        request_id: Option<&str>,
+    ) -> anyhow::Result<String> {
+        let result = self.run_turn(input, speaker, request_id).await;
+
+        // A turn that fails outright publishes neither `chat_response` nor
+        // `chat_silent`, so a client waiting on this request would otherwise
+        // never hear anything back — its `response` frame simply never
+        // arrives. Announce the failure so npc-server can answer it with
+        // `status: "error"` instead. Only when there *is* a requester: a
+        // failed self-initiated turn (a scheduler announcement, a vision
+        // remark) has nobody waiting, and the error is already logged.
+        //
+        // Wrapping the whole turn rather than reporting at each `?` site is
+        // deliberate — every failure inside `run_turn`, present and future,
+        // is covered by construction instead of by remembering to add a
+        // publish beside each new error path.
+        if let (Err(err), Some(request_id)) = (&result, request_id) {
+            self.bus.publish(
+                topic::CHAT,
+                msg::CHAT_ERROR,
+                serde_json::json!({ "request_id": request_id, "message": err.to_string() }),
+            );
+        }
+
+        result
+    }
+
+    /// The turn itself. Split out of [`Self::chat_with_context`] so that
+    /// wrapper can observe any error on the way out; call that, not this.
+    async fn run_turn(
+        &self,
+        input: &str,
+        speaker: Option<&str>,
+        request_id: Option<&str>,
+    ) -> anyhow::Result<String> {
         let mut guard = match self.state.try_lock() {
             Ok(guard) => guard,
             Err(_) => {
@@ -232,7 +336,7 @@ impl ChatEngine {
                         guard.history.push(ChatMessage::user(input.to_string()));
                         trim_history(&mut guard.history, self.history_size);
                         drop(guard);
-                        self.publish_silence(input, "closing", speaker);
+                        self.publish_silence(input, "closing", speaker, request_id);
                         return Ok(String::new());
                     }
 
@@ -244,7 +348,7 @@ impl ChatEngine {
                     self.bus.publish(
                         topic::CHAT,
                         msg::CHAT_RESPONSE,
-                        serde_json::json!({ "content": reply, "input": input }),
+                        chat_response_payload(&reply, input, request_id),
                     );
                     self.bus.publish(topic::CHAT, msg::CHAT_LOG, chat_log_payload(input, &reply, speaker));
 
@@ -253,11 +357,15 @@ impl ChatEngine {
             }
         }
 
-        let vars = self.build_vars(&guard.short_term_memory, &guard.long_term_memory, &guard.person_memory);
+        let mut vars = self.build_vars(&guard.short_term_memory, &guard.long_term_memory, &guard.person_memory);
 
         let mut messages: Vec<ChatMessage> = Vec::new();
 
-        let persona_text = self.persona.clone().unwrap_or_default();
+        // Read under the same lock `set_persona` writes through, so this
+        // turn sees either the persona it started with or a switch that
+        // fully landed before the turn began — never a half-applied one.
+        let persona_text = guard.persona.clone().unwrap_or_default();
+        vars.insert("persona".to_string(), persona_text.clone());
         let persona_referenced = self.prompts.iter().any(|p| p.content.contains("{{persona}}"));
         if !persona_referenced && !persona_text.is_empty() {
             messages.push(ChatMessage::system(persona_text));
@@ -368,7 +476,7 @@ impl ChatEngine {
         if self.allow_silence && is_silence(&final_content) {
             trim_history(&mut guard.history, self.history_size);
             drop(guard);
-            self.publish_silence(input, "declined", speaker);
+            self.publish_silence(input, "declined", speaker, request_id);
             return Ok(String::new());
         }
 
@@ -384,7 +492,7 @@ impl ChatEngine {
         self.bus.publish(
             topic::CHAT,
             msg::CHAT_RESPONSE,
-            serde_json::json!({ "content": final_content, "input": input }),
+            chat_response_payload(&final_content, input, request_id),
         );
         self.bus.publish(
             topic::CHAT,
@@ -402,12 +510,20 @@ impl ChatEngine {
     ///
     /// `reason` is `"closing"` (the farewell state machine) or `"declined"`
     /// (the reply itself asked for silence).
-    fn publish_silence(&self, input: &str, reason: &str, speaker: Option<&str>) {
-        tracing::info!(reason, input = %input, "npc-talk: staying silent this turn");
+    ///
+    /// Carries `request_id` the same as the spoken-reply path: a turn the
+    /// NPC deliberately left unanswered still *ends* the request a WS client
+    /// may be blocked on (npc-server's `bus_forward` turns `chat_silent` into
+    /// the WS `response` frame same as `chat_response` does — see its
+    /// handling of `msg::CHAT_SILENT`). Forgetting to thread it through here
+    /// specifically would leave that client's `input` waiting forever
+    /// whenever the NPC's answer to it was silence.
+    fn publish_silence(&self, input: &str, reason: &str, speaker: Option<&str>, request_id: Option<&str>) {
+        tracing::info!(reason, input = %input, request_id = ?request_id, "npc-talk: staying silent this turn");
         self.bus.publish(
             topic::CHAT,
             msg::CHAT_SILENT,
-            serde_json::json!({ "reason": reason, "input": input }),
+            chat_silent_payload(input, reason, request_id),
         );
         self.bus.publish(topic::CHAT, msg::CHAT_LOG, chat_log_payload(input, "", speaker));
     }
@@ -440,7 +556,11 @@ impl ChatEngine {
         if !person_memory.is_empty() {
             vars.insert("person_memory".to_string(), person_memory.to_string());
         }
-        vars.insert("persona".to_string(), self.persona.clone().unwrap_or_default());
+        // `persona` is deliberately not filled in here: unlike the plain
+        // `&str` snapshots above, it can change concurrently via
+        // `set_persona`, so the caller inserts it straight from the same
+        // `ChatState` guard it already holds rather than this function
+        // taking a fourth snapshot parameter that could drift from it.
         vars
     }
 
@@ -474,6 +594,35 @@ fn chat_log_payload(input: &str, output: &str, speaker: Option<&str>) -> serde_j
     });
     if let Some(speaker) = speaker {
         payload["speaker"] = serde_json::Value::String(speaker.to_string());
+    }
+    payload
+}
+
+/// Build the `topic::CHAT`/`msg::CHAT_RESPONSE` payload, carrying the WS
+/// API's per-request `request_id` along the same way [`chat_log_payload`]
+/// carries `speaker`: present (as a sibling of the existing `content`/`input`
+/// keys, matching the field npc-server's `ws.rs` stamps onto the incoming
+/// `agent:sense`/`speech` payload) only when this turn was requested by a
+/// client, omitted entirely otherwise. npc-server's `bus_forward` reads a
+/// missing field as "no client is waiting on this reply" — a self-initiated
+/// turn (scheduler announcement, vision remark) must produce exactly that,
+/// not an empty-string id that would misread as a real (if blank) request.
+fn chat_response_payload(content: &str, input: &str, request_id: Option<&str>) -> serde_json::Value {
+    let mut payload = serde_json::json!({ "content": content, "input": input });
+    if let Some(request_id) = request_id {
+        payload["request_id"] = serde_json::Value::String(request_id.to_string());
+    }
+    payload
+}
+
+/// Same treatment as [`chat_response_payload`], for the `chat_silent` side
+/// of a turn (see [`ChatEngine::publish_silence`]): a request the NPC
+/// answered with silence still needs its `request_id` released back to
+/// npc-server so a waiting WS client isn't left hanging forever.
+fn chat_silent_payload(input: &str, reason: &str, request_id: Option<&str>) -> serde_json::Value {
+    let mut payload = serde_json::json!({ "reason": reason, "input": input });
+    if let Some(request_id) = request_id {
+        payload["request_id"] = serde_json::Value::String(request_id.to_string());
     }
     payload
 }
@@ -616,6 +765,38 @@ mod tests {
         assert!(payload.get("speaker").is_none());
     }
 
+    #[test]
+    fn chat_response_payload_includes_request_id_when_present() {
+        let payload = chat_response_payload("hello", "hi", Some("req-1"));
+        assert_eq!(payload["content"], "hello");
+        assert_eq!(payload["input"], "hi");
+        assert_eq!(payload["request_id"], "req-1");
+    }
+
+    #[test]
+    fn chat_response_payload_omits_request_id_field_when_absent() {
+        // No client is waiting on a self-initiated turn, so the field must
+        // be missing entirely rather than an empty-string placeholder —
+        // npc-server's bus_forward reads a missing field as "nobody to
+        // reply to".
+        let payload = chat_response_payload("hello", "hi", None);
+        assert!(payload.get("request_id").is_none());
+    }
+
+    #[test]
+    fn chat_silent_payload_includes_request_id_when_present() {
+        let payload = chat_silent_payload("hi", "declined", Some("req-2"));
+        assert_eq!(payload["reason"], "declined");
+        assert_eq!(payload["input"], "hi");
+        assert_eq!(payload["request_id"], "req-2");
+    }
+
+    #[test]
+    fn chat_silent_payload_omits_request_id_field_when_absent() {
+        let payload = chat_silent_payload("hi", "declined", None);
+        assert!(payload.get("request_id").is_none());
+    }
+
     fn test_engine() -> ChatEngine {
         ChatEngine::new(
             npc_llm::LlmClient::new("http://localhost:0/v1", ""),
@@ -673,6 +854,98 @@ mod tests {
         // Both turns are still logged, so what was said is remembered even
         // though the second went unanswered.
         assert_eq!(types.iter().filter(|t| *t == msg::CHAT_LOG).count(), 2, "{types:?}");
+    }
+
+    /// The whole point of this plumbing: a WS client's `request_id` must
+    /// reach it back whichever way the turn ends. Drives the same two-turn
+    /// farewell sequence as the test above (forced-closure "answer" then
+    /// forced-closure "silence", both reachable with no LLM call), but reads
+    /// `request_id` back off each published payload instead of just counting
+    /// message types — `chat_silent` is the outcome most likely to be
+    /// forgotten, so it gets its own assertion here rather than being
+    /// lumped in with the spoken reply.
+    #[tokio::test]
+    async fn request_id_survives_to_both_chat_response_and_chat_silent() {
+        let bus = npc_core::Bus::new();
+        let engine = ChatEngine::new(
+            npc_llm::LlmClient::new("http://localhost:0/v1", ""),
+            "test-model".to_string(),
+            Vec::new(),
+            String::new(),
+            10,
+            crate::tools::ToolRegistry::new(),
+            None,
+            "auto",
+            bus.clone(),
+            npc_core::config::AffectConfig::default(),
+            true,
+            true,
+        );
+        let mut rx = bus.subscribe();
+
+        // Two distinct ids, one per turn — each must come back attached to
+        // the reply *it* produced, not the other turn's.
+        engine.chat_with_context("じゃあね", None, Some("req-1")).await.unwrap();
+        engine.chat_with_context("うん", None, Some("req-2")).await.unwrap();
+
+        let messages: Vec<npc_core::BusMessage> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+
+        let response = messages
+            .iter()
+            .find(|m| m.env.r#type == msg::CHAT_RESPONSE)
+            .expect("the farewell should have produced a chat_response");
+        assert_eq!(response.env.payload["request_id"], "req-1");
+
+        let silent = messages
+            .iter()
+            .find(|m| m.env.r#type == msg::CHAT_SILENT)
+            .expect("the ack should have produced a chat_silent");
+        assert_eq!(
+            silent.env.payload["request_id"], "req-2",
+            "a turn answered with silence still has to release the client waiting on it"
+        );
+    }
+
+    /// The other half of the contract: a turn nobody requested (this test
+    /// stands in for a scheduler announcement or a vision-triggered remark)
+    /// must publish *no* `request_id` field at all, on either outcome —
+    /// not `null`, not `""`. npc-server's bus_forward treats a missing field
+    /// as "nobody is waiting", which is the truth for this turn.
+    #[tokio::test]
+    async fn absent_request_id_publishes_no_request_id_field_on_either_outcome() {
+        let bus = npc_core::Bus::new();
+        let engine = ChatEngine::new(
+            npc_llm::LlmClient::new("http://localhost:0/v1", ""),
+            "test-model".to_string(),
+            Vec::new(),
+            String::new(),
+            10,
+            crate::tools::ToolRegistry::new(),
+            None,
+            "auto",
+            bus.clone(),
+            npc_core::config::AffectConfig::default(),
+            true,
+            true,
+        );
+        let mut rx = bus.subscribe();
+
+        engine.chat_with_context("じゃあね", None, None).await.unwrap();
+        engine.chat_with_context("うん", None, None).await.unwrap();
+
+        let messages: Vec<npc_core::BusMessage> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+
+        let response = messages
+            .iter()
+            .find(|m| m.env.r#type == msg::CHAT_RESPONSE)
+            .expect("the farewell should have produced a chat_response");
+        assert!(response.env.payload.get("request_id").is_none());
+
+        let silent = messages
+            .iter()
+            .find(|m| m.env.r#type == msg::CHAT_SILENT)
+            .expect("the ack should have produced a chat_silent");
+        assert!(silent.env.payload.get("request_id").is_none());
     }
 
     #[tokio::test]
@@ -736,5 +1009,76 @@ mod tests {
         let vars = engine.build_vars("", "", "太郎: 犬好き");
         let tpl = "Person: {{person_memory}}";
         assert_eq!(fill_template(tpl, &vars), "Person: 太郎: 犬好き");
+    }
+
+    /// A turn that fails outright publishes neither `chat_response` nor
+    /// `chat_silent`, so without `chat_error` the client that asked for it
+    /// waits on a `response` frame that never comes. `test_engine`'s endpoint
+    /// (`localhost:0`) is unreachable, so an ordinary utterance — unlike the
+    /// forced-closure farewell above, which returns before any LLM call —
+    /// fails inside the turn and exercises exactly that path.
+    #[tokio::test]
+    async fn a_failed_turn_reports_the_error_to_its_requester() {
+        let bus = npc_core::Bus::new();
+        let engine = ChatEngine::new(
+            npc_llm::LlmClient::new("http://localhost:0/v1", ""),
+            "test-model".to_string(),
+            Vec::new(),
+            String::new(),
+            10,
+            crate::tools::ToolRegistry::new(),
+            None,
+            "auto",
+            bus.clone(),
+            npc_core::config::AffectConfig::default(),
+            true,
+            true,
+        );
+        let mut rx = bus.subscribe();
+
+        assert!(
+            engine.chat_with_context("こんにちは", None, Some("req-7")).await.is_err(),
+            "an unreachable endpoint must surface as an error, not a reply"
+        );
+
+        let errors: Vec<npc_core::BusMessage> = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter(|m| m.env.r#type == msg::CHAT_ERROR)
+            .collect();
+        assert_eq!(errors.len(), 1, "exactly one failure report per failed turn");
+        assert_eq!(errors[0].env.payload["request_id"], "req-7");
+        assert!(
+            errors[0].env.payload["message"].as_str().is_some_and(|m| !m.is_empty()),
+            "the report has to say something about what went wrong"
+        );
+    }
+
+    /// The mirror of the above: a failed turn nobody requested has no client
+    /// to release, so it stays a log line rather than becoming a frame
+    /// broadcast at every connected tab.
+    #[tokio::test]
+    async fn a_failed_self_initiated_turn_reports_nothing() {
+        let bus = npc_core::Bus::new();
+        let engine = ChatEngine::new(
+            npc_llm::LlmClient::new("http://localhost:0/v1", ""),
+            "test-model".to_string(),
+            Vec::new(),
+            String::new(),
+            10,
+            crate::tools::ToolRegistry::new(),
+            None,
+            "auto",
+            bus.clone(),
+            npc_core::config::AffectConfig::default(),
+            true,
+            true,
+        );
+        let mut rx = bus.subscribe();
+
+        assert!(engine.chat_with_context("こんにちは", None, None).await.is_err());
+
+        assert!(
+            std::iter::from_fn(|| rx.try_recv().ok()).all(|m| m.env.r#type != msg::CHAT_ERROR),
+            "no requester means nobody to report to"
+        );
     }
 }

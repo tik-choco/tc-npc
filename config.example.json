@@ -173,7 +173,8 @@
     "auto_open": true
   },
   "character": {
-    "active_id": ""
+    "active_id": "",
+    "avatar_file": ""
   },
   "mist": {
     "enabled": false,

@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Serialize;
@@ -21,17 +21,32 @@ struct CharacterSummary {
     id: String,
     name: String,
     active: bool,
+    /// The character's assigned VRM (`{"kind","file"}`), or null. The キャラ
+    /// tab shows which model each character uses, so this rides along with
+    /// the list rather than needing a per-character fetch.
+    avatar: Option<npc_core::Avatar>,
+}
+
+/// The `{"id","name","avatar"}` shape `/api/state` and the character list
+/// use for a character reference. `avatar` is the character's *own*
+/// assignment, which is not necessarily the model on screen — see
+/// [`crate::ws::avatar_ref`] for that.
+fn character_json(c: &npc_core::Character) -> Value {
+    json!({ "id": c.id, "name": c.sheet.name, "avatar": c.avatar })
 }
 
 pub async fn api_state(State(state): State<AppState>) -> impl IntoResponse {
     let character = npc_core::active_character(&state.ctx.data_dir, &state.current_config())
         .ok()
         .flatten()
-        .map(|c| json!({ "id": c.id, "name": c.sheet.name }));
+        .map(|c| character_json(&c));
 
     Json(json!({
         "modules": module_flags(&state.current_config()),
         "character": character,
+        // Resolved the same way as the `hello` frame's, so a page load and a
+        // socket connect never disagree about which model to show.
+        "avatar": crate::ws::avatar_ref(&state),
         "addr": state.addr,
     }))
 }
@@ -349,6 +364,7 @@ pub async fn api_list_characters(State(state): State<AppState>) -> Response {
                     active: &c.id == active_id,
                     id: c.id,
                     name: c.sheet.name,
+                    avatar: c.avatar,
                 })
                 .collect();
             Json(out).into_response()
@@ -377,12 +393,13 @@ pub async fn api_import_characters(State(state): State<AppState>, body: String) 
     Json(out).into_response()
 }
 
-pub async fn api_activate_character(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+/// Read-modify-write one field of the config file's `character` section,
+/// preserving every other field (including ones this build doesn't know
+/// about); falls back to a full rewrite of the current in-memory config if
+/// the file is missing or unreadable. Returns an error message on failure.
+fn write_character_config_field(state: &AppState, key: &str, value: Value) -> Result<(), String> {
     let path = &state.ctx.config_path;
 
-    // Read-modify-write the config file on disk, preserving unknown fields
-    // where possible; fall back to a full rewrite of the current in-memory
-    // config (with the new active_id) if the file is missing or unreadable.
     let mut doc: Value = std::fs::read_to_string(path)
         .ok()
         .and_then(|data| serde_json::from_str(&data).ok())
@@ -396,34 +413,311 @@ pub async fn api_activate_character(State(state): State<AppState>, Path(id): Pat
     if !character.is_object() {
         *character = json!({});
     }
-    character
-        .as_object_mut()
-        .unwrap()
-        .insert("active_id".to_string(), json!(id));
+    character.as_object_mut().unwrap().insert(key.to_string(), value);
 
-    let pretty = match serde_json::to_string_pretty(&doc) {
-        Ok(s) => s,
-        Err(err) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
-    };
-    if let Err(err) = std::fs::write(path, pretty) {
-        return error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("failed to write {}: {err}", path.display()),
-        );
+    let pretty = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
+    std::fs::write(path, pretty).map_err(|e| format!("failed to write {}: {e}", path.display()))
+}
+
+pub async fn api_activate_character(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    if let Err(err) = write_character_config_field(&state, "active_id", json!(id)) {
+        return error_response(StatusCode::INTERNAL_SERVER_ERROR, err);
     }
 
     // Keep the served config in sync so `GET /api/config` and the character
-    // list's `active` flags reflect the activation without a restart (the
-    // talk engine's persona still requires one).
+    // list's `active` flags reflect the activation without a restart.
     let mut updated = (*state.current_config()).clone();
     updated.character.active_id = id;
-    state.set_current_config(updated);
 
-    Json(json!({ "ok": true, "note": "restart required" })).into_response()
+    // Publish the full config on `npc:config`, exactly as `api_put_config`
+    // does, so npc-talk's persona hot-reload sees the new `active_id` and
+    // switches immediately — this is what removes the restart requirement
+    // the response used to warn about. `broadcast_avatar` below is a
+    // separate, WS-only notification for the model on screen; it was never
+    // the thing standing between this endpoint and "no restart needed".
+    state
+        .ctx
+        .bus
+        .publish(npc_core::topic::CONFIG, npc_core::msg::CONFIG_UPDATED, &updated);
+    state.set_current_config(updated);
+    // Which character is active decides which avatar resolves, so this can
+    // change the model on screen even though nothing about the models moved.
+    broadcast_avatar(&state);
+
+    Json(json!({ "ok": true, "note": "persona and avatar switched immediately; no restart required" })).into_response()
+}
+
+/// Body for `PUT /api/vrm/default`. `null`/`""` clears the default avatar.
+#[derive(serde::Deserialize)]
+struct SetDefaultAvatarRequest {
+    #[serde(default)]
+    file: Option<String>,
+}
+
+/// `PUT /api/vrm/default`: set the avatar shown when no active character
+/// supplies one (`config.character.avatar_file`).
+///
+/// This is what makes a VRM usable on its own. tc-npc holds a conversation
+/// with no character sheet loaded, so gating the avatar behind "import a
+/// tc-town export, then assign" would put a step in front of the one thing
+/// the feature is for — importing a model and talking to it.
+pub async fn api_set_default_avatar(State(state): State<AppState>, body: String) -> Response {
+    let req: SetDefaultAvatarRequest = match serde_json::from_str(&body) {
+        Ok(r) => r,
+        Err(err) => return error_response(StatusCode::BAD_REQUEST, format!("invalid JSON: {err}")),
+    };
+
+    let file = req.file.unwrap_or_default();
+    let file = file.trim().to_string();
+    if !file.is_empty() {
+        match npc_core::vrm_exists(&state.ctx.data_dir, &file) {
+            Ok(true) => {}
+            Ok(false) => return error_response(StatusCode::NOT_FOUND, format!("vrm not found: {file}")),
+            Err(err) => return error_response(vrm_error_status(&err), err.to_string()),
+        }
+    }
+
+    if let Err(err) = write_character_config_field(&state, "avatar_file", json!(file)) {
+        return error_response(StatusCode::INTERNAL_SERVER_ERROR, err);
+    }
+
+    // Served config kept in sync so the next `hello` (and `GET /api/vrm`'s
+    // `default`) reflect the change without a restart — the avatar is a
+    // browser-side concern, so nothing else has to reload for it.
+    let mut updated = (*state.current_config()).clone();
+    updated.character.avatar_file = file.clone();
+    state.set_current_config(updated);
+    broadcast_avatar(&state);
+
+    Json(json!({ "ok": true, "file": file })).into_response()
 }
 
 fn error_response(status: StatusCode, message: String) -> Response {
     (status, Json(json!({ "error": message }))).into_response()
+}
+
+// ---------------------------------------------------------------------
+// /api/vrm — the local VRM model folder
+// ---------------------------------------------------------------------
+
+/// Tell every open tab which model to display now.
+///
+/// Called after anything that can change the answer: assigning or clearing a
+/// character's avatar, changing the standalone default, or activating a
+/// different character. Without it the avatar would only ever arrive in
+/// `hello`, so a tab that was already open when the model was chosen would
+/// sit with its avatar layout disabled until reloaded — which is exactly how
+/// it first behaved.
+fn broadcast_avatar(state: &AppState) {
+    state.hub.broadcast(&crate::protocol::ServerMsg::Avatar {
+        avatar: crate::ws::avatar_ref(state),
+    });
+}
+
+/// A name that failed [`npc_core::vrm::validate_vrm_file_name`] is a client
+/// mistake (a crafted URL, or a file the user tried to add that isn't a
+/// `.vrm`), not a server fault — same split as `person_error_status`.
+fn vrm_error_status(err: &anyhow::Error) -> StatusCode {
+    let text = err.to_string();
+    if text.contains("invalid vrm file name") || text.contains("not a .vrm file") {
+        StatusCode::BAD_REQUEST
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    }
+}
+
+/// `GET /api/vrm`: every `.vrm` in `{data_dir}/vrm/`. The folder *is* the
+/// library — a model dropped in there by hand appears here with no import
+/// step — so this is a plain directory listing, not a database read.
+pub async fn api_list_vrm(State(state): State<AppState>) -> Response {
+    match npc_core::list_vrm_models(&state.ctx.data_dir) {
+        Ok(models) => Json(json!({
+            "models": models,
+            "dir": npc_core::vrm_dir(&state.ctx.data_dir),
+            // The standalone default (`config.character.avatar_file`), so the
+            // キャラ tab can mark which model is in use with no character.
+            "default": state.current_config().character.avatar_file,
+        }))
+        .into_response(),
+        Err(err) => error_response(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+    }
+}
+
+/// `Cache-Control` sent with model bytes and with their `304`s alike.
+///
+/// `no-cache` does *not* mean "don't cache" (that's `no-store`) — per RFC
+/// 7234 it means "cache it, but always revalidate with the server before
+/// using the cached copy." Paired with the strong `ETag` below, that
+/// revalidation is a bodyless `304` when nothing changed, so this keeps the
+/// cheap-repeat-load win of the old `max-age=3600` while fixing what that
+/// value actually got wrong: with only a `max-age`, overwriting a model
+/// under its existing file name (the キャラ tab's replace-by-upload path)
+/// left every tab showing the stale bytes for up to an hour with no way to
+/// notice, because the browser had no reason to even ask. A short `max-age`
+/// would only narrow that window, not close it — `no-cache` closes it,
+/// because every load now asks.
+const VRM_FILE_CACHE_CONTROL: &str = "private, no-cache";
+
+/// Build a strong, quoted `ETag` from a model's size and modified time —
+/// enough to change whenever the bytes could have (including a same-size
+/// overwrite), without reading the file itself. Hex is just a compact,
+/// opaque encoding; nothing about the value is meant to be parsed back.
+fn vrm_etag(stat: &npc_core::vrm::VrmFileStat) -> String {
+    let modified = stat.modified.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    format!("\"{:x}-{:x}-{:x}\"", stat.size, modified.as_secs(), modified.subsec_nanos())
+}
+
+/// Whether the raw `If-None-Match` header value covers `etag`: either the
+/// wildcard `*`, or `etag` appearing among the header's comma-separated list
+/// (per RFC 7232 §3.2), ignoring a leading `W/` weak-validator marker on
+/// each candidate — we only ever hand out strong tags, but a client is free
+/// to echo one back marked weak.
+fn if_none_match_covers(if_none_match: &str, etag: &str) -> bool {
+    if if_none_match.trim() == "*" {
+        return true;
+    }
+    if_none_match
+        .split(',')
+        .any(|candidate| candidate.trim().trim_start_matches("W/") == etag)
+}
+
+/// `GET /api/vrm/file/:file`: the raw model bytes, for the browser's VRM
+/// loader. Served from disk, but conditionally: the response carries a
+/// strong `ETag` built from the file's size and modified time
+/// ([`vrm_etag`]), and a request whose `If-None-Match` already covers that
+/// tag gets back a bodyless `304` instead of the file. This is what makes
+/// [`VRM_FILE_CACHE_CONTROL`]'s "revalidate every time" affordable — most
+/// loads cost one small round trip instead of 10-50MB — and, more
+/// importantly, what makes a replaced model show up on the very next load.
+///
+/// The `304` branch deliberately never calls [`npc_core::read_vrm`]:
+/// building the validator only needs a stat, and reading megabytes of bytes
+/// just to discard them would defeat the entire point of this handler.
+pub async fn api_get_vrm_file(State(state): State<AppState>, Path(file): Path<String>, headers: HeaderMap) -> Response {
+    let stat = match npc_core::vrm::vrm_file_stat(&state.ctx.data_dir, &file) {
+        Ok(Some(stat)) => stat,
+        Ok(None) => return error_response(StatusCode::NOT_FOUND, format!("vrm not found: {file}")),
+        Err(err) => return error_response(vrm_error_status(&err), err.to_string()),
+    };
+    let etag = vrm_etag(&stat);
+
+    let not_modified = headers
+        .get(axum::http::header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| if_none_match_covers(v, &etag));
+    if not_modified {
+        return (
+            StatusCode::NOT_MODIFIED,
+            [
+                (axum::http::header::ETAG, etag),
+                (axum::http::header::CACHE_CONTROL, VRM_FILE_CACHE_CONTROL.to_string()),
+            ],
+        )
+            .into_response();
+    }
+
+    match npc_core::read_vrm(&state.ctx.data_dir, &file) {
+        Ok(Some(bytes)) => (
+            [
+                (axum::http::header::CONTENT_TYPE, "model/gltf-binary".to_string()),
+                (axum::http::header::CACHE_CONTROL, VRM_FILE_CACHE_CONTROL.to_string()),
+                (axum::http::header::ETAG, etag),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Ok(None) => error_response(StatusCode::NOT_FOUND, format!("vrm not found: {file}")),
+        Err(err) => error_response(vrm_error_status(&err), err.to_string()),
+    }
+}
+
+/// `POST /api/vrm/:file`: copy an uploaded `.vrm` into the model folder.
+/// Purely a convenience over dropping the file in there by hand — the body
+/// is the raw model bytes, and an existing model of the same name is
+/// replaced (which is also what overwriting the file would do).
+pub async fn api_upload_vrm(
+    State(state): State<AppState>,
+    Path(file): Path<String>,
+    body: axum::body::Bytes,
+) -> Response {
+    if body.is_empty() {
+        return error_response(StatusCode::BAD_REQUEST, "empty request body".to_string());
+    }
+    match npc_core::save_vrm(&state.ctx.data_dir, &file, &body) {
+        Ok(model) => {
+            // Adding a model can make an avatar appear: a character (or the
+            // default) may already name this file, which until now resolved
+            // to nothing because the folder didn't have it.
+            broadcast_avatar(&state);
+            Json(model).into_response()
+        }
+        Err(err) => error_response(vrm_error_status(&err), err.to_string()),
+    }
+}
+
+/// `DELETE /api/vrm/:file`. Characters pointing at the deleted model are
+/// deliberately left alone: the avatar reference is by name, so restoring
+/// the file restores the avatar, and a dangling one already renders as the
+/// plain initial rather than an error.
+pub async fn api_delete_vrm(State(state): State<AppState>, Path(file): Path<String>) -> Response {
+    match npc_core::delete_vrm(&state.ctx.data_dir, &file) {
+        Ok(true) => {
+            // If this was the model on screen, the avatar has just become
+            // nothing — tabs showing it need to fall back now, not on reload.
+            broadcast_avatar(&state);
+            Json(json!({ "ok": true })).into_response()
+        }
+        Ok(false) => error_response(StatusCode::NOT_FOUND, format!("vrm not found: {file}")),
+        Err(err) => error_response(vrm_error_status(&err), err.to_string()),
+    }
+}
+
+/// Body for `PUT /api/characters/:id/avatar`. A `file` of `null` (or an
+/// empty string) clears the avatar — that's how the UI's "解除" acts, so it
+/// doesn't need a second endpoint.
+#[derive(serde::Deserialize)]
+struct SetAvatarRequest {
+    #[serde(default)]
+    file: Option<String>,
+}
+
+/// `PUT /api/characters/:id/avatar`: point a character at a model in the
+/// folder (or clear the pointer). The model must already be in the library —
+/// assigning a name that isn't there would store a reference that can never
+/// resolve, which is worth rejecting at the point the user can still fix it.
+pub async fn api_set_character_avatar(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    body: String,
+) -> Response {
+    let req: SetAvatarRequest = match serde_json::from_str(&body) {
+        Ok(r) => r,
+        Err(err) => return error_response(StatusCode::BAD_REQUEST, format!("invalid JSON: {err}")),
+    };
+
+    let mut character = match npc_core::load_character(&state.ctx.data_dir, &id) {
+        Ok(c) => c,
+        Err(err) => return error_response(StatusCode::NOT_FOUND, err.to_string()),
+    };
+
+    let file = req.file.unwrap_or_default();
+    let file = file.trim();
+    if file.is_empty() {
+        character.avatar = None;
+    } else {
+        match npc_core::vrm_exists(&state.ctx.data_dir, file) {
+            Ok(true) => {}
+            Ok(false) => return error_response(StatusCode::NOT_FOUND, format!("vrm not found: {file}")),
+            Err(err) => return error_response(vrm_error_status(&err), err.to_string()),
+        }
+        character.avatar = Some(npc_core::Avatar::vrm(file));
+    }
+
+    if let Err(err) = npc_core::save_character(&state.ctx.data_dir, &character) {
+        return error_response(StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
+    }
+    broadcast_avatar(&state);
+    Json(character_json(&character)).into_response()
 }
 
 // ---------------------------------------------------------------------
@@ -536,6 +830,53 @@ fn person_memories(data_dir: &std::path::Path, person_id: &str) -> Vec<Value> {
         .into_iter()
         .map(|r| json!({ "docId": r.doc_id, "text": r.text, "createdAt": format_created_at(r.created_at) }))
         .collect()
+}
+
+// ---------------------------------------------------------------------
+// GET /api/affect/history
+// ---------------------------------------------------------------------
+
+/// Select the most recent `limit` entries from `history` (already
+/// oldest-first), preserving that ordering. A `limit` at or beyond the
+/// history's own length returns the whole thing unchanged — this is what
+/// makes an *omitted* query parameter behave as "everything currently held"
+/// once `api_affect_history` defaults it to the buffer's own cap.
+fn recent_affect_entries(
+    history: &std::collections::VecDeque<crate::bus_forward::AffectHistoryEntry>,
+    limit: usize,
+) -> Vec<crate::bus_forward::AffectHistoryEntry> {
+    let skip = history.len().saturating_sub(limit);
+    history.iter().skip(skip).cloned().collect()
+}
+
+/// `GET /api/affect/history?limit=N`: the server's rolling buffer of recent
+/// `affect` snapshots (see `bus_forward::AFFECT_HISTORY_CAP`), returned
+/// oldest-first / newest-last — the same order `GET /api/chat/history`
+/// promises, and for the same reason: the caller (the 感情 tab's sparkline)
+/// wants to append these in front of its live frames, not sort them itself.
+///
+/// This endpoint exists because the browser's own affect history
+/// (`useNpcSocket`'s `affectHistory`) is filled only by live `affect` WS
+/// frames and starts empty on every page load — the trend line the 感情 tab
+/// exists to show would otherwise stay blank until the NPC spoke again.
+///
+/// `limit` defaults to, and is clamped to, `bus_forward::AFFECT_HISTORY_CAP`:
+/// the buffer itself never holds more entries than that, so a larger
+/// requested limit could never be satisfied anyway and an omitted one simply
+/// means "everything you have."
+///
+/// Always 200: an empty buffer (fresh process, nobody has spoken yet) is a
+/// normal state, not an error — matching `api_memory`'s contract.
+pub async fn api_affect_history(State(state): State<AppState>, Query(params): Query<HashMap<String, String>>) -> Response {
+    let limit = params
+        .get("limit")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(crate::bus_forward::AFFECT_HISTORY_CAP)
+        .min(crate::bus_forward::AFFECT_HISTORY_CAP);
+
+    let history = state.affect_history.lock().unwrap();
+    let entries = recent_affect_entries(&history, limit);
+    Json(json!({ "entries": entries })).into_response()
 }
 
 // ---------------------------------------------------------------------
@@ -1129,5 +1470,51 @@ mod tests {
         let entry = chat_entry("2026-07-26T00:00:00Z", Some("太郎"), "hi", "hello");
         let wire = chat_log_entry_to_wire(&entry);
         assert_eq!(wire["speaker"], "太郎");
+    }
+
+    // -------------------------------------------------------------
+    // /api/affect/history
+    // -------------------------------------------------------------
+
+    fn affect_entry(ts: i64) -> crate::bus_forward::AffectHistoryEntry {
+        crate::bus_forward::AffectHistoryEntry {
+            ts,
+            familiarity: 0.5,
+            closing: false,
+            invite_caution: false,
+            partner: None,
+            partner_known: false,
+            partner_switched: false,
+            partner_away: false,
+            drives: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn recent_affect_entries_returns_everything_when_limit_covers_all() {
+        let history: std::collections::VecDeque<_> = (1..=3).map(affect_entry).collect();
+        let out = recent_affect_entries(&history, 10);
+        assert_eq!(out.iter().map(|e| e.ts).collect::<Vec<_>>(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn recent_affect_entries_keeps_newest_tail_oldest_first() {
+        let history: std::collections::VecDeque<_> = (1..=5).map(affect_entry).collect();
+        let out = recent_affect_entries(&history, 2);
+        // Entries 4 and 5 are the most recent, and still appear oldest-first.
+        assert_eq!(out.iter().map(|e| e.ts).collect::<Vec<_>>(), vec![4, 5]);
+    }
+
+    #[test]
+    fn recent_affect_entries_limit_zero_returns_empty() {
+        let history: std::collections::VecDeque<_> = (1..=3).map(affect_entry).collect();
+        assert!(recent_affect_entries(&history, 0).is_empty());
+    }
+
+    #[test]
+    fn recent_affect_entries_on_empty_history_returns_empty() {
+        let history: std::collections::VecDeque<crate::bus_forward::AffectHistoryEntry> =
+            std::collections::VecDeque::new();
+        assert!(recent_affect_entries(&history, 60).is_empty());
     }
 }

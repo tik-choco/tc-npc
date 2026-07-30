@@ -9,11 +9,12 @@ pub mod config;
 pub mod module;
 pub mod osc;
 pub mod person;
+pub mod vrm;
 
 pub use bus::{msg, topic, Bus, BusMessage, Envelope};
 pub use character::{
     active_character, import_tc_town_export, list_characters, load_character, persona_prompt,
-    save_character, Character, CharacterSheet,
+    save_character, Avatar, Character, CharacterSheet,
 };
 pub use chatlog::ChatLogEntry;
 pub use config::{
@@ -24,3 +25,4 @@ pub use person::{
     delete_person, find_person, list_people, load_person, new_person, normalize_person_name,
     people_dir, person_to_wire, save_person, Person, PersonFact,
 };
+pub use vrm::{delete_vrm, list_vrm_models, read_vrm, save_vrm, vrm_dir, vrm_exists, VrmModel};

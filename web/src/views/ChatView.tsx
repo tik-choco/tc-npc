@@ -23,6 +23,18 @@
 // be rejoined from the floating jump button once the reader has scrolled
 // away from it.
 //
+// The same view has two layouts, picked by the toolbar's segmented control
+// and carried in the URL (`#/chat/<panel>` vs `#/chat/<panel>/avatar`):
+// - `chat` (default) is everything described above — the transcript leads.
+// - `avatar` re-stacks the same pieces around the active character's VRM:
+//   the model fills the main column and the toolbar/transcript/composer
+//   float over it (see styles/avatar.css). Nothing about the conversation
+//   itself changes — it is the same transcript, the same composer and the
+//   same socket, just arranged so the character is what you look at.
+// The avatar layout is only offered when the active character actually has a
+// VRM assigned; without one the control is disabled and the layout falls
+// back to `chat`, so a fresh install never lands on an empty stage.
+//
 // The header's 音声開始/停止 toggle is the cascade voice loop's master switch
 // (mic -> VAD/STT -> talk -> TTS, all server-side in npc-speech). It sends
 // `voiceStart`/`voiceStop` and renders `voiceActive` back from the server
@@ -39,6 +51,7 @@ import {
   Check,
   Copy,
   Ear,
+  ExternalLink,
   Eye,
   Languages,
   MessageSquare,
@@ -46,6 +59,7 @@ import {
   Mic,
   MicOff,
   OctagonX,
+  PersonStanding,
   SendHorizontal,
   UserRound,
 } from "lucide-preact";
@@ -58,13 +72,19 @@ import type {
 } from "../hooks/useNpcSocket";
 import { useAutoScroll } from "../hooks/useAutoScroll";
 import type { ConnectionState } from "../lib/ws";
-import type { ChatPanel } from "../lib/router";
+import type { ChatLayout, ChatPanel } from "../lib/router";
+import type { AvatarRef, CharacterRef } from "../lib/types";
+import type { SpeakingLevelReading } from "../vrm/level";
 import { ConnectionStatus } from "../components/ConnectionStatus";
 import { ChatSidebar } from "../components/ChatSidebar";
+import { VrmStage } from "../components/VrmStage";
+import { emotionFromAffect } from "../lib/vrm-emotion";
 import { useI18n } from "../hooks/useI18n";
 import type { Lang, Translate } from "../lib/i18n";
+import { AvatarStatusBadge, deriveAvatarStatus } from "./AvatarView";
 import "../styles/components.css";
 import "../styles/chat.css";
+import "../styles/avatar.css";
 
 /** An `ErrorEntry` reshaped to slot into the transcript alongside
  *  `TimelineEntry`, ordered by the same monotonic id sequence. */
@@ -567,13 +587,55 @@ function VoiceToggle({
   );
 }
 
+/** Transcript-led vs avatar-led layout. Disabled (and pinned to the
+ *  transcript) when the active character has no VRM to show — an empty stage
+ *  would just be a worse chat screen. */
+function LayoutToggle({
+  layout,
+  available,
+  onChange,
+  t,
+}: {
+  layout: ChatLayout;
+  available: boolean;
+  onChange: (layout: ChatLayout) => void;
+  t: Translate;
+}) {
+  return (
+    <div class="chat-layout-toggle" role="group" aria-label={t("chat.layout.label")}>
+      <button
+        type="button"
+        aria-pressed={layout === "chat"}
+        onClick={() => onChange("chat")}
+        title={t("chat.layout.chat")}
+      >
+        <MessageSquare size={13} />
+        {t("chat.layout.chat")}
+      </button>
+      <button
+        type="button"
+        aria-pressed={layout === "avatar"}
+        disabled={!available}
+        onClick={() => onChange("avatar")}
+        title={available ? t("chat.layout.avatar") : t("chat.layout.unavailable")}
+      >
+        <PersonStanding size={13} />
+        {t("chat.layout.avatar")}
+      </button>
+    </div>
+  );
+}
+
 export interface ChatViewProps {
   entries: TimelineEntry[];
   errors: ErrorEntry[];
   pending: boolean;
   connectionState: ConnectionState;
   version: string | null;
-  character: { id: string; name: string } | null;
+  character: CharacterRef | null;
+  /** The VRM to display, or null. Independent of `character` — the avatar
+   *  layout works with no character sheet loaded. */
+  avatar: AvatarRef | null;
   modules: Record<string, boolean>;
   /** Latest affect frame, shown condensed in the sidebar's 状態 panel so the
    *  NPC's current internal state is readable without leaving the
@@ -584,9 +646,24 @@ export interface ChatViewProps {
   translations: TranslationEntry[];
   /** Server-reported position of the voice loop's 開始/停止 switch. */
   voiceActive: boolean;
+  /** Whether the server acknowledged the last 一時停止/再開 this UI sent —
+   *  forwarded to the sidebar's 音声 panel so those buttons show they landed.
+   *  Null until one has been sent. */
+  ttsSuspended: boolean | null;
+  /** Server-reported: the NPC's voice is audible on the host right now.
+   *  Drives the avatar's mouth — see `SpeakingMessage` for why the browser
+   *  can't work this out for itself. */
+  speaking: boolean;
+  /** Live loudness of the voice audible right now, shaping the avatar's
+   *  mouth openness while `speaking` is true. A ref rather than a value so
+   *  its ~20Hz updates don't re-render the transcript — see VrmStage. */
+  speakingLevelRef: { current: SpeakingLevelReading };
   /** Sidebar pill, routed as `#/chat/<panel>` — see lib/router.ts. */
   sidebarPanel: ChatPanel;
   onSidebarPanelChange: (panel: ChatPanel) => void;
+  /** Transcript-led or avatar-led, routed as the segment after the panel. */
+  layout: ChatLayout;
+  onLayoutChange: (layout: ChatLayout) => void;
   /** `speaker` names who is talking, which npc-talk uses to key the affect
    *  model per conversation partner. Omitted when the field is left blank. */
   onSend: (text: string, speaker?: string) => void;
@@ -604,14 +681,20 @@ export function ChatView({
   connectionState,
   version,
   character,
+  avatar: avatarModel,
   modules,
   affect,
   volume,
   ttsLines,
   translations,
   voiceActive,
+  ttsSuspended,
+  speaking,
+  speakingLevelRef,
   sidebarPanel,
   onSidebarPanelChange,
+  layout,
+  onLayoutChange,
   onSend,
   onInterrupt,
   onSuspend,
@@ -631,6 +714,20 @@ export function ChatView({
   const connected = connectionState === "open";
   const speaker = character?.name ?? t("chat.translation.source.agent");
   const avatar = initialOf(speaker);
+
+  // The avatar layout needs a model to show. With none assigned — no
+  // character avatar and no standalone default — the transcript layout holds
+  // no matter what the URL asked for, so a stale `#/chat/voice/avatar`
+  // bookmark can't strand the operator on an empty stage.
+  const avatarFile = avatarModel?.kind === "vrm" ? avatarModel.file : null;
+  const avatarLayout = layout === "avatar" && avatarFile !== null;
+  // Only recomputed when a new affect frame lands, not per render — the
+  // mapping walks all 22 drives.
+  const emotion = useMemo(() => emotionFromAffect(affect), [affect]);
+  // Same derivation the bare `#/avatar` window uses (see AvatarView.tsx's
+  // `deriveAvatarStatus`), so the two surfaces never disagree about what
+  // "listening"/"thinking"/"speaking" means for the same underlying frames.
+  const avatarStatus = deriveAvatarStatus({ voiceActive, pending, speaking });
 
   // Errors and translations share the same monotonic id sequence as timeline
   // entries (see useNpcSocket.ts — errors use it directly, translations via
@@ -701,8 +798,23 @@ export function ChatView({
       : t("chat.placeholder");
 
   return (
-    <div class="chat-view">
+    <div class={`chat-view${avatarLayout ? " chat-view--avatar" : ""}`}>
       <div class="chat-main">
+        {/* Behind the conversation, filling the column. Kept out of the tree
+            entirely (rather than hidden) in the transcript layout so an
+            unused WebGL context is never created. */}
+        {avatarLayout && avatarFile && (
+          <VrmStage
+            class="chat-avatar-stage"
+            file={avatarFile}
+            framing="full"
+            speaking={speaking}
+            speakingLevelRef={speakingLevelRef}
+            emotion={emotion}
+            interactive
+            initial={avatar}
+          />
+        )}
         <div class="chat-toolbar">
           <div class="chat-toolbar-identity">
             <span class="chat-avatar chat-avatar--lg" aria-hidden="true">
@@ -711,9 +823,39 @@ export function ChatView({
             <div class="chat-toolbar-text">
               <span class="chat-toolbar-name">{speaker}</span>
               <ConnectionStatus state={connectionState} />
+              {/* Same status pill as the `#/avatar` window (see
+                  AvatarView.tsx), folded into the identity row rather than
+                  floated over the model on its own: the toolbar already
+                  spans the full width up here, so a separately-positioned
+                  badge would either sit behind its plate or collide with
+                  chat-toolbar-actions on the other side. Only shown in the
+                  avatar-led layout — the transcript-led toolbar has no model
+                  for it to explain. */}
+              {avatarLayout && <AvatarStatusBadge status={avatarStatus} volume={volume} t={t} />}
             </div>
           </div>
           <div class="chat-toolbar-actions">
+            <LayoutToggle
+              layout={layout}
+              available={avatarFile !== null}
+              onChange={onLayoutChange}
+              t={t}
+            />
+            {avatarFile && (
+              // A plain link, not a button: the bare avatar screen is its own
+              // route, so this opens in a real window the operator can move
+              // to another monitor or point capture software at.
+              <a
+                class="btn btn-ghost btn-small"
+                href="#/avatar"
+                target="_blank"
+                rel="noreferrer"
+                title={t("chat.avatar.popout")}
+                aria-label={t("chat.avatar.popout")}
+              >
+                <ExternalLink size={14} />
+              </a>
+            )}
             <VoiceToggle
               active={voiceActive}
               volume={volume}
@@ -838,6 +980,7 @@ export function ChatView({
           volume={volume}
           ttsLines={ttsLines}
           voiceActive={voiceActive}
+          ttsSuspended={ttsSuspended}
           activePanel={sidebarPanel}
           onPanelChange={onSidebarPanelChange}
           onSuspend={onSuspend}

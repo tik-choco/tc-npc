@@ -24,6 +24,30 @@ pub struct CharacterRef {
     pub name: String,
 }
 
+/// The avatar model to display, as sent to the browser. `file` names an
+/// entry in the local model folder, fetched over `GET /api/vrm/file/:file`.
+///
+/// Deliberately a sibling of `character` rather than a field on it: which
+/// model is on screen is a display concern, and tc-npc chats perfectly well
+/// with no character sheet loaded. Requiring one just to show an avatar
+/// would mean importing a tc-town export before a VRM could be used at all.
+/// So this resolves to the active character's own avatar when there is one,
+/// and otherwise to `config.character.avatar_file`.
+#[derive(Debug, Clone, Serialize)]
+pub struct AvatarRef {
+    pub kind: String,
+    pub file: String,
+}
+
+impl From<npc_core::Avatar> for AvatarRef {
+    fn from(a: npc_core::Avatar) -> Self {
+        AvatarRef {
+            kind: a.kind,
+            file: a.file,
+        }
+    }
+}
+
 /// One drive's current reading within an `affect` frame's `drives` array.
 /// `key` is the contract's snake_case wire key (see
 /// `npc_talk::affect::DriveKey::as_str`), e.g. `"substance_p"`.
@@ -44,6 +68,10 @@ pub enum ServerMsg {
         version: String,
         modules: ModuleFlags,
         character: Option<CharacterRef>,
+        /// The model to display, resolved per [`AvatarRef`]. Sent in `hello`
+        /// so the (large) model can start loading before any REST call.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        avatar: Option<AvatarRef>,
     },
     #[serde(rename = "chat")]
     Chat { role: String, text: String, ts: i64 },
@@ -109,6 +137,29 @@ pub enum ServerMsg {
     Position { x: f64, y: f64, heading: f64 },
     #[serde(rename = "volume")]
     Volume { level: f64 },
+    /// The NPC's synthesized voice is (or is no longer) audible on the host's
+    /// speakers, published by npc-speech's playback thread. Drives the VRM
+    /// avatar's mouth: the browser is never sent the audio itself, so this is
+    /// the only signal that tracks the real voice. Sent only on transitions.
+    #[serde(rename = "speaking")]
+    Speaking { active: bool },
+    /// Continuous loudness (`0.0..=1.0`) of the clip `Speaking { active: true
+    /// }` is currently announcing, sampled from npc-speech's playback
+    /// position every ~50ms. `speaking` is the authoritative on/off edge —
+    /// it is sent only on a real transition and controls whether the mouth
+    /// animates at all — while this rides alongside it as the continuous
+    /// signal the VRM mouth actually tracks, so it moves with the real
+    /// envelope of the voice instead of a fixed sine wave for the clip's
+    /// whole duration.
+    #[serde(rename = "speakingLevel")]
+    SpeakingLevel { level: f64 },
+    /// Which model to display has changed — a VRM was assigned or cleared,
+    /// or a different character was activated. Broadcast so a tab that was
+    /// already open picks it up: `hello` carries the avatar only at connect
+    /// time, so without this the チャット tab would keep its avatar layout
+    /// disabled until a reload. `avatar` is null when there is none.
+    #[serde(rename = "avatar")]
+    Avatar { avatar: Option<AvatarRef> },
     /// Current state of the cascade voice loop's 開始/停止 switch. Sent to a
     /// client right after `hello` so its toggle starts in the right position,
     /// and broadcast on every change so every open tab agrees.
@@ -124,6 +175,28 @@ pub enum ServerMsg {
         #[serde(rename = "requestId")]
         request_id: String,
     },
+    /// Immediate ack that a viewer/platform `event` was received, mirroring
+    /// `inputAccepted`'s role for `input`. Carries `kind` back (not a
+    /// requestId — events don't get a `response` frame of their own, they
+    /// feed the same chat pipeline as an `input` under the hood) so an
+    /// extension juggling several event types can tell which ack is which.
+    #[serde(rename = "eventAccepted")]
+    EventAccepted { kind: String },
+    /// Immediate ack for `interrupt`. No fields: unlike `input`/`event` there
+    /// is nothing to echo back, `interrupt` is a bare signal.
+    #[serde(rename = "interruptAccepted")]
+    InterruptAccepted,
+    /// Immediate ack for `suspend`. Sent the instant the gate closes, not
+    /// once the current turn (if any) finishes — an extension waiting on
+    /// this to know its `suspend` was heard shouldn't have to wait out
+    /// whatever reply is already in flight.
+    #[serde(rename = "suspendAccepted")]
+    SuspendAccepted,
+    /// Immediate ack for `resume`. Sent before the queued `input`/`event`
+    /// backlog (see `ws::drain_suspend_queue`) is worked through, so an
+    /// extension polling for this doesn't have to wait for that replay too.
+    #[serde(rename = "resumeAccepted")]
+    ResumeAccepted,
     #[serde(rename = "response")]
     Response {
         #[serde(rename = "requestId")]
@@ -185,6 +258,18 @@ pub enum ClientMsg {
         text: Option<String>,
         #[serde(default)]
         amount: Option<f64>,
+        /// Subscription tier (`subscribe`/`resub`/`gift`) — see the extension
+        /// API spec's "`event` の `kind` 別フィールド" table.
+        #[serde(default)]
+        tier: Option<String>,
+        /// Free-text attached to the event: a `resub`/`cheer` comment, or a
+        /// channel-points redemption's user input.
+        #[serde(default)]
+        message: Option<String>,
+        /// The redeemed reward's name (`points` only), serde-renamed from
+        /// camelCase like `userName` above.
+        #[serde(rename = "rewardTitle", default)]
+        reward_title: Option<String>,
     },
 }
 

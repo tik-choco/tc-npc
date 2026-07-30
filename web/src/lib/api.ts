@@ -1,7 +1,15 @@
 // Thin REST client for the tc-npc server (same origin as the WS endpoint —
 // see vite.config.ts's dev proxy for the local-dev equivalent).
 import type { ScheduledActionEntry } from "./config-types";
-import type { CharacterSummary, ConfigDocument, MemoryDocument, PersonDetail, PersonRecord } from "./types";
+import type {
+  AffectHistoryDocument,
+  CharacterSummary,
+  ConfigDocument,
+  MemoryDocument,
+  PersonDetail,
+  PersonRecord,
+  VrmModel,
+} from "./types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, init);
@@ -68,10 +76,80 @@ export function activateCharacter(id: string): Promise<void> {
   return request(`/api/characters/${encodeURIComponent(id)}/activate`, { method: "POST" });
 }
 
+/**
+ * Point a character at a VRM in the server's model folder, or clear the
+ * assignment with `file: null`. The model has to already be in the folder —
+ * the server rejects a name that isn't there rather than storing a reference
+ * that could never resolve.
+ */
+export function setCharacterAvatar(id: string, file: string | null): Promise<CharacterSummary> {
+  return request(`/api/characters/${encodeURIComponent(id)}/avatar`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ file }),
+  });
+}
+
+// --- VRM model folder -------------------------------------------------
+//
+// tc-npc runs on the operator's own machine, so the model library is just
+// `{data_dir}/vrm/` — a `.vrm` copied in there by hand shows up in this
+// listing with no import step. `addVrmModel` is a convenience over doing
+// that copy from the browser, not a separate storage mechanism.
+
+/**
+ * Models in the folder, plus its absolute path (shown in the UI so the
+ * operator knows where to drop files without going through the browser) and
+ * the standalone default avatar's file name (`""` for none).
+ */
+export function getVrmModels(): Promise<{ models: VrmModel[]; dir: string; default: string }> {
+  return request("/api/vrm");
+}
+
+/**
+ * Set the avatar shown when no active character supplies one, or clear it
+ * with `file: null`. This is what makes a model usable on its own: the NPC
+ * chats with no character sheet loaded, so an avatar mustn't require
+ * importing a tc-town export first.
+ */
+export function setDefaultAvatar(file: string | null): Promise<{ ok: boolean; file: string }> {
+  return request("/api/vrm/default", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ file }),
+  });
+}
+
+/** Copy a `.vrm` into the model folder. The body is the raw model bytes;
+ *  an existing model of the same name is replaced. */
+export function addVrmModel(file: File): Promise<VrmModel> {
+  return request(`/api/vrm/${encodeURIComponent(file.name)}`, {
+    method: "POST",
+    headers: { "Content-Type": "model/gltf-binary" },
+    body: file,
+  });
+}
+
+export function deleteVrmModel(file: string): Promise<void> {
+  return request(`/api/vrm/${encodeURIComponent(file)}`, { method: "DELETE" });
+}
+
 /** Snapshot of the memory module: the short-term summary plus the
  *  newest-first-able long-term store, for the 感情 tab's memory panel. */
 export function getMemory(): Promise<MemoryDocument> {
   return request("/api/memory");
+}
+
+/**
+ * The server's rolling buffer of recent `affect` snapshots (oldest first),
+ * for seeding the 感情 tab's trend sparkline on page load — otherwise that
+ * line has nothing to draw until the NPC's next turn produces a live WS
+ * frame. `limit` is optional; the server defaults it to (and clamps it at)
+ * the buffer's own cap, so omitting it just returns everything currently
+ * held.
+ */
+export function getAffectHistory(limit?: number): Promise<AffectHistoryDocument> {
+  return request(limit === undefined ? "/api/affect/history" : `/api/affect/history?limit=${limit}`);
 }
 
 /**

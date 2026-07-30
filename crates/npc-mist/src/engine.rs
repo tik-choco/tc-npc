@@ -3,13 +3,12 @@
 //! app uses (see `mistl/src/net/mod.rs`), simplified for tc-npc's
 //! single-room use.
 //!
-//! IMPORTANT: as of the pinned mistlib rev
-//! (261a20ab8c7b39a444fce197bf76d56aa2b84c02), mistlib-native's engine
-//! tracks exactly **one** joined room at a time --
+//! IMPORTANT: as of the pinned mistlib tag (v0.6.0), mistlib-native's
+//! engine tracks exactly **one** joined room at a time --
 //! `mistlib-native/src/transports/webrtc.rs`'s `WebRtcTransport::room_id`
 //! is a plain `RwLock<String>` that `join_room`/`set_room_id` *overwrite*,
 //! not a set that grows. Newer mistlib builds may support additive
-//! multi-room engines, but the public pinned rev does not, so `lib.rs`
+//! multi-room engines, but the public pinned tag does not, so `lib.rs`
 //! picks a single room to join accordingly (presence room XOR catalog
 //! room).
 
@@ -86,7 +85,7 @@ pub async fn start(
 
 /// Joins `room_id`, replacing whatever room (if any) was previously joined
 /// -- see this module's doc comment on mistlib's single-room-per-engine
-/// behavior at the pinned rev.
+/// behavior at the pinned tag.
 pub async fn join_room(room_id: String) -> anyhow::Result<()> {
     tokio::task::spawn_blocking(move || mistlib::app::join_room(room_id))
         .await

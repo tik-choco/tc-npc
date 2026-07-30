@@ -1,0 +1,14 @@
+<!doctype html>
+<!--
+  This file is never shown to a user. Tauri's config schema requires
+  `build.frontendDist` (tauri.conf.json) to point at a real directory even
+  when an app has nothing to bundle -- and this app genuinely has nothing to
+  bundle: the whole point is to load tc-npc's own /#/avatar page as a REMOTE
+  url built from Rust at runtime (see WebviewUrl::External in src/main.rs),
+  since that page is served by tc-npc and has to stay that way. This is the
+  smallest placeholder that satisfies the schema.
+-->
+<html>
+  <head><title>tc-npc-mascot placeholder</title></head>
+  <body></body>
+</html>

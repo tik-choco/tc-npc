@@ -104,6 +104,17 @@ pub mod msg {
     /// "..."}`. npc-server forwards it so the web UI can drop its typing
     /// indicator and show that the turn was deliberately left unanswered.
     pub const CHAT_SILENT: &str = "chat_silent";
+    /// A chat turn failed outright — the LLM call errored, a tool call blew
+    /// up — so neither [`CHAT_RESPONSE`] nor [`CHAT_SILENT`] is coming.
+    /// Published on [`super::topic::CHAT`] with payload `{"request_id":
+    /// "...", "message": "..."}`.
+    ///
+    /// It exists for the *requester*, not for the transcript: npc-server
+    /// turns it into a `response` frame with `status: "error"` so a client
+    /// that sent an `input` is released instead of waiting forever on a
+    /// reply that will never arrive. Published only when the turn actually
+    /// had a requester — a failed self-initiated turn has nobody to tell.
+    pub const CHAT_ERROR: &str = "chat_error";
     pub const CHAT_LOG: &str = "chat_log";
     pub const SHORT_TERM_MEMORY: &str = "short_term_memory";
     pub const LONG_TERM_MEMORY: &str = "long_term_memory";

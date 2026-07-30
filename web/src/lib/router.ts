@@ -12,7 +12,13 @@
 //
 // Route shape: `#/<tab>` for every tab, plus `#/chat/<panel>` for the チャット
 // tab's sidebar pill (音声 / 状態 / 通訳), which is itself a tab the operator
-// may want split across windows.
+// may want split across windows, and an optional `/avatar` after that for the
+// チャット tab's avatar-led layout (`#/chat/status/avatar`).
+//
+// `#/avatar` is a route but not a header tab: it is the bare avatar window,
+// opened from the チャット toolbar into a window of its own (see AvatarView)
+// for a second monitor or a capture source, so it deliberately doesn't take
+// a slot in the nav.
 import { useCallback, useEffect, useState } from "preact/hooks";
 
 export const TAB_IDS = [
@@ -24,6 +30,7 @@ export const TAB_IDS = [
   "schedule",
   "brain",
   "settings",
+  "avatar",
 ] as const;
 export type Tab = (typeof TAB_IDS)[number];
 export const DEFAULT_TAB: Tab = "chat";
@@ -32,11 +39,20 @@ export const CHAT_PANEL_IDS = ["voice", "status", "interpret"] as const;
 export type ChatPanel = (typeof CHAT_PANEL_IDS)[number];
 export const DEFAULT_CHAT_PANEL: ChatPanel = "voice";
 
+/** How the チャット tab arranges itself. `chat` is the transcript-led layout
+ *  the tab has always had; `avatar` puts the VRM in front and lays the
+ *  conversation over it. */
+export const CHAT_LAYOUT_IDS = ["chat", "avatar"] as const;
+export type ChatLayout = (typeof CHAT_LAYOUT_IDS)[number];
+export const DEFAULT_CHAT_LAYOUT: ChatLayout = "chat";
+
 const CHAT_PANEL_STORAGE_KEY = "tc-npc:chat-sidebar-tab";
+const CHAT_LAYOUT_STORAGE_KEY = "tc-npc:chat-layout";
 
 export interface Route {
   tab: Tab;
   chatPanel: ChatPanel;
+  chatLayout: ChatLayout;
 }
 
 function isTab(value: string): value is Tab {
@@ -45,6 +61,10 @@ function isTab(value: string): value is Tab {
 
 function isChatPanel(value: string): value is ChatPanel {
   return (CHAT_PANEL_IDS as readonly string[]).includes(value);
+}
+
+function isChatLayout(value: string): value is ChatLayout {
+  return (CHAT_LAYOUT_IDS as readonly string[]).includes(value);
 }
 
 /** Last sidebar panel this browser used, so a window opened at a bare
@@ -71,29 +91,55 @@ function saveChatPanel(panel: ChatPanel): void {
   }
 }
 
+/** Same shape as `loadChatPanel`, for the transcript/avatar layout choice. */
+function loadChatLayout(): ChatLayout {
+  try {
+    const raw = localStorage.getItem(CHAT_LAYOUT_STORAGE_KEY);
+    if (raw !== null && isChatLayout(raw)) return raw;
+  } catch {
+    // localStorage unavailable (private mode, etc.) — fall back to default.
+  }
+  return DEFAULT_CHAT_LAYOUT;
+}
+
+function saveChatLayout(layout: ChatLayout): void {
+  try {
+    localStorage.setItem(CHAT_LAYOUT_STORAGE_KEY, layout);
+  } catch {
+    // Non-fatal — the choice just won't be remembered next visit.
+  }
+}
+
 /** Unknown/absent segments fall back rather than erroring: a hand-typed or
  *  stale URL should land somewhere sensible, not on a blank screen. */
 function parseHash(hash: string): Route {
   const segments = hash.replace(/^#\/?/, "").split("/").filter(Boolean);
-  const [rawTab, rawPanel] = segments;
+  const [rawTab, rawPanel, rawLayout] = segments;
   return {
     tab: rawTab !== undefined && isTab(rawTab) ? rawTab : DEFAULT_TAB,
     chatPanel: rawPanel !== undefined && isChatPanel(rawPanel) ? rawPanel : loadChatPanel(),
+    chatLayout: rawLayout !== undefined && isChatLayout(rawLayout) ? rawLayout : loadChatLayout(),
   };
 }
 
-/** The sidebar panel only appears in the URL on the チャット tab, where it is
- *  visible — carrying it around on `#/brain` would put a control the operator
- *  can't see into a URL they might copy. */
+/** The sidebar panel and layout only appear in the URL on the チャット tab,
+ *  where they are visible — carrying them around on `#/brain` would put
+ *  controls the operator can't see into a URL they might copy. The layout
+ *  segment is further omitted at its default, so the everyday URL stays the
+ *  `#/chat/<panel>` it has always been. */
 export function formatHash(route: Route): string {
-  return route.tab === "chat" ? `#/chat/${route.chatPanel}` : `#/${route.tab}`;
+  if (route.tab !== "chat") return `#/${route.tab}`;
+  const base = `#/chat/${route.chatPanel}`;
+  return route.chatLayout === DEFAULT_CHAT_LAYOUT ? base : `${base}/${route.chatLayout}`;
 }
 
 export interface UseRouteResult {
   route: Route;
   /** Tab navigation goes through the header's `<a href>`s, so the only route
-   *  change that needs a programmatic entry point is the sidebar pill. */
+   *  changes that need a programmatic entry point are the sidebar pill and
+   *  the layout toggle. */
   setChatPanel: (panel: ChatPanel) => void;
+  setChatLayout: (layout: ChatLayout) => void;
 }
 
 export function useRoute(): UseRouteResult {
@@ -134,5 +180,13 @@ export function useRoute(): UseRouteResult {
     if (window.location.hash !== hash) window.location.hash = hash;
   }, []);
 
-  return { route, setChatPanel };
+  const setChatLayout = useCallback((chatLayout: ChatLayout) => {
+    saveChatLayout(chatLayout);
+    const next: Route = { ...parseHash(window.location.hash), chatLayout };
+    setRoute(next);
+    const hash = formatHash(next);
+    if (window.location.hash !== hash) window.location.hash = hash;
+  }, []);
+
+  return { route, setChatPanel, setChatLayout };
 }

@@ -105,6 +105,7 @@ export const REASONING_EFFORT_OPTIONS: Array<{ value: string; hintKey: MessageKe
   { value: "low", hintKey: "settings.effort.low" },
   { value: "medium", hintKey: "settings.effort.medium" },
   { value: "high", hintKey: "settings.effort.high" },
+  { value: "xhigh", hintKey: "settings.effort.xhigh" },
 ];
 
 /** Same scale, for a preset's reasoning_effort field: presets can also

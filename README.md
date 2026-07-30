@@ -33,6 +33,14 @@ served on startup.
   schedule/translation/settings tabs) bundled into the binary.
 - **Character import**: loads tc-town character-export JSON as a persona
   sheet.
+- **VRM avatar**: drop a `.vrm` into `~/.tc-npc/vrm/` (or add it from the
+  キャラ tab) and the チャット tab can put the model front and centre — idle
+  motion, blinking, an expression driven by the affect model, and a mouth
+  that follows the loudness of the host's actual TTS playback. A character
+  isn't required: with none set up the model is used on its own, and
+  assigning one per character works too. `#/avatar` is the same avatar with
+  no UI around it, for opening in a window of its own; its framing, backdrop
+  and camera angle are remembered between reloads.
 - **mist** (optional feature): connects to tc-town's character catalog room
   via mistlib (P2P). Disabled by default.
 
@@ -60,6 +68,25 @@ The Web UI opens at `config.server.addr` (default `http://127.0.0.1:47950`).
 Pass `--no-open` (or set `config.server.auto_open: false`) to skip
 auto-opening a browser tab — useful with `just watch`, which restarts the
 binary on every Rust source change without spawning a new tab each time.
+
+## Tests
+
+```bash
+cargo test --workspace     # Rust
+cd web && npm test         # Web UI (vitest)
+```
+
+## Desktop mascot (experimental)
+
+`mascot/` is a thin Tauri shell that opens tc-npc's `#/avatar` page in a
+transparent, undecorated, always-on-top window — the avatar on your desktop
+rather than in a browser tab. It holds no logic of its own: it finds the
+running server (via `~/.tc-npc/server-port.txt`) and points a window at it.
+
+It is a **spike**, deliberately kept out of the main build (its own Cargo
+workspace, like `crates/npc-mist`), because one question is still unanswered:
+whether WebView2 composites a WebGL canvas correctly in a transparent window.
+See `mascot/README.md` for how to run it and what to look for.
 
 ## Configuration
 

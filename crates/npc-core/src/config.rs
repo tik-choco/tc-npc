@@ -158,10 +158,17 @@ pub struct ApiConfig {
     pub model: String,
     #[serde(default)]
     pub embedding_model: String,
-    /// `none` | `minimal` | `low` | `medium` | `high`, sent on every chat
-    /// request — `none` is an explicit value, not "omit the parameter"
-    /// (tc-docs/drafts/llm-settings-common-v1.md §2.3). An empty string is
-    /// treated as `none` by `npc_llm::LlmClient::with_reasoning_effort`.
+    /// `none` | `minimal` | `low` | `medium` | `high` | `xhigh`, sent on
+    /// every chat request — `none` is an explicit value, not "omit the
+    /// parameter" (tc-docs/drafts/llm-settings-common-v1.md §2.3). An empty
+    /// string is treated as `none` by
+    /// `npc_llm::LlmClient::with_reasoning_effort`.
+    ///
+    /// The value is passed through to the endpoint verbatim and never
+    /// validated here, so this list documents what the UI offers rather than
+    /// what the type permits: an endpoint with its own extra level works
+    /// without a code change, and one that rejects a level answers for
+    /// itself.
     #[serde(default = "default_reasoning_effort")]
     pub reasoning_effort: String,
 }
@@ -975,6 +982,16 @@ impl Default for ServerConfig {
 pub struct CharacterConfig {
     #[serde(default)]
     pub active_id: String,
+    /// 有効なキャラクターが無い(または有効なキャラクターにアバターが
+    /// 設定されていない)ときに表示するVRMモデルのファイル名。
+    /// `{data_dir}/vrm/` 内のファイル名で、空なら既定アバターなし。
+    ///
+    /// キャラクターシートを作らなくてもアバターを出せるようにするための
+    /// フィールド。tc-npc はキャラクター未設定でも会話できるので、
+    /// アバターを出すためだけに tc-town のエクスポートを取り込ませるのは
+    /// 本末転倒だった。
+    #[serde(default)]
+    pub avatar_file: String,
 }
 
 // ---------------------------------------------------------------------

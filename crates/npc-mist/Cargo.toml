@@ -29,10 +29,16 @@ tracing = "0.1"
 async-trait = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
 
-# mistlib (MPL-2.0), pinned to a specific commit of the public
+# mistlib (MPL-2.0), pinned to a specific tag of the public
 # tik-choco-lab/mistlib repo (https://github.com/tik-choco-lab/mistlib).
 # mistlib-native's `[lib] name` is `mistlib` (see its Cargo.toml), so source
 # in this crate imports it as `mistlib::...`, not `mistlib_native::...` --
 # same convention the `mistl` daemon app uses for its own embedding.
-mistlib-core = { git = "https://github.com/tik-choco-lab/mistlib", rev = "261a20ab8c7b39a444fce197bf76d56aa2b84c02" }
-mistlib-native = { git = "https://github.com/tik-choco-lab/mistlib", rev = "261a20ab8c7b39a444fce197bf76d56aa2b84c02" }
+#
+# NOTE: v0.6.0 introduced a `#p` destination tag in Nostr signaling
+# (upstream commit 187c73f, 2026-07-23) that is NOT wire-compatible with
+# older mistlib builds -- native/wasm peers must upgrade in lockstep. All
+# tik-choco web apps have moved to v0.6.0, so this pin must not regress
+# below it.
+mistlib-core = { git = "https://github.com/tik-choco-lab/mistlib", tag = "v0.6.0" }
+mistlib-native = { git = "https://github.com/tik-choco-lab/mistlib", tag = "v0.6.0" }

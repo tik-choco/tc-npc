@@ -2,7 +2,7 @@
 //! `mist` cargo feature (see root `Cargo.toml`/`src/main.rs`). Depends on
 //! mistlib-core/mistlib-native -- MPL-2.0,
 //! https://github.com/tik-choco-lab/mistlib -- as git dependencies pinned
-//! to a specific commit.
+//! to a specific tag (currently v0.6.0).
 //!
 //! When `config.mist.enabled`, [`module`]'s `run` (see [`MistModule`]):
 //!
@@ -15,7 +15,7 @@
 //! 3. Leaves the room and drops the engine cleanly on `ctx.shutdown`.
 //!
 //! See `engine.rs`'s module doc comment for *why* it's "a single room" --
-//! mistlib-native's engine (at the pinned rev) tracks only one joined room
+//! mistlib-native's engine (at the pinned tag) tracks only one joined room
 //! per process.
 
 mod catalog;
@@ -64,14 +64,14 @@ impl Module for MistModule {
             (catalog::CATALOG_ROOM_ID.to_string(), true)
         } else {
             // Tradeoff documented in `engine.rs`'s module doc comment:
-            // mistlib (at the pinned rev) only tracks one joined room per
+            // mistlib (at the pinned tag) only tracks one joined room per
             // process, so an explicit `mist.room_id` wins over catalog
             // discovery for this run.
             tracing::warn!(
                 room_id = %custom_room,
                 catalog_room = catalog::CATALOG_ROOM_ID,
                 "npc-mist: mist.room_id is set, so this instance will NOT listen to the tc-town \
-                 character catalog room this run -- mistlib's engine (at the pinned rev) tracks \
+                 character catalog room this run -- mistlib's engine (at the pinned tag) tracks \
                  only one joined room per process; unset mist.room_id to discover catalog \
                  characters instead"
             );

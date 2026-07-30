@@ -2,9 +2,16 @@
 // analogue parameters recomputed every conversation turn) plus the memory
 // module's short-term summary and long-term store.
 //
-// The drive/familiarity/badges data rides the existing WS connection
-// (useNpcSocket's `affect`/`affectHistory`) — nothing to fetch here for that
-// half. The memory panel is REST-backed (GET /api/memory): it loads on
+// The current drive/familiarity/badges snapshot rides the existing WS
+// connection (useNpcSocket's `affect`) — nothing to fetch for that half. The
+// trend sparkline's *history*, though, is backed by both a live source and a
+// REST one: useNpcSocket's `affectHistory` only ever holds frames that
+// arrived while this tab's socket was open, so it starts empty on every page
+// load — the one moment an operator most wants to see what the NPC has been
+// feeling. GET /api/affect/history backfills the server's own rolling buffer
+// on mount to cover exactly that gap; see `combinedAffectHistory` below for
+// how the two are merged without double-counting a snapshot that lands in
+// both. The memory panel is REST-backed too (GET /api/memory): it loads on
 // mount and again whenever `memoryVersion` increments, which useNpcSocket
 // bumps on every `memory` WS frame, so the panel refreshes itself without
 // the operator having to do anything. A manual reload button covers the
@@ -24,7 +31,7 @@ import {
   UserRound,
 } from "lucide-preact";
 
-import { getMemory } from "../lib/api";
+import { getAffectHistory, getMemory } from "../lib/api";
 import type { MemoryDocument } from "../lib/types";
 import type { AffectSnapshot } from "../hooks/useNpcSocket";
 import { useI18n } from "../hooks/useI18n";
@@ -189,6 +196,11 @@ export function BrainView({ affect, affectHistory, memoryVersion }: BrainViewPro
   const [memoryError, setMemoryError] = useState<string | null>(null);
   const [memoryLoading, setMemoryLoading] = useState(false);
   const [selectedDrive, setSelectedDrive] = useState<string | null>(null);
+  // Server-side backfill for the trend sparkline, fetched once on mount.
+  // Empty until the fetch resolves and stays empty forever if it fails —
+  // either way `combinedAffectHistory` below just falls through to
+  // `affectHistory` alone, exactly like before this backfill existed.
+  const [affectBackfill, setAffectBackfill] = useState<AffectSnapshot[]>([]);
 
   function loadMemory() {
     setMemoryLoading(true);
@@ -204,6 +216,45 @@ export function BrainView({ affect, affectHistory, memoryVersion }: BrainViewPro
     loadMemory();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [memoryVersion]);
+
+  // One-shot backfill of the trend history, fetched once when the tab first
+  // mounts. Deliberately not re-fetched on later renders/reconnects: from
+  // here on, live `affect` WS frames (the `affectHistory` prop) carry the
+  // conversation forward, and re-fetching would just re-request the same
+  // tail this session has already been receiving live.
+  useEffect(() => {
+    let cancelled = false;
+    getAffectHistory()
+      .then(({ entries }) => {
+        if (cancelled) return;
+        setAffectBackfill(
+          entries.map((e) => ({
+            ts: e.ts,
+            familiarity: e.familiarity,
+            closing: e.closing,
+            inviteCaution: e.inviteCaution,
+            // Normalized to null so this matches AffectSnapshot's own
+            // convention (set in useNpcSocket's `affect` handler) of one
+            // "nobody named" value instead of undefined-vs-null.
+            partner: e.partner ?? null,
+            partnerKnown: e.partnerKnown,
+            partnerSwitched: e.partnerSwitched,
+            partnerAway: e.partnerAway,
+            drives: e.drives,
+          })),
+        );
+      })
+      .catch((err) => {
+        // A missing/failed history must never blank the tab: leave
+        // `affectBackfill` at its initial empty array so the sparkline
+        // simply falls back to whatever `affectHistory` (live) already has,
+        // exactly as it behaved before this backfill existed.
+        console.error("failed to load affect history", err);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Default the trend picker to whichever drive is currently deviating the
   // most, but only once — once the operator (or this default) has picked a
@@ -226,10 +277,29 @@ export function BrainView({ affect, affectHistory, memoryVersion }: BrainViewPro
     return { activeKeys, topKeys };
   }, [affect]);
 
+  // Merge the one-shot server backfill with the live WS history without
+  // mutating the `affectHistory` prop (owned by useNpcSocket) and without
+  // double-counting a snapshot that shows up in both — which happens
+  // whenever a turn fires between the history GET going out and it
+  // resolving: that snapshot is already in `affectHistory` by the time the
+  // backfill arrives (see bus_forward.rs: the buffer is updated before the
+  // WS broadcast, so the reverse race — present in the buffer but not yet
+  // broadcast — can't happen the other way around). `ts` is unique per
+  // snapshot (bus_forward.rs gives the buffered copy and the broadcast frame
+  // the exact same `ts`), so exact equality is enough to recognize the
+  // overlap; no fuzzy matching needed.
+  const combinedAffectHistory = useMemo(() => {
+    if (affectBackfill.length === 0) return affectHistory;
+    const liveTimestamps = new Set(affectHistory.map((snap) => snap.ts));
+    const merged = [...affectBackfill.filter((snap) => !liveTimestamps.has(snap.ts)), ...affectHistory];
+    merged.sort((a, b) => a.ts - b.ts);
+    return merged;
+  }, [affectBackfill, affectHistory]);
+
   const trendHistory = useMemo(() => {
     if (!selectedDrive) return [];
-    return affectHistory.map((snap) => snap.drives.find((d) => d.key === selectedDrive)?.level ?? 0);
-  }, [affectHistory, selectedDrive]);
+    return combinedAffectHistory.map((snap) => snap.drives.find((d) => d.key === selectedDrive)?.level ?? 0);
+  }, [combinedAffectHistory, selectedDrive]);
 
   const longTermSorted = useMemo(() => {
     if (!memory) return [];

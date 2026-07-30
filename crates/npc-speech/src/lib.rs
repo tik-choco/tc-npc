@@ -14,6 +14,20 @@
 //! `stt.enabled` / `tts.enabled`, or names a different device, restarts just
 //! the affected thread. Toggling the mic from the web UI used to need an app
 //! restart, which made the cascade look broken rather than switched off.
+//!
+//! A `chat_response` reply is split into sentences (`split_sentences`) and
+//! spoken one at a time instead of as a single TTS request: synthesizing the
+//! whole reply meant total silence until all of it came back, and anything
+//! past `tts.max_len` was silently thrown away rather than spoken. Each
+//! sentence is also announced on `npc:ui` (`UI_MSG_TTS_LINE`) just before its
+//! synthesis request goes out — this module is the only publisher of that
+//! frame, which npc-server's `bus_forward` already had a `"tts_line"` arm
+//! waiting for. See `run_chat_response_tts_task` / `speak_reply` for the
+//! per-reply cancellation this splitting requires (a barge-in mid-reply has
+//! to silence every remaining sentence, not just the one already on the
+//! speaker) and the doc on `Shared::active_character` for how the voice
+//! follows whichever character is active instead of always being
+//! `tts.voice`.
 
 mod capture;
 mod device;
@@ -22,6 +36,7 @@ mod resample;
 mod vad;
 mod wavio;
 
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc as std_mpsc, Arc, Mutex, RwLock};
 use std::time::Duration;
@@ -29,12 +44,12 @@ use std::time::Duration;
 use async_trait::async_trait;
 use npc_core::config::{Config, SpeechConfig};
 use npc_core::osc;
-use npc_core::{LlmTask, Module, ModuleCtx};
+use npc_core::{Character, LlmTask, Module, ModuleCtx};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use capture::{run_capture_thread, CaptureEvent};
-use playback::{run_playback_thread, PlaybackCmd};
+use playback::{run_playback_thread, PlaybackCmd, SpeakingGate};
 use vad::VadParams;
 
 /// Host audio device enumeration, re-exported for npc-server's
@@ -46,8 +61,29 @@ pub use device::{list_devices, AudioDevices};
 /// Bus topic the web UI listens on for the mic VU meter. Not part of
 /// `npc_core::bus::topic` since it's a UI-facing signal, not an
 /// agent-to-agent one.
-const UI_TOPIC: &str = "npc:ui";
+pub(crate) const UI_TOPIC: &str = "npc:ui";
 const UI_MSG_VOLUME: &str = "volume";
+/// "The NPC's voice is audible right now" — drives the web UI's VRM lip-sync.
+/// See [`playback::SpeakingGate`] for why the browser can't work this out for
+/// itself.
+pub(crate) const UI_MSG_SPEAKING: &str = "speaking";
+/// Continuous `0.0..=1.0` loudness of whatever TTS clip is currently
+/// playing, sampled from the playback thread's actual output position (see
+/// `playback::SpeakingGate::publish_level`). `UI_MSG_SPEAKING` remains the
+/// authoritative on/off edge; this rides alongside it so the VRM avatar's
+/// mouth can track the real envelope of the voice instead of animating a
+/// fixed shape for however long a clip happens to be audible.
+pub(crate) const UI_MSG_SPEAKING_LEVEL: &str = "speaking_level";
+/// One sentence of a `chat_response` reply, published just before its TTS
+/// synthesis request is sent (not after — the point is for the UI/extensions
+/// to see the line without waiting on the round-trip). Forwarded to WS
+/// clients as a `ttsLine` frame by npc-server's `bus_forward` `"tts_line"`
+/// arm, which existed before this had a publisher: `bus_forward` used to
+/// receive the whole (truncated) reply as one line straight off
+/// `chat_response`, but now that replies are split and spoken
+/// sentence-by-sentence (see the module doc), this per-sentence publish is
+/// the only source of that frame.
+pub(crate) const UI_MSG_TTS_LINE: &str = "tts_line";
 
 /// How long a `suspend` (from `agent:interrupt`) lasts before auto-resuming
 /// if no explicit `resume` arrives (Go: `SuspendTimeout`).
@@ -82,12 +118,51 @@ struct Shared {
     /// Set by the playback thread while a clip is audible; read by the
     /// capture thread for echo prevention and barge-in.
     is_tts_playing: Arc<AtomicBool>,
+    /// The same flag, wrapped so every write also announces itself on the
+    /// bus for the web UI's VRM lip-sync. Playback writes go through this;
+    /// the capture thread keeps reading the raw flag above.
+    speaking: SpeakingGate,
     /// Narrows the above to clips barge-in must not cut (chimes, scheduler
     /// announcements).
     is_priority_playing: Arc<AtomicBool>,
     /// The web UI's 音声 開始/停止 master switch.
     voice_active: Arc<AtomicBool>,
     playback_tx: Mutex<Option<std_mpsc::Sender<PlaybackCmd>>>,
+    /// Stamps the `chat_response` reply currently being spoken by
+    /// `run_chat_response_tts_task`/`speak_reply`. Bumped every time a reply
+    /// starts (so a newer reply always supersedes an older one still mid-way
+    /// through its sentences) and by every path that must cut a reply dead —
+    /// barge-in, `suspend`, the voice-loop's 停止 switch — via
+    /// `cancel_current_speech`.
+    ///
+    /// This exists because splitting a reply into sentences turned a single
+    /// TTS request into several, spaced out by real synthesis latency: a
+    /// `PlaybackCmd::Stop` clears whatever is already queued, but it can't
+    /// stop a sentence that hasn't finished synthesizing yet from being
+    /// queued *after* the Stop — that in-flight `synthesize_tts` future has
+    /// no idea a barge-in happened. `speak_reply` re-checks this generation
+    /// both before starting a sentence's synthesis and after it completes, so
+    /// a stale sentence is dropped instead of enqueued, and the loop itself
+    /// stops instead of moving on to the next sentence.
+    speech_generation: AtomicU64,
+    /// Cached active character (per `config.character.active_id`), so the
+    /// voice it names can override `tts.voice`/the resolved TTS model
+    /// (`resolve_voice`) without a disk read on every sentence spoken — that
+    /// read sits inside the speech path, on the hot path of every reply.
+    /// `None` means "no active character" (none set, or its file failed to
+    /// load), in which case voice resolution behaves exactly as if this
+    /// module had never heard of characters.
+    ///
+    /// Invalidation: refreshed only when a `config_updated` message reports
+    /// a different `character.active_id` than last time (see the `run`
+    /// loop's `last_active_id` tracking) — not on every config update, since
+    /// most of those (a prompt edit, a scheduler tweak) have nothing to do
+    /// with which character is speaking. Editing the *currently* active
+    /// character's voice fields in place (e.g. re-importing the same tc-town
+    /// export) does not carry an `active_id` change and so will not refresh
+    /// this cache; nothing in the server today does that without also
+    /// changing `active_id`, but it is a real edge the cache does not cover.
+    active_character: RwLock<Option<Arc<Character>>>,
 }
 
 impl Shared {
@@ -99,6 +174,19 @@ impl Shared {
         if let Some(tx) = self.playback_tx.lock().unwrap().as_ref() {
             let _ = tx.send(cmd);
         }
+    }
+
+    /// Bump the reply generation and cut whatever is on the speaker. The
+    /// single entry point for every "stop the reply dead" trigger (barge-in,
+    /// `suspend`, voice-loop 停止) so all three get the same guarantee: not
+    /// just silencing the clip currently playing, but also poisoning the
+    /// generation stamp any of that reply's still-synthesizing sentences are
+    /// checking against, so they get discarded instead of queued once they
+    /// come back. See the doc on `speech_generation` for why `Stop` alone
+    /// isn't enough once a reply is more than one clip.
+    fn cancel_current_speech(&self) {
+        self.speech_generation.fetch_add(1, Ordering::SeqCst);
+        self.send_playback(PlaybackCmd::Stop);
     }
 }
 
@@ -143,15 +231,22 @@ impl Module for SpeechModule {
     }
 
     async fn run(self: Box<Self>, ctx: ModuleCtx) -> anyhow::Result<()> {
+        let is_tts_playing = Arc::new(AtomicBool::new(false));
         let shared = Arc::new(Shared {
             config: RwLock::new(ctx.config.clone()),
             vad_params: VadParams::new(&ctx.config.stt),
-            is_tts_playing: Arc::new(AtomicBool::new(false)),
+            speaking: SpeakingGate::new(is_tts_playing.clone(), ctx.bus.clone()),
+            is_tts_playing,
             is_priority_playing: Arc::new(AtomicBool::new(false)),
             // Starts on, so a run with no UI attached behaves exactly as it
             // did before the toggle existed.
             voice_active: Arc::new(AtomicBool::new(true)),
             playback_tx: Mutex::new(None),
+            speech_generation: AtomicU64::new(0),
+            // Loaded once up front so the very first reply already speaks in
+            // the right voice instead of needing a config_updated to arrive
+            // first.
+            active_character: RwLock::new(load_active_character(&ctx.data_dir, &ctx.config)),
         });
 
         let suspend = Arc::new(SuspendState {
@@ -176,6 +271,12 @@ impl Module for SpeechModule {
         let mut playback: Option<PlaybackThread> = None;
         let mut capture: Option<CaptureThread> = None;
         apply_config(&shared, &events_tx, &mut playback, &mut capture, &ctx.config);
+
+        // Tracked here rather than read back out of `shared.active_character`
+        // because the id is what changes (it's what `config_updated` carries)
+        // — the cached `Character` it resolves to is a derived value, not the
+        // thing to compare against.
+        let mut last_active_id = ctx.config.character.active_id.clone();
 
         let mut rx = ctx.bus.subscribe();
         loop {
@@ -202,6 +303,18 @@ impl Module for SpeechModule {
                     let new_config = Arc::new(new_config);
                     *shared.config.write().unwrap() = new_config.clone();
                     shared.vad_params.set(&new_config.stt);
+                    // A character can now be activated at runtime (see
+                    // `api_activate_character`), and that change arrives on
+                    // this same `config_updated` message — so the cached
+                    // voice has to follow it here too, not just at startup.
+                    // Gated on the id actually changing so an unrelated
+                    // config save doesn't re-read the character file on
+                    // every edit.
+                    if new_config.character.active_id != last_active_id {
+                        last_active_id = new_config.character.active_id.clone();
+                        *shared.active_character.write().unwrap() =
+                            load_active_character(&ctx.data_dir, &new_config);
+                    }
                     apply_config(&shared, &events_tx, &mut playback, &mut capture, &new_config);
                 }
                 Err(err) => {
@@ -251,7 +364,7 @@ fn start_playback(shared: &Arc<Shared>, slot: &mut Option<PlaybackThread>, cfg: 
     let (tx, rx) = std_mpsc::channel::<PlaybackCmd>();
     let speech = cfg.speech.clone();
     let thread_speech = speech.clone();
-    let playing = shared.is_tts_playing.clone();
+    let playing = shared.speaking.clone();
     let priority = shared.is_priority_playing.clone();
 
     let handle = match std::thread::Builder::new()
@@ -278,7 +391,9 @@ fn stop_playback(shared: &Arc<Shared>, slot: &mut Option<PlaybackThread>) {
     let _ = thread.tx.send(PlaybackCmd::Shutdown);
     drop(thread.tx);
     let _ = thread.handle.join();
-    shared.is_tts_playing.store(false, Ordering::SeqCst);
+    // Through the gate, not the raw flag: turning TTS off mid-sentence has to
+    // tell the UI the mouth should stop moving, exactly like a clip ending.
+    shared.speaking.set(false);
     shared.is_priority_playing.store(false, Ordering::SeqCst);
     tracing::info!("npc-speech: TTS playback stopped");
 }
@@ -361,7 +476,14 @@ fn handle_barge_in(ctx: &ModuleCtx, shared: &Arc<Shared>) {
         tracing::debug!("npc-speech: barge-in ignored, priority clip is playing");
         return;
     }
-    shared.send_playback(PlaybackCmd::Stop);
+    // Not just `send_playback(Stop)`: a reply is now (potentially) several
+    // sentences spaced out by real synthesis latency, so cutting the clip
+    // that's audible right now isn't enough on its own — a later sentence
+    // that was already mid-synthesis when the user talked over the NPC would
+    // otherwise still get enqueued once it comes back, and the barge-in
+    // would look like it only trimmed one sentence off a reply that then
+    // kept going. See `Shared::cancel_current_speech`.
+    shared.cancel_current_speech();
     ctx.bus.publish(
         npc_core::topic::INTERRUPT,
         npc_core::msg::INTERRUPT,
@@ -444,20 +566,77 @@ async fn run_chat_response_tts_task(ctx: ModuleCtx, shared: Arc<Shared>, suspend
         }
 
         let cfg = shared.config();
+        let character = shared.active_character.read().unwrap().clone();
         let content = content.to_string();
+        let ctx = ctx.clone();
         let shared = shared.clone();
 
-        tokio::spawn(async move {
-            let text = truncate_for_tts(&content, cfg.tts.max_len as usize);
-            if let Some(wav) = synthesize_tts(&cfg, &text).await {
-                if cfg.vrc.chatbox {
-                    let addr = cfg.vrc.osc_address.clone();
-                    let text = text.clone();
-                    tokio::task::spawn_blocking(move || osc::send_chatbox(&addr, &text));
-                }
-                shared.send_playback(PlaybackCmd::Enqueue(wav));
-            }
-        });
+        // Every reply gets a fresh generation, whether or not anything is
+        // cancelling it: this is also what makes a second `chat_response`
+        // that starts before the previous one finished speaking supersede
+        // it, instead of the two replies' sentences interleaving on the
+        // speaker. See `Shared::speech_generation`.
+        let my_gen = shared.speech_generation.fetch_add(1, Ordering::SeqCst) + 1;
+
+        tokio::spawn(speak_reply(ctx, shared, cfg, character, content, my_gen));
+    }
+}
+
+/// Speaks one `chat_response` reply sentence by sentence, so playback can
+/// start on the first sentence while the rest are still being synthesized
+/// (see the module doc for why this replaced a single whole-reply TTS
+/// request). `my_gen` is the stamp `speech_generation` held when this reply
+/// started; re-checked before *and* after every sentence's `synthesize_tts`
+/// call so a barge-in/suspend/voice-stop/newer-reply that lands while a
+/// sentence is mid-synthesis drops that sentence (and every one after it)
+/// instead of speaking it anyway once it comes back — see
+/// `Shared::speech_generation` for why the check has to happen at both
+/// points and not just once at the top of the loop.
+async fn speak_reply(
+    ctx: ModuleCtx,
+    shared: Arc<Shared>,
+    cfg: Arc<Config>,
+    character: Option<Arc<Character>>,
+    content: String,
+    my_gen: u64,
+) {
+    for sentence in split_sentences(&content) {
+        if shared.speech_generation.load(Ordering::SeqCst) != my_gen {
+            tracing::debug!("npc-speech: reply superseded/cancelled, stopping mid-reply");
+            return;
+        }
+
+        // Truncated per sentence, not on the whole reply up front: a single
+        // runaway sentence is still capped (protecting whatever request-size
+        // limit the TTS endpoint has), but a long reply as a whole is no
+        // longer thrown away past `tts.max_len` — see the module doc.
+        let text = truncate_for_tts(&sentence, cfg.tts.max_len as usize);
+
+        // Published before synthesis, not after: the point is for the
+        // UI/extensions to see the line the instant it's decided, without
+        // waiting on however long this sentence's TTS round-trip takes (see
+        // `UI_MSG_TTS_LINE`).
+        ctx.bus
+            .publish(UI_TOPIC, UI_MSG_TTS_LINE, serde_json::json!({ "text": text }));
+
+        let Some(wav) = synthesize_tts(&cfg, &text, character.as_deref()).await else {
+            // Synthesis failed for this sentence: skip it (already logged in
+            // `synthesize_tts`) and keep going rather than abandoning the
+            // rest of the reply over one bad TTS call.
+            continue;
+        };
+
+        if shared.speech_generation.load(Ordering::SeqCst) != my_gen {
+            tracing::debug!("npc-speech: reply superseded/cancelled mid-synthesis, discarding sentence");
+            return;
+        }
+
+        if cfg.vrc.chatbox {
+            let addr = cfg.vrc.osc_address.clone();
+            let text = text.clone();
+            tokio::task::spawn_blocking(move || osc::send_chatbox(&addr, &text));
+        }
+        shared.send_playback(PlaybackCmd::Enqueue(wav));
     }
 }
 
@@ -505,13 +684,20 @@ async fn run_interrupt_task(ctx: ModuleCtx, shared: Arc<Shared>, suspend: Arc<Su
                 let shared = shared.clone();
                 tokio::spawn(async move {
                     let cfg = shared.config();
-                    handle_priority_tts(&cfg, content, chime_file, &shared).await;
+                    let character = shared.active_character.read().unwrap().clone();
+                    handle_priority_tts(&cfg, character, content, chime_file, &shared).await;
                 });
             }
             t if t == npc_core::msg::SUSPEND => {
                 suspend.suspended.store(true, Ordering::SeqCst);
                 let gen = suspend.generation.fetch_add(1, Ordering::SeqCst) + 1;
-                shared.send_playback(PlaybackCmd::Stop);
+                // Also poisons `speech_generation` (see
+                // `Shared::cancel_current_speech`): without it, a reply
+                // already mid-way through its later sentences' synthesis
+                // when the suspend landed would still get those sentences
+                // enqueued once synthesis finished, playing right through a
+                // "paused" state.
+                shared.cancel_current_speech();
                 tracing::info!("npc-speech: suspended (chat_response tts paused)");
 
                 let suspend = suspend.clone();
@@ -527,6 +713,22 @@ async fn run_interrupt_task(ctx: ModuleCtx, shared: Arc<Shared>, suspend: Arc<Su
                 suspend.suspended.store(false, Ordering::SeqCst);
                 suspend.generation.fetch_add(1, Ordering::SeqCst);
                 tracing::info!("npc-speech: resumed");
+            }
+            // The web UI's 割り込み button and the barge-in detector both
+            // publish this. Until now it fell through the catch-all below, so
+            // pressing 割り込み did nothing at all to the voice — the NPC
+            // talked straight through it, which is the one thing that button
+            // exists to prevent.
+            //
+            // One-shot, unlike `SUSPEND`: it cuts what is playing now and
+            // discards the rest of this reply, but leaves the module ready to
+            // speak the next one. `cancel_current_speech` is what makes
+            // "the rest of this reply" stick — a reply is spoken sentence by
+            // sentence, so simply stopping playback would let the sentences
+            // still in synthesis arrive and resume talking a moment later.
+            t if t == npc_core::msg::INTERRUPT => {
+                shared.cancel_current_speech();
+                tracing::info!("npc-speech: interrupted (current reply dropped)");
             }
             _ => {}
         }
@@ -572,8 +774,11 @@ async fn run_voice_gate_task(ctx: ModuleCtx, shared: Arc<Shared>) {
                 shared.voice_active.store(false, Ordering::SeqCst);
                 // Cut whatever is already in the speaker queue too — leaving
                 // the tail of a reply playing after "停止" would read as the
-                // switch not having worked.
-                shared.send_playback(PlaybackCmd::Stop);
+                // switch not having worked. `cancel_current_speech` (not a
+                // bare `Stop`) also poisons `speech_generation`, so a
+                // sentence still being synthesized when 停止 was pressed gets
+                // discarded instead of being queued right after.
+                shared.cancel_current_speech();
                 tracing::info!("npc-speech: voice loop stopped (mic muted, replies silent)");
             }
             _ => {}
@@ -581,7 +786,13 @@ async fn run_voice_gate_task(ctx: ModuleCtx, shared: Arc<Shared>) {
     }
 }
 
-async fn handle_priority_tts(cfg: &Config, content: String, chime_file: String, shared: &Arc<Shared>) {
+async fn handle_priority_tts(
+    cfg: &Config,
+    character: Option<Arc<Character>>,
+    content: String,
+    chime_file: String,
+    shared: &Arc<Shared>,
+) {
     let mut items: Vec<Vec<u8>> = Vec::new();
 
     if !chime_file.is_empty() {
@@ -594,8 +805,12 @@ async fn handle_priority_tts(cfg: &Config, content: String, chime_file: String, 
     }
 
     if !content.is_empty() {
+        // Not split into sentences: these are short, deliberate one-shot
+        // announcements (scheduler chimes, `agent:interrupt` "tts"), not a
+        // multi-sentence chat reply, so the time-to-first-audio problem
+        // `speak_reply` exists for doesn't apply here.
         let text = truncate_for_tts(&content, cfg.tts.max_len as usize);
-        if let Some(wav) = synthesize_tts(cfg, &text).await {
+        if let Some(wav) = synthesize_tts(cfg, &text, character.as_deref()).await {
             if cfg.vrc.chatbox {
                 osc::send_chatbox(&cfg.vrc.osc_address, &text);
             }
@@ -612,18 +827,109 @@ async fn handle_priority_tts(cfg: &Config, content: String, chime_file: String, 
 // shared helpers
 // ---------------------------------------------------------------------
 
-async fn synthesize_tts(cfg: &Config, text: &str) -> Option<Vec<u8>> {
+/// Terminators that end a spoken sentence: ASCII `!`/`?`, their full-width
+/// Japanese equivalents, the full-width period `。`, and a bare newline (a
+/// paragraph break in an LLM reply reads naturally as a pause even with no
+/// punctuation before it).
+///
+/// The ASCII period `.` is deliberately absent, matching the reference
+/// implementation's set exactly (`/(?<=[。！？!?\n])/`, tc-assistant2's
+/// `splitSpeechLines`): it is overloaded in ordinary English text ("Mr.
+/// Smith", "e.g.", "3.14"), so splitting on every one would chop replies
+/// into nonsense far more often than it would find a real sentence boundary.
+const SENTENCE_TERMINATORS: [char; 6] = ['。', '！', '？', '!', '?', '\n'];
+
+/// Splits a reply into speakable sentences, mirroring tc-assistant2's
+/// `splitSpeechLines` (`text.split(/(?<=[。！？!?\n])/).map(trim).filter(len >
+/// 0)`, `src/main.tsx` ~line 134): cut immediately *after* every terminator
+/// so it stays attached to the sentence it ends, trim each piece, and drop
+/// anything that trims to nothing.
+///
+/// A run of terminators (e.g. `"!?"`, or a closing quote after a full stop
+/// like `"。」"`) is deliberately *not* coalesced into one fragment — each
+/// terminator ends its own piece here, exactly as in the reference
+/// implementation, so `"。」"` comes back as two fragments (`"。"` and then
+/// `"」"` leading whatever follows). Merging terminator runs would need
+/// look-ahead the reference doesn't do either, and in practice a
+/// pure-punctuation fragment just synthesizes as a fraction of a second of
+/// near-silence — harmless, unlike dropping text.
+///
+/// Text with no terminator anywhere comes back as a single fragment: it
+/// still has to be spoken, not dropped, just because the model ended the
+/// reply without punctuation.
+fn split_sentences(text: &str) -> Vec<String> {
+    let mut sentences = Vec::new();
+    let mut current = String::new();
+    for ch in text.chars() {
+        current.push(ch);
+        if SENTENCE_TERMINATORS.contains(&ch) {
+            sentences.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        sentences.push(current);
+    }
+
+    sentences
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Resolve which voice/model a reply should be spoken with: the active
+/// character's `voice_name`/`voice_model` win when set, otherwise the global
+/// `cfg_voice` (`tts.voice`) / `resolved_model` (the model `resolve_llm`
+/// already picked for the TTS task). Each field falls back independently —
+/// a character can name a voice but leave the model on the account default,
+/// or vice versa.
+///
+/// A present-but-empty string (`Some("")`, as opposed to `None`) also falls
+/// back rather than being sent to the API: a character imported before
+/// voice fields existed, or with the field cleared in the editor, must not
+/// silently downgrade to an empty `voice`/`model` parameter that the TTS
+/// endpoint would either reject or silently mishandle.
+fn resolve_voice(character: Option<&Character>, cfg_voice: &str, resolved_model: &str) -> (String, String) {
+    let voice = character
+        .and_then(|c| c.voice_name.as_deref())
+        .filter(|v| !v.is_empty())
+        .unwrap_or(cfg_voice)
+        .to_string();
+    let model = character
+        .and_then(|c| c.voice_model.as_deref())
+        .filter(|v| !v.is_empty())
+        .unwrap_or(resolved_model)
+        .to_string();
+    (voice, model)
+}
+
+/// Load and cache the character named by `cfg.character.active_id`, if any
+/// — see the doc on `Shared::active_character` for why this is only called
+/// at startup and on an `active_id` change, never per-sentence.
+fn load_active_character(data_dir: &Path, cfg: &Config) -> Option<Arc<Character>> {
+    // `npc_core::active_character` already treats a missing/unparsable
+    // character file as "no active character" rather than an error (see its
+    // doc), so the `Err` arm here is just defense in depth against that
+    // contract changing later, not a path this build expects to hit.
+    npc_core::active_character(data_dir, cfg)
+        .unwrap_or_else(|err| {
+            tracing::warn!(error = %err, "npc-speech: failed to resolve active character, using default voice");
+            None
+        })
+        .map(Arc::new)
+}
+
+async fn synthesize_tts(cfg: &Config, text: &str, character: Option<&Character>) -> Option<Vec<u8>> {
     // 接続先・モデルの解決は npc-core の resolve_llm に一本化した
     // (resolve_llm(Tts) は tts.model が空なら api.model にフォールバックする
     // 従来の挙動をそのまま再現している)。voice/speed は preset の対象外なので
-    // 引き続き tts セクションから直接読む。
+    // 引き続き tts セクションから直接読む。resolve_voice はその上に、有効な
+    // キャラクターの voice_name/voice_model を優先させる一段を足すだけ。
     let resolved = cfg.resolve_llm(LlmTask::Tts);
+    let (voice, model) = resolve_voice(character, &cfg.tts.voice, &resolved.model);
     let client = npc_llm::LlmClient::new(resolved.base_url, resolved.api_key);
 
-    match client
-        .speak(&resolved.model, &cfg.tts.voice, text, cfg.tts.speed)
-        .await
-    {
+    match client.speak(&model, &voice, text, cfg.tts.speed).await {
         Ok(wav) => Some(wav),
         Err(err) => {
             tracing::error!(error = %err, "npc-speech: tts synthesis failed");
@@ -664,6 +970,161 @@ mod tests {
     #[test]
     fn leaves_short_text_alone() {
         assert_eq!(truncate_for_tts("hello", 200), "hello");
+    }
+
+    // -------------------------------------------------------------
+    // split_sentences
+    // -------------------------------------------------------------
+
+    #[test]
+    fn splits_on_full_width_japanese_terminators() {
+        assert_eq!(
+            split_sentences("こんにちは。元気ですか？うん！"),
+            vec!["こんにちは。", "元気ですか？", "うん！"]
+        );
+    }
+
+    #[test]
+    fn splits_on_ascii_terminators() {
+        assert_eq!(
+            split_sentences("How are you? I'm great! Really?"),
+            vec!["How are you?", "I'm great!", "Really?"]
+        );
+    }
+
+    /// The reference splitter's terminator set (`。！？!?\n`) deliberately
+    /// excludes the ASCII period: unlike `!`/`?`/full-width punctuation, a
+    /// bare `.` is overloaded in ordinary English text ("Mr. Smith", "e.g.",
+    /// "3.14") and splitting on every one of those would chop a reply into
+    /// nonsense far more often than it would find a real sentence boundary.
+    /// So a period-only reply comes back as a single, unsplit fragment.
+    #[test]
+    fn ascii_period_does_not_split_a_sentence() {
+        assert_eq!(
+            split_sentences("Hello there. How are you today."),
+            vec!["Hello there. How are you today."]
+        );
+    }
+
+    #[test]
+    fn splits_on_bare_newlines_even_without_punctuation() {
+        assert_eq!(
+            split_sentences("line one\nline two\nline three"),
+            vec!["line one", "line two", "line three"]
+        );
+    }
+
+    /// No terminator anywhere: the whole reply must still come back as one
+    /// piece to be spoken, never dropped for lacking punctuation.
+    #[test]
+    fn untermined_text_is_spoken_as_one_piece() {
+        assert_eq!(
+            split_sentences("no terminator anywhere in this reply"),
+            vec!["no terminator anywhere in this reply"]
+        );
+    }
+
+    #[test]
+    fn empty_and_whitespace_only_input_yields_no_sentences() {
+        assert!(split_sentences("").is_empty());
+        assert!(split_sentences("   \n\t  ").is_empty());
+    }
+
+    /// A run of terminators is not coalesced: each one ends its own
+    /// fragment, matching tc-assistant2's reference splitter exactly (see
+    /// `split_sentences`'s doc). `"!?"` therefore comes back as two pieces.
+    #[test]
+    fn a_terminator_run_splits_into_multiple_fragments() {
+        assert_eq!(split_sentences("えっ!?"), vec!["えっ!", "?"]);
+    }
+
+    /// Same shape as above but with a full-width period followed by a
+    /// closing quote mark that is not itself a terminator: the quote leads
+    /// its own (otherwise empty) fragment rather than staying attached to
+    /// the sentence it visually closes.
+    #[test]
+    fn a_closing_quote_after_a_terminator_becomes_its_own_fragment() {
+        assert_eq!(split_sentences("そう言った。」"), vec!["そう言った。", "」"]);
+    }
+
+    /// Blank lines between sentences (a common LLM formatting habit) must
+    /// not produce empty spoken fragments.
+    #[test]
+    fn blank_lines_between_sentences_are_dropped() {
+        assert_eq!(
+            split_sentences("最初の文。\n\n次の文。"),
+            vec!["最初の文。", "次の文。"]
+        );
+    }
+
+    /// A very long sentence with no internal terminator must survive whole
+    /// (truncation, if any, is a separate concern applied by
+    /// `truncate_for_tts` at the call site — see `speak_reply`).
+    #[test]
+    fn a_very_long_untermined_sentence_is_not_split_or_dropped() {
+        let long = "a".repeat(5000);
+        let sentences = split_sentences(&long);
+        assert_eq!(sentences.len(), 1);
+        assert_eq!(sentences[0].chars().count(), 5000);
+    }
+
+    // -------------------------------------------------------------
+    // resolve_voice
+    // -------------------------------------------------------------
+
+    /// Builds a `Character` with only the voice fields populated (the rest
+    /// of the sheet is irrelevant to voice resolution).
+    fn character_with_voice(voice_name: Option<&str>, voice_model: Option<&str>) -> Character {
+        Character {
+            id: "c1".to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            sheet: npc_core::CharacterSheet::default(),
+            voice_model: voice_model.map(|s| s.to_string()),
+            voice_name: voice_name.map(|s| s.to_string()),
+            avatar: None,
+        }
+    }
+
+    #[test]
+    fn no_active_character_falls_back_to_global_config() {
+        let (voice, model) = resolve_voice(None, "alloy", "tts-1");
+        assert_eq!(voice, "alloy");
+        assert_eq!(model, "tts-1");
+    }
+
+    #[test]
+    fn active_character_voice_overrides_global_config() {
+        let c = character_with_voice(Some("shimmer"), Some("tts-1-hd"));
+        let (voice, model) = resolve_voice(Some(&c), "alloy", "tts-1");
+        assert_eq!(voice, "shimmer");
+        assert_eq!(model, "tts-1-hd");
+    }
+
+    /// Each field falls back independently — a character can pin a voice
+    /// without also pinning a model, or vice versa.
+    #[test]
+    fn voice_and_model_fall_back_independently() {
+        let voice_only = character_with_voice(Some("shimmer"), None);
+        let (voice, model) = resolve_voice(Some(&voice_only), "alloy", "tts-1");
+        assert_eq!(voice, "shimmer");
+        assert_eq!(model, "tts-1");
+
+        let model_only = character_with_voice(None, Some("tts-1-hd"));
+        let (voice, model) = resolve_voice(Some(&model_only), "alloy", "tts-1");
+        assert_eq!(voice, "alloy");
+        assert_eq!(model, "tts-1-hd");
+    }
+
+    /// A present-but-empty field (imported before voice fields existed, or
+    /// cleared in the editor) must fall back exactly like `None` — never
+    /// forwarded to the API as an empty string.
+    #[test]
+    fn empty_but_present_voice_fields_fall_back_too() {
+        let c = character_with_voice(Some(""), Some(""));
+        let (voice, model) = resolve_voice(Some(&c), "alloy", "tts-1");
+        assert_eq!(voice, "alloy");
+        assert_eq!(model, "tts-1");
     }
 
     /// An unrelated config save (a prompt edit, a scheduler tweak) must not

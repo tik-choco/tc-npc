@@ -34,6 +34,7 @@ import { useNpcSocket } from "./hooks/useNpcSocket";
 import type { MessageKey } from "./lib/i18n";
 import { formatHash, useRoute, type Tab } from "./lib/router";
 import { ChatView } from "./views/ChatView";
+import { AvatarView } from "./views/AvatarView";
 import { CharactersView } from "./views/CharactersView";
 import { PeopleView } from "./views/PeopleView";
 import { VisionView } from "./views/VisionView";
@@ -56,7 +57,7 @@ const TABS: Array<{ id: Tab; labelKey: MessageKey; icon: typeof MessageSquare }>
 export function App() {
   const theme = useTheme();
   const { t } = useI18n();
-  const { route, setChatPanel } = useRoute();
+  const { route, setChatPanel, setChatLayout } = useRoute();
   const tab = route.tab;
   const npc = useNpcSocket();
 
@@ -65,8 +66,32 @@ export function App() {
   // are the only thing that tells them apart.
   useEffect(() => {
     const label = TABS.find((entry) => entry.id === tab)?.labelKey;
-    document.title = label ? `TC NPC — ${t(label)}` : "TC NPC";
+    document.title = tab === "avatar" ? `TC NPC — ${t("avatar.window.title")}` : label ? `TC NPC — ${t(label)}` : "TC NPC";
   }, [tab, t]);
+
+  // The bare avatar window is deliberately chrome-free: it exists to be
+  // dragged onto a second monitor or pointed at by capture software, and a
+  // header with a tab bar in the shot would defeat that. It is therefore
+  // returned before the shell rather than inside it.
+  if (tab === "avatar") {
+    return (
+      <AvatarView
+        character={npc.character}
+        avatar={npc.avatar}
+        speaking={npc.speaking}
+        speakingLevelRef={npc.speakingLevelRef}
+        // The bare window has no toolbar of its own, so its status pill is
+        // the only thing there telling you whether the NPC is listening,
+        // thinking or talking — it needs the same three signals the チャット
+        // toolbar derives that from.
+        voiceActive={npc.voiceActive}
+        volume={npc.volume}
+        pending={npc.pending}
+        affect={npc.affect}
+        ttsLines={npc.ttsLines}
+      />
+    );
+  }
 
   return (
     <div class="app-shell">
@@ -114,14 +139,20 @@ export function App() {
             connectionState={npc.connectionState}
             version={npc.version}
             character={npc.character}
+            avatar={npc.avatar}
             modules={npc.modules}
             affect={npc.affect}
             volume={npc.volume}
             ttsLines={npc.ttsLines}
             translations={npc.translations}
             voiceActive={npc.voiceActive}
+            ttsSuspended={npc.ttsSuspended}
+            speaking={npc.speaking}
+            speakingLevelRef={npc.speakingLevelRef}
             sidebarPanel={route.chatPanel}
             onSidebarPanelChange={setChatPanel}
+            layout={route.chatLayout}
+            onLayoutChange={setChatLayout}
             onSend={(text, speaker) => npc.send({ type: "input", text, speaker })}
             onInterrupt={() => npc.send({ type: "interrupt" })}
             onSuspend={() => npc.send({ type: "suspend" })}

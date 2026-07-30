@@ -1,0 +1,435 @@
+/* VRM avatar: the stage itself (components/VrmStage.tsx), the avatar-led
+   チャット layout, and the bare `#/avatar` window (views/AvatarView.tsx).
+   Tokens come from index.css. */
+
+/* --- The stage ----------------------------------------------------------- */
+/* The parent element owns the box; the canvas just fills it. The renderer is
+   created with alpha and a transparent clear colour, so whatever is behind
+   the stage shows through around the model rather than a black rectangle. */
+
+.vrm-stage {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.vrm-stage-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* Standing in for the model while it loads (and if it fails): the same
+   initial glyph the transcript's avatar gutter uses, so the layout doesn't
+   shift when the real model appears. */
+.vrm-stage-fallback {
+  position: absolute;
+  display: grid;
+  place-items: center;
+  width: 72px;
+  height: 72px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 28px;
+  font-weight: 600;
+  user-select: none;
+}
+
+.vrm-stage--pending {
+  /* Nothing to see through yet — a faint plate keeps the empty area from
+     reading as a rendering failure. */
+  background: var(--surface-2);
+  border-radius: var(--radius-l);
+}
+
+/* --- Avatar-led チャット layout -------------------------------------------- */
+/* Same view, re-stacked: the VRM fills the main column and the conversation
+   floats over it. `.chat-view--avatar` is set by ChatView when the layout
+   toggle is on `avatar` and the active character actually has a model. */
+
+.chat-view--avatar .chat-main {
+  position: relative;
+  isolation: isolate;
+  border-radius: var(--radius-l);
+  overflow: hidden;
+  background:
+    radial-gradient(120% 90% at 50% 0%, var(--surface) 0%, var(--bg-accent) 55%, var(--bg) 100%);
+  border: 1px solid var(--border);
+}
+
+/* The model sits behind everything, filling the column. */
+.chat-avatar-stage {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+}
+
+/* Toolbar, transcript and composer all ride above the model. They keep their
+   own styling from chat.css; only the stacking and backdrop change here. */
+.chat-view--avatar .chat-toolbar,
+.chat-view--avatar .chat-transcript-wrap,
+.chat-view--avatar .chat-composer {
+  position: relative;
+  z-index: 1;
+}
+
+.chat-view--avatar .chat-toolbar {
+  margin: var(--space-3) var(--space-3) 0;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-m);
+  background: color-mix(in srgb, var(--surface) 82%, transparent);
+  backdrop-filter: blur(10px);
+  border: 1px solid var(--border);
+}
+
+/* The transcript becomes a column hugging one side rather than the whole
+   width, so the model stays visible next to it instead of being papered
+   over. It is also bottom-anchored: the newest turns sit just above the
+   composer, and the older ones fade out upward into the scene. */
+.chat-view--avatar .chat-transcript-wrap {
+  margin: var(--space-3);
+  min-height: 0;
+  /* The wrap is full-width and `flex: 1` (chat.css) while the transcript
+     inside it is capped at 520px, so in this layout most of it is empty box
+     sitting directly over the interactive model — and it would otherwise
+     swallow every drag/wheel meant for the stage beneath it, leaving no
+     grabbable area to rotate the avatar at all. Click-through here, with the
+     two things inside that *are* interactive opting back in below. */
+  pointer-events: none;
+}
+
+.chat-view--avatar .chat-transcript,
+.chat-view--avatar .chat-jump {
+  pointer-events: auto;
+}
+
+.chat-view--avatar .chat-transcript {
+  max-width: 520px;
+  padding-right: var(--space-2);
+  /* Fade the top edge so scrolled-past turns dissolve into the scene
+     instead of being cut off by a hard line. */
+  mask-image: linear-gradient(to bottom, transparent 0, #000 72px, #000 100%);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 72px, #000 100%);
+  scrollbar-width: thin;
+}
+
+/* Bubbles need to stay legible over a rendered background, so they get a
+   translucent-but-blurred plate rather than the flat surface colour they
+   use in the transcript-led layout. */
+.chat-view--avatar .chat-bubble {
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  backdrop-filter: blur(8px);
+  box-shadow: var(--shadow-1);
+}
+
+/* The transcript-led layout paints user turns as solid `--primary` and so
+   uses `--on-primary` for the text. Here the plate is a pale tint of that
+   accent instead, so the on-primary foreground (white in light theme, near
+   black in dark) lands on the wrong side of the contrast and the operator's
+   own messages wash out. The tint is a surface, so it takes the surface
+   foreground.
+   The tint is mixed from `--primary` rather than `--primary-soft-strong`
+   for the same reason: that token is already translucent (alpha .16/.22),
+   so mixing it with `--surface` dragged the plate down to ~50% alpha —
+   half of what the rule above gives every other bubble — and the scene
+   showed straight through the text. Mix opaque, then apply the same 88%
+   as the sibling plate so the two read as one material. */
+.chat-view--avatar .chat-bubble--user {
+  background: color-mix(in srgb, color-mix(in srgb, var(--primary) 16%, var(--surface)) 88%, transparent);
+  color: var(--text);
+  border: 1px solid color-mix(in srgb, var(--primary) 28%, transparent);
+}
+
+.chat-view--avatar .chat-system-line {
+  background: color-mix(in srgb, var(--surface) 70%, transparent);
+  backdrop-filter: blur(6px);
+  border-radius: var(--radius-s);
+  padding: 2px var(--space-2);
+}
+
+.chat-view--avatar .chat-composer {
+  margin: 0 var(--space-3) var(--space-3);
+  padding: var(--space-2);
+  border-radius: var(--radius-m);
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  backdrop-filter: blur(10px);
+  border: 1px solid var(--border);
+}
+
+/* Below the sidebar's breakpoint the column is too narrow to hold both a
+   readable transcript and a visible model side by side, so the transcript
+   takes the full width and simply sits over the lower half of the scene. */
+@media (max-width: 700px) {
+  .chat-view--avatar .chat-transcript {
+    max-width: none;
+  }
+}
+
+/* --- Layout toggle ------------------------------------------------------- */
+/* A two-position segmented control in the toolbar, matching the sidebar's
+   pill tabs (styles/sidebar.css) so the two read as the same kind of switch. */
+
+.chat-layout-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+
+.chat-layout-toggle button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 4px 10px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.chat-layout-toggle button:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.chat-layout-toggle button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.chat-layout-toggle button[aria-pressed="true"] {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-1);
+}
+
+/* --- Bare avatar window (`#/avatar`) ------------------------------------- */
+/* Its own window: no app header, no chrome, nothing but the model and a
+   caption that fades out when the pointer leaves. Sized to the viewport so
+   the window itself frames the shot. */
+
+.avatar-window {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+/* Toggled on from the window's own controls: strips the page background so a
+   capture source can key it out, or so a transparent-window setup shows the
+   desktop behind the model. */
+.avatar-window--bare {
+  background: transparent;
+}
+
+.avatar-window--chroma {
+  background: #00b140; /* standard chroma-key green */
+}
+
+.avatar-window-stage {
+  position: absolute;
+  inset: 0;
+}
+
+.avatar-window-caption {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  background: linear-gradient(to top, color-mix(in srgb, var(--surface) 85%, transparent), transparent);
+  color: var(--text);
+  font-size: 14px;
+  pointer-events: none;
+}
+
+.avatar-window-name {
+  font-weight: 600;
+}
+
+.avatar-window-line {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+}
+
+/* The window's controls stay out of the way until the pointer is over it —
+   the whole point of this screen is that it's clean enough to capture. */
+.avatar-window-controls {
+  position: absolute;
+  top: var(--space-3);
+  right: var(--space-3);
+  z-index: 2;
+  display: flex;
+  gap: var(--space-2);
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.avatar-window:hover .avatar-window-controls,
+.avatar-window-controls:focus-within {
+  opacity: 1;
+}
+
+.avatar-window-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: var(--space-6);
+  text-align: center;
+  color: var(--text-muted);
+}
+
+/* --- Status pill (bare window + avatar-led チャット layout) -------------- */
+/* One "what is it doing" readout — idle/listening/thinking/speaking, derived
+   in AvatarView.tsx (`deriveAvatarStatus`) and rendered by the shared
+   `AvatarStatusBadge` component, so this window's overlay and ChatView's
+   avatar-led layout read identically instead of drifting into two designs.
+   The チャット layout folds the badge straight into `.chat-toolbar-text`
+   (ChatView.tsx) rather than floating it separately — the toolbar already
+   spans the full width up there, so a floating badge would either sit
+   behind its plate or collide with `.chat-toolbar-actions`. Only this
+   window needs its own positioned wrapper, since here the pill floats
+   directly over the model with no toolbar row to join. */
+
+.avatar-window-status {
+  position: absolute;
+  top: var(--space-3);
+  left: var(--space-3);
+  z-index: 1;
+  /* Not a control — nothing inside is clickable — so it stays click-through
+     rather than intercepting drags meant for the interactive model beneath
+     it (see `interactive` on VrmStage). */
+  pointer-events: none;
+}
+
+.avatar-status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 3px var(--space-2) 3px 3px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1;
+  white-space: nowrap;
+  /* A solid-ish plate rather than bare coloured text: against the chroma
+     and transparent backdrops (`.avatar-window--chroma`/`--bare`) text alone
+     could blend into the key colour or vanish outright, so the pill always
+     carries its own background regardless of what's behind it. */
+  background: color-mix(in srgb, var(--surface) 78%, transparent);
+  backdrop-filter: blur(8px);
+}
+
+.avatar-status-glyph {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-2);
+  color: inherit;
+}
+
+/* idle keeps the pill's own default (muted grey, static) — the quiet state
+   deliberately looks like "nothing to report" rather than earning its own
+   accent. */
+
+.avatar-status--listening {
+  color: var(--primary);
+}
+
+.avatar-status--listening .avatar-status-glyph {
+  background: var(--primary-soft);
+}
+
+/* Mirrors chat.css's `.chat-voice-glyph::after` (see `.chat-voice`) almost
+   exactly, so "the mic loop is live and hearing something" reads as the
+   same colour and the same swelling ring everywhere it shows up. Duplicated
+   rather than shared: chat.css isn't ours to edit this round, and the two
+   already live in separate stylesheets. `--status-level` is only set inline
+   while status is "listening" (see AvatarStatusBadge); the `, 0` fallback
+   covers the brief instant between a status change and its own re-render. */
+.avatar-status--listening .avatar-status-glyph::after {
+  content: "";
+  position: absolute;
+  inset: -4px;
+  border-radius: var(--radius-pill);
+  border: 2px solid currentColor;
+  opacity: calc(0.18 + var(--status-level, 0) * 0.7);
+  transform: scale(calc(1 + var(--status-level, 0) * 0.3));
+  transition: opacity var(--dur-fast) linear, transform var(--dur-fast) linear;
+  pointer-events: none;
+}
+
+/* thinking and speaking can't be handed a live level the way listening can
+   (see AvatarStatusBadge's doc comment on why `speakingLevelRef` stays a
+   ref), so they get a fixed animation instead — still enough motion to read
+   as "something is actively happening" rather than a static label. Both
+   respect the app-wide reduced-motion override in index.css. */
+.avatar-status--thinking {
+  color: var(--text);
+}
+
+.avatar-status--thinking .avatar-status-glyph {
+  background: var(--surface-3);
+}
+
+.avatar-status--thinking .avatar-status-glyph svg {
+  animation: tc-npc-avatar-spin 1s linear infinite;
+}
+
+.avatar-status--speaking {
+  color: var(--success);
+}
+
+.avatar-status--speaking .avatar-status-glyph {
+  background: var(--success-soft);
+}
+
+.avatar-status--speaking .avatar-status-glyph svg {
+  animation: tc-npc-avatar-pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes tc-npc-avatar-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes tc-npc-avatar-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 0.75;
+  }
+  50% {
+    transform: scale(1.18);
+    opacity: 1;
+  }
+}

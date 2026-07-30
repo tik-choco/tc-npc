@@ -148,6 +148,11 @@ pub async fn handle_raw_event(data: &[u8], data_dir: &Path, bus: &Bus) {
         },
         voice_model: character.voice_model,
         voice_name: character.voice_name,
+        // Catalog broadcasts don't carry avatar data (VRM files aren't
+        // published to the room) -- discovered characters start with no
+        // avatar assigned, same as any character saved before avatars
+        // existed.
+        avatar: None,
     };
 
     if let Err(err) = save_discovered(data_dir, &npc_character) {
