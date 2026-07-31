@@ -6,6 +6,26 @@ separate processes wired together over Redis pub/sub — plus a web UI server,
 into a single Rust binary. **Redis is not used**: the pub/sub bus is now an
 in-process `tokio::sync::broadcast` channel.
 
+## Role
+
+tc-npc is the runtime, not the author: it takes a character already authored
+elsewhere and actually runs it, but has no persona editing, growth interviews,
+or publishing of its own. Characters only flow in — via
+`import_tc_town_export` (see [Characters](#characters)) or discovery in the
+P2P catalog room (see [mist](#mist-optional-feature)) — never back out.
+
+Where a character is embodied is a difference of actuator backend and display
+mode, not a different application. VRChat avatar control over OSC
+(`npc-action`) is today's backend, wired in behind the same `Module`/bus
+structure as every other module described below; an additional actuator
+backend is implemented the same way, not as a fork of tc-npc.
+
+The LLM connection is likewise a configured endpoint, not a dependency:
+`api.base_url` (`crates/npc-core/src/config.rs`) can point at any
+OpenAI-compatible server — including a locally resident one — but nothing
+here assumes that server exists. tc-npc runs the same way against a plain
+OpenAI-compatible API with none of that present.
+
 ## Crate layout
 
 ```
