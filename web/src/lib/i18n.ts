@@ -187,7 +187,9 @@ const ja = {
   "avatar.window.framing.full": "全身",
   // 字幕トグルは状態インジケータの表示も兼ねる（キャプチャ用途で消せる必要が
   // あるのは両方とも同じ理由のため）。ボタン自体は1つのまま。
-  "avatar.window.caption": "字幕・状態表示",
+  "avatar.window.caption.off": "字幕なし（クリックで字幕を表示）",
+  "avatar.window.caption.strip": "字幕: 下部バー（クリックで吹き出しへ）",
+  "avatar.window.caption.bubble": "字幕: 吹き出し（クリックで非表示へ）",
 
   // --- アバター状態インジケータ(バーアバターウィンドウ + アバター主体チャット) ---
   "avatar.status.idle": "待機中",
@@ -772,7 +774,9 @@ const en: Record<MessageKey, string> = {
   "avatar.window.framing.full": "Full body",
   // Same toggle now also hides the status pill — see the ja comment above
   // this key for why the two share one control.
-  "avatar.window.caption": "Captions & status",
+  "avatar.window.caption.off": "Captions off (click to show the bar)",
+  "avatar.window.caption.strip": "Captions: bottom bar (click for a bubble)",
+  "avatar.window.caption.bubble": "Captions: speech bubble (click to hide)",
 
   "avatar.status.idle": "Idle",
   "avatar.status.listening": "Listening…",
@@ -1339,7 +1343,9 @@ const zh: Record<MessageKey, string> = {
   "avatar.window.framing.bust": "半身",
   "avatar.window.framing.upper": "上半身",
   "avatar.window.framing.full": "全身",
-  "avatar.window.caption": "字幕・状态",
+  "avatar.window.caption.off": "无字幕(点击显示字幕条)",
+  "avatar.window.caption.strip": "字幕: 底部字幕条(点击切换为气泡)",
+  "avatar.window.caption.bubble": "字幕: 对话气泡(点击隐藏)",
 
   "avatar.status.idle": "待机中",
   "avatar.status.listening": "聆听中…",

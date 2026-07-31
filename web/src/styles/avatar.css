@@ -463,3 +463,103 @@
 .sprite-stage--missing {
   display: none;
 }
+
+/* --- Speech balloon caption (AvatarView, captionStyle "bubble") ---------
+   The alternative to `.avatar-window-caption`'s bottom bar, ported from
+   tc-assistant2's mascot. Same line of text; the difference is that a
+   balloon reads as the character speaking rather than as a subtitle track,
+   which is usually what a capture setup wants.
+
+   Placed top-centre with the tail pointing down at the model, rather than
+   over it: the model is the subject, and a balloon covering its face would
+   defeat both this window's purposes at once. */
+.avatar-window-bubble {
+  position: absolute;
+  top: var(--space-4);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1;
+  max-width: min(80%, 34rem);
+  padding: var(--space-3) var(--space-4);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.5;
+  box-shadow: 0 6px 18px rgb(0 0 0 / 0.22);
+  /* Never intercepts the pointer: the model underneath is draggable (camera
+     orbit), and a balloon that ate those gestures would make the window feel
+     broken exactly while the character is talking. */
+  pointer-events: none;
+  overflow-wrap: anywhere;
+}
+
+/* The tail, drawn as a rotated square tucked under the bottom edge so it
+   inherits the same background — including the color-mix, which a border
+   triangle could not match. */
+.avatar-window-bubble::after {
+  content: "";
+  position: absolute;
+  bottom: -5px;
+  left: 50%;
+  width: 12px;
+  height: 12px;
+  transform: translateX(-50%) rotate(45deg);
+  border-radius: 2px;
+  background: inherit;
+}
+
+.avatar-window-bubble-name {
+  display: block;
+  margin-bottom: 2px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* Three dots while a reply is being composed — the one case where the
+   balloon is drawn with nothing said yet. */
+.avatar-window-bubble-thinking {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  height: 1.5em;
+}
+
+.avatar-window-bubble-thinking i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.45;
+  animation: avatar-bubble-thinking 1.2s ease-in-out infinite;
+}
+
+.avatar-window-bubble-thinking i:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.avatar-window-bubble-thinking i:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes avatar-bubble-thinking {
+  0%,
+  60%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.45;
+  }
+  30% {
+    transform: translateY(-4px);
+    opacity: 1;
+  }
+}
+
+/* Respect a reduced-motion preference: the dots still mark "thinking", they
+   just stop bouncing. */
+@media (prefers-reduced-motion: reduce) {
+  .avatar-window-bubble-thinking i {
+    animation: none;
+  }
+}
