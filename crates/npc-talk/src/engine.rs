@@ -580,6 +580,43 @@ impl ChatEngine {
             .ok_or_else(|| anyhow::anyhow!("no choices returned"))?;
         Ok(choice.message)
     }
+
+    /// Ask the LLM to transliterate `name` into katakana so TTS reads it
+    /// naturally, ported from tc-assistant2's `convertNameToKatakana`
+    /// (`src/main.tsx`). Called from `crate::module` for a stream-event
+    /// viewer name flagged via `speech_payload`'s `transliterate_name`
+    /// (npc-server's `ws.rs`) — see
+    /// `crate::module::maybe_transliterate_event_name`.
+    ///
+    /// Reasoning effort is forced to `"none"` regardless of what this
+    /// engine's `llm` is otherwise configured with: transliterating one name
+    /// needs no deep reasoning, and forcing the lightest effort keeps it from
+    /// lagging the event turn it's meant to smooth out (same rationale as
+    /// tc-assistant2's own `translateToLanguage`).
+    ///
+    /// Falls back to `name` unchanged on any failure — a transliteration miss
+    /// must never fail (or even delay past a timeout) the event turn it was
+    /// meant to help pronounce.
+    pub async fn transliterate_name(&self, name: &str) -> String {
+        let messages = vec![ChatMessage::system(TRANSLITERATE_NAME_PROMPT), ChatMessage::user(name.to_string())];
+        let mut req = npc_llm::ChatRequest::new(self.model.clone(), messages);
+        req.reasoning_effort = Some("none".to_string());
+
+        match self.llm.chat(req).await {
+            Ok(resp) => {
+                let katakana = resp.content().unwrap_or_default().trim().to_string();
+                if katakana.is_empty() {
+                    name.to_string()
+                } else {
+                    katakana
+                }
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, name, "npc-talk: name transliteration failed, using original name");
+                name.to_string()
+            }
+        }
+    }
 }
 
 /// Build the `topic::CHAT`/`msg::CHAT_LOG` payload, carrying `speaker` along
@@ -636,6 +673,18 @@ pub fn fill_template(tpl: &str, vars: &HashMap<String, String>) -> String {
         vars.get(&caps[1]).cloned().unwrap_or_default()
     });
     replaced.trim().to_string()
+}
+
+/// System prompt for [`ChatEngine::transliterate_name`], ported verbatim
+/// from tc-assistant2's `convertNameToKatakana` (`src/main.tsx`).
+const TRANSLITERATE_NAME_PROMPT: &str =
+    "Transliterate the given name into Japanese katakana for text-to-speech. Respond with the katakana only, no quotes, no explanation, no extra text.";
+
+/// True when `name` contains a Latin letter TTS would otherwise read out
+/// letter-by-letter instead of as a name — e.g. a Twitch/YouTube handle.
+/// Ported from tc-assistant2's `hasLatinLetters` (`src/main.tsx`, `/[A-Za-z]/`).
+pub fn has_latin_letters(name: &str) -> bool {
+    name.chars().any(|c| c.is_ascii_alphabetic())
 }
 
 /// Two-pass history trim, ported exactly from Go `ChatAgent.Chat`'s tail:
@@ -1080,5 +1129,37 @@ mod tests {
             std::iter::from_fn(|| rx.try_recv().ok()).all(|m| m.env.r#type != msg::CHAT_ERROR),
             "no requester means nobody to report to"
         );
+    }
+
+    #[test]
+    fn has_latin_letters_detects_ascii_letters_only() {
+        assert!(has_latin_letters("Bob"));
+        assert!(has_latin_letters("たろうBob"), "mixed script still counts");
+        assert!(!has_latin_letters("太郎"));
+        assert!(!has_latin_letters("たろう123"), "digits alone are not Latin letters");
+        assert!(!has_latin_letters(""));
+    }
+
+    /// Mirrors tc-assistant2's `convertNameToKatakana` failure path: an
+    /// unreachable endpoint must not fail (or panic) the caller, it must
+    /// just hand back the original name.
+    #[tokio::test]
+    async fn transliterate_name_falls_back_to_the_original_on_failure() {
+        let engine = ChatEngine::new(
+            npc_llm::LlmClient::new("http://localhost:0/v1", ""),
+            "test-model".to_string(),
+            Vec::new(),
+            String::new(),
+            10,
+            crate::tools::ToolRegistry::new(),
+            None,
+            "auto",
+            npc_core::Bus::new(),
+            npc_core::config::AffectConfig::default(),
+            true,
+            true,
+        );
+
+        assert_eq!(engine.transliterate_name("Bob").await, "Bob");
     }
 }

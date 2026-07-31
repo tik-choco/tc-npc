@@ -201,6 +201,11 @@ fn handle_bus_message(engine: &Arc<ChatEngine>, state: &mut TalkState, bus_msg: 
                     // `None` rather than an empty string (see
                     // `ChatEngine::chat_with_context`).
                     let request_id = extract_request_id(&bus_msg.env.payload);
+                    // `true` only on the stream-event path (see
+                    // `extract_transliterate_name`); gates whether `speaker`
+                    // is worth running through katakana transliteration
+                    // before the turn.
+                    let transliterate_name = extract_transliterate_name(&bus_msg.env.payload);
                     if state.interpret_mode {
                         tracing::debug!(content = %content, "npc-talk: interpretation mode, leaving speech to npc-translate");
                     } else if state.suspended {
@@ -209,6 +214,11 @@ fn handle_bus_message(engine: &Arc<ChatEngine>, state: &mut TalkState, bus_msg: 
                         tracing::info!(content = %content, speaker = ?speaker, request_id = ?request_id, "npc-talk: received speech input");
                         let engine = engine.clone();
                         tokio::spawn(async move {
+                            let content = if transliterate_name {
+                                maybe_transliterate_event_name(&engine, content, speaker.as_deref()).await
+                            } else {
+                                content
+                            };
                             if let Err(err) = engine
                                 .chat_with_context(&content, speaker.as_deref(), request_id.as_deref())
                                 .await
@@ -367,6 +377,58 @@ fn extract_request_id(payload: &serde_json::Value) -> Option<String> {
     payload.get("request_id").and_then(|v| v.as_str()).map(str::to_string)
 }
 
+/// Pull the `transliterate_name` flag off a `topic::SENSE`/`msg::SPEECH`
+/// payload — npc-server's `ws.rs` stamps this (a sibling of `speaker`/
+/// `request_id` above) only from `process_event`, the stream-event path,
+/// never from `process_input`'s plain speech/text turns. `true` means
+/// `speaker`, if it has Latin letters, is a stream-event viewer handle worth
+/// transliterating into katakana before the turn (see
+/// [`maybe_transliterate_event_name`]). Absent (or not literally `true`)
+/// means "no", matching every other optional field on this payload.
+fn extract_transliterate_name(payload: &serde_json::Value) -> bool {
+    payload.get("transliterate_name").and_then(|v| v.as_bool()).unwrap_or(false)
+}
+
+/// When `speaker` is a stream-event viewer name containing Latin letters TTS
+/// would otherwise mispronounce, ask the engine's LLM to transliterate it
+/// into katakana and substitute every literal occurrence of the name in
+/// `content` with that transliteration before the turn runs — so if the
+/// character's own reply repeats the name, it already carries the
+/// pronunciation TTS needs. Ported from tc-assistant2's
+/// `convertNameToKatakana`/`hasLatinLetters` (`src/main.tsx`).
+///
+/// Falls back to `content` unchanged whenever there is nothing to do: no
+/// speaker, a speaker name with no Latin letters, or a transliteration that
+/// came back identical to the input (which is also what
+/// [`ChatEngine::transliterate_name`] itself returns on failure — this
+/// function never needs to know the difference between "no Latin script in
+/// the result" and "the LLM call failed").
+///
+/// Deliberately substitutes into `content` — the instruction line
+/// npc-server's `build_event_instruction` built around the name — rather than
+/// post-processing the LLM's reply the way tc-assistant2 did: tc-npc's
+/// `chat_response` has a single `content` field read by both the chat
+/// transcript and npc-speech's TTS (unlike tc-assistant2, which kept a
+/// separate spoken-only copy so the transcript could keep showing the
+/// original name), so there is no second channel here to apply a
+/// TTS-only substitution to after the fact. Doing it before the turn instead
+/// means the model sees (and, if it repeats the name, answers with) the
+/// katakana form directly, which is also more robust than a literal
+/// find/replace over whatever the model chooses to write in its reply.
+async fn maybe_transliterate_event_name(engine: &ChatEngine, content: String, speaker: Option<&str>) -> String {
+    let Some(name) = speaker else {
+        return content;
+    };
+    if !crate::engine::has_latin_letters(name) {
+        return content;
+    }
+    let katakana = engine.transliterate_name(name).await;
+    if katakana == name {
+        return content;
+    }
+    content.replace(name, &katakana)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -515,6 +577,26 @@ mod tests {
         assert_eq!(extract_request_id(&payload), None);
     }
 
+    #[test]
+    fn extract_transliterate_name_true_when_flag_set() {
+        let payload = serde_json::json!({"content": "hi", "transliterate_name": true});
+        assert!(extract_transliterate_name(&payload));
+    }
+
+    #[test]
+    fn extract_transliterate_name_false_when_field_absent() {
+        // `process_input` never stamps this field — see `ws.rs`'s
+        // `speech_payload` doc for why it's event-only.
+        let payload = serde_json::json!({"content": "hi"});
+        assert!(!extract_transliterate_name(&payload));
+    }
+
+    #[test]
+    fn extract_transliterate_name_false_when_field_is_explicitly_false() {
+        let payload = serde_json::json!({"content": "hi", "transliterate_name": false});
+        assert!(!extract_transliterate_name(&payload));
+    }
+
     #[tokio::test]
     async fn person_memory_message_is_dispatched_without_panicking() {
         let engine = engine();
@@ -639,5 +721,46 @@ mod tests {
         assert_eq!(cleared, None);
 
         let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    /// Requirement 1: a name with no Latin letters must never reach
+    /// [`ChatEngine::transliterate_name`] — `engine()`'s LLM endpoint
+    /// (`localhost:0`) is unreachable, so if this call went through it would
+    /// still fall back to `content` unchanged and this test would pass for
+    /// the wrong reason. It's the content staying *identical* (not just
+    /// unerrored) that shows the LLM call was skipped rather than made and
+    /// happening to no-op.
+    #[tokio::test]
+    async fn latin_free_name_never_triggers_transliteration() {
+        let engine = engine();
+        let content = "太郎さんが新しくフォローしてくれました。".to_string();
+
+        let result = maybe_transliterate_event_name(&engine, content.clone(), Some("太郎")).await;
+
+        assert_eq!(result, content);
+    }
+
+    /// Requirement 2: when transliteration fails, the original name is used
+    /// — here via `ChatEngine::transliterate_name`'s own fallback (an
+    /// unreachable LLM endpoint), threaded through
+    /// `maybe_transliterate_event_name` unchanged.
+    #[tokio::test]
+    async fn failed_transliteration_leaves_the_original_name_in_place() {
+        let engine = engine();
+        let content = "Bobさんが新しくフォローしてくれました。".to_string();
+
+        let result = maybe_transliterate_event_name(&engine, content.clone(), Some("Bob")).await;
+
+        assert_eq!(result, content, "a failed transliteration must not alter the instruction line");
+    }
+
+    #[tokio::test]
+    async fn no_speaker_leaves_content_unchanged() {
+        let engine = engine();
+        let content = "誰かさんが新しくフォローしてくれました。".to_string();
+
+        let result = maybe_transliterate_event_name(&engine, content.clone(), None).await;
+
+        assert_eq!(result, content);
     }
 }

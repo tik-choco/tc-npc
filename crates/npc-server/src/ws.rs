@@ -410,7 +410,9 @@ fn process_input(state: &AppState, client_id: u64, text: String, speaker: Option
     state.ctx.bus.publish(
         topic::SENSE,
         msg::SPEECH,
-        speech_payload(&text, speaker.as_deref(), Some(&request_id)),
+        // Not a stream event, so no `transliterate_name` — see
+        // `speech_payload`'s doc for why that flag is event-only.
+        speech_payload(&text, speaker.as_deref(), Some(&request_id), false),
     );
 }
 
@@ -454,7 +456,16 @@ fn process_event(
     state.ctx.bus.publish(
         topic::SENSE,
         msg::SPEECH,
-        speech_payload(&line, user_name.as_deref(), Some(&request_id)),
+        // `transliterate_name: true` — a viewer's `user_name` here is
+        // routinely an English/Latin handle (Twitch/YouTube/etc. accounts),
+        // which TTS reads letter-by-letter rather than as a name. Ported from
+        // tc-assistant2's `hasLatinLetters`/`convertNameToKatakana`
+        // (`src/main.tsx`): npc-talk (which owns the LLM client this needs)
+        // reads this flag and, when `user_name` has Latin letters, asks the
+        // LLM to transliterate it into katakana and substitutes it into this
+        // same instruction line before the turn runs — see
+        // `npc_talk::module::maybe_transliterate_event_name`.
+        speech_payload(&line, user_name.as_deref(), Some(&request_id), true),
     );
 }
 
@@ -493,13 +504,26 @@ fn set_voice_active(state: &AppState, active: bool) {
 /// `chat_silent` envelope it publishes, which is what lets
 /// `bus_forward.rs` correlate a `response` frame to the `input`/`event` that
 /// produced it instead of hardcoding `requestId: "-"` for every turn.
-fn speech_payload(content: &str, speaker: Option<&str>, request_id: Option<&str>) -> serde_json::Value {
+///
+/// `transliterate_name`, another sibling flag, is only ever `true` from
+/// `process_event`: it tells npc-talk that `speaker`, when present and
+/// containing Latin letters, is a stream-event viewer handle worth running
+/// through its LLM's katakana transliteration before the turn (ported from
+/// tc-assistant2's `hasLatinLetters`/`convertNameToKatakana`) — not a plain
+/// conversation partner's name from `process_input`, which is left alone.
+/// Omitted (rather than emitted as `false`) on every other payload, matching
+/// this function's existing omit-when-absent treatment of `speaker`/
+/// `request_id` above.
+fn speech_payload(content: &str, speaker: Option<&str>, request_id: Option<&str>, transliterate_name: bool) -> serde_json::Value {
     let mut payload = serde_json::json!({ "content": content });
     if let Some(speaker) = speaker.map(str::trim).filter(|s| !s.is_empty()) {
         payload["speaker"] = serde_json::json!(speaker);
     }
     if let Some(request_id) = request_id {
         payload["request_id"] = serde_json::json!(request_id);
+    }
+    if transliterate_name {
+        payload["transliterate_name"] = serde_json::json!(true);
     }
     payload
 }
@@ -603,25 +627,25 @@ mod tests {
 
     #[test]
     fn speech_payload_without_speaker_matches_legacy_shape() {
-        let payload = speech_payload("こんにちは", None, None);
+        let payload = speech_payload("こんにちは", None, None, false);
         assert_eq!(payload, serde_json::json!({ "content": "こんにちは" }));
     }
 
     #[test]
     fn speech_payload_with_blank_speaker_omits_the_field() {
-        let payload = speech_payload("こんにちは", Some("   "), None);
+        let payload = speech_payload("こんにちは", Some("   "), None, false);
         assert_eq!(payload, serde_json::json!({ "content": "こんにちは" }));
     }
 
     #[test]
     fn speech_payload_with_speaker_includes_it() {
-        let payload = speech_payload("こんにちは", Some("太郎"), None);
+        let payload = speech_payload("こんにちは", Some("太郎"), None, false);
         assert_eq!(payload, serde_json::json!({ "content": "こんにちは", "speaker": "太郎" }));
     }
 
     #[test]
     fn speech_payload_with_request_id_includes_it_alongside_speaker() {
-        let payload = speech_payload("こんにちは", Some("太郎"), Some("req-1"));
+        let payload = speech_payload("こんにちは", Some("太郎"), Some("req-1"), false);
         assert_eq!(
             payload,
             serde_json::json!({ "content": "こんにちは", "speaker": "太郎", "request_id": "req-1" })
@@ -630,8 +654,30 @@ mod tests {
 
     #[test]
     fn speech_payload_with_request_id_only_omits_speaker() {
-        let payload = speech_payload("こんにちは", None, Some("req-1"));
+        let payload = speech_payload("こんにちは", None, Some("req-1"), false);
         assert_eq!(payload, serde_json::json!({ "content": "こんにちは", "request_id": "req-1" }));
+    }
+
+    /// `process_event` is the only caller that ever passes `true` here — see
+    /// `speech_payload`'s doc for why plain speech input never needs it.
+    #[test]
+    fn speech_payload_with_transliterate_name_includes_the_flag() {
+        let payload = speech_payload("Bobさんが新しくフォローしてくれました。", Some("Bob"), Some("req-1"), true);
+        assert_eq!(
+            payload,
+            serde_json::json!({
+                "content": "Bobさんが新しくフォローしてくれました。",
+                "speaker": "Bob",
+                "request_id": "req-1",
+                "transliterate_name": true,
+            })
+        );
+    }
+
+    #[test]
+    fn speech_payload_without_transliterate_name_omits_the_flag_rather_than_emitting_false() {
+        let payload = speech_payload("こんにちは", Some("太郎"), None, false);
+        assert!(payload.get("transliterate_name").is_none());
     }
 
     /// Every `build_event_instruction` call below shares this shape: a
