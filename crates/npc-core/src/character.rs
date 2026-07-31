@@ -30,21 +30,25 @@ pub struct CharacterSheet {
     pub notes: String,
 }
 
-/// The 3D model a character is displayed as. Only VRM is supported, but the
-/// `kind` tag is kept on the wire so an added avatar type later doesn't have
-/// to break the shape every stored character file already has.
+/// The body a character is displayed as, and which library it comes from.
+/// The `kind` tag was kept on the wire before there was a second kind, so
+/// that adding one wouldn't break the shape every stored character file
+/// already has — which is exactly what `"sprite"` then did.
 ///
-/// `file` names a `.vrm` in the local model folder (`{data_dir}/vrm/`, see
-/// [`crate::vrm`]) rather than embedding the model: the folder is the
-/// library, so a character just points at one of its entries. A dangling
-/// pointer — the character names a model the folder no longer has — is not
-/// an error anywhere; the UI falls back to the plain initial avatar, which
-/// is also what a character with no avatar at all gets.
+/// `file` names an entry in the library `kind` selects — a `.vrm` in
+/// `{data_dir}/vrm/` ([`crate::vrm`]) or a `.png` sheet in
+/// `{data_dir}/sprites/` ([`crate::sprite`]) — rather than embedding it: the
+/// folder is the library, so a character just points at one of its entries.
+/// A dangling pointer — the character names a file the folder no longer has
+/// — is not an error anywhere; the UI falls back to the plain initial
+/// avatar, which is also what a character with no avatar at all gets.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Avatar {
-    /// Always `"vrm"` today.
+    /// `"vrm"` or `"sprite"`. An unrecognised value is treated as `"vrm"`
+    /// by the resolver rather than rejected, so a file written by a newer
+    /// build degrades to "not found" instead of failing.
     pub kind: String,
-    /// File name (with extension) inside `{data_dir}/vrm/`.
+    /// File name (with extension) inside the library `kind` selects.
     pub file: String,
 }
 
@@ -126,14 +130,21 @@ struct TcTownCharacter {
 /// isn't there: a dangling avatar renders as the plain initial (see
 /// [`Avatar`]).
 ///
-/// Image avatars (`kind: "image"`) carry no usable file name and are
-/// dropped.
+/// Image avatars (`kind: "image"`) have no file name — they carry their
+/// picture inline as `dataUrl` instead. [`import_tc_town_export_into`] turns
+/// that into a sprite sheet; [`avatar_from_tc_town`] alone still ignores
+/// them, since it has nowhere to put bytes.
 #[derive(Debug, Deserialize)]
 struct TcTownAvatar {
     #[serde(default)]
     kind: String,
     #[serde(default, rename = "fileName")]
     file_name: String,
+    /// Present only on `kind: "image"` — the picture itself, base64 in a
+    /// `data:` URL (tc-town's `exportAvatar` embeds image bytes but not VRM
+    /// bytes, which are multi-megabyte and live in a shared library).
+    #[serde(default, rename = "dataUrl")]
+    data_url: String,
 }
 
 /// Map a tc-town avatar onto a local one, keeping only VRM references that
@@ -174,28 +185,103 @@ struct TcTownSheet {
 /// into a list of [`Character`]s. Defensive against missing fields — every
 /// field defaults to an empty string/None rather than erroring.
 pub fn import_tc_town_export(json: &str) -> anyhow::Result<Vec<Character>> {
+    Ok(parse_tc_town_export(json)?
+        .into_iter()
+        .map(|(character, _)| character)
+        .collect())
+}
+
+/// Like [`import_tc_town_export`], but able to *materialise* the avatars an
+/// export carries as bytes rather than as references.
+///
+/// A tc-town **image** avatar embeds its picture in the bundle (unlike a VRM
+/// avatar, which is referenced by name and expected to already be in the
+/// local model folder). Until sprite sheets existed there was nowhere to put
+/// those bytes, so they were dropped and the character arrived with no body.
+/// Here they become a sheet in `{data_dir}/sprites/` and a
+/// `kind: "sprite"` avatar.
+///
+/// Generation failure is **not** an import failure: the character is kept
+/// without an avatar and a warning is logged, matching tc-town's own rule
+/// that a missing avatar imports the character rather than failing the whole
+/// bundle. Losing a picture is a much smaller loss than losing the sheet.
+pub fn import_tc_town_export_into(json: &str, data_dir: &Path) -> anyhow::Result<Vec<Character>> {
+    let parsed = parse_tc_town_export(json)?;
+
+    Ok(parsed
+        .into_iter()
+        .map(|(mut character, image_data_url)| {
+            let Some(data_url) = image_data_url else {
+                return character;
+            };
+            match materialise_image_avatar(data_dir, &character.id, &data_url) {
+                Ok(avatar) => character.avatar = Some(avatar),
+                Err(err) => tracing::warn!(
+                    character = %character.id,
+                    %err,
+                    "npc-core: could not build a sprite sheet from the imported image avatar; \
+                     importing the character without one"
+                ),
+            }
+            character
+        })
+        .collect())
+}
+
+/// Write one imported picture into the sprite library and return the avatar
+/// pointing at it. The sheet is named after the character, so re-importing
+/// the same character replaces its sheet instead of accumulating copies.
+fn materialise_image_avatar(
+    data_dir: &Path,
+    character_id: &str,
+    data_url: &str,
+) -> anyhow::Result<Avatar> {
+    let png = crate::sprite::sheet_from_image_data_url(data_url)?;
+    // The id reaches the filesystem through `crate::sprite`, and an id is
+    // already constrained to a safe shape by `load_character`/`save_character`
+    // — but this builds a *new* name from it, so it is validated here too
+    // rather than trusting that the export's ids obey the same rule.
+    let file = format!("{character_id}.png");
+    crate::sprite::validate_sprite_file_name(&file)?;
+    crate::sprite::save_sprite(data_dir, &file, &png)?;
+    Ok(Avatar {
+        kind: "sprite".to_string(),
+        file,
+    })
+}
+
+/// Shared parse for both import entry points: each character paired with the
+/// `data:` URL of its tc-town image avatar, when it had one.
+fn parse_tc_town_export(json: &str) -> anyhow::Result<Vec<(Character, Option<String>)>> {
     let export: TcTownExport = serde_json::from_str(json)
         .map_err(|e| anyhow::anyhow!("failed to parse tc-town export: {e}"))?;
 
     Ok(export
         .characters
         .into_iter()
-        .map(|c| Character {
-            id: c.id,
-            created_at: c.created_at,
-            updated_at: c.updated_at,
-            sheet: CharacterSheet {
-                name: c.sheet.name,
-                summary: c.sheet.summary,
-                persona: c.sheet.persona,
-                speech_style: c.sheet.speech_style,
-                likes: c.sheet.likes,
-                relationships: c.sheet.relationships,
-                notes: c.sheet.notes,
-            },
-            voice_model: c.voice_model,
-            voice_name: c.voice_name,
-            avatar: avatar_from_tc_town(c.avatar),
+        .map(|c| {
+            let image_data_url = c.avatar.as_ref().and_then(|a| {
+                let url = a.data_url.trim();
+                (a.kind == "image" && !url.is_empty()).then(|| url.to_string())
+            });
+            let character = Character {
+                id: c.id,
+                created_at: c.created_at,
+                updated_at: c.updated_at,
+                sheet: CharacterSheet {
+                    name: c.sheet.name,
+                    summary: c.sheet.summary,
+                    persona: c.sheet.persona,
+                    speech_style: c.sheet.speech_style,
+                    likes: c.sheet.likes,
+                    relationships: c.sheet.relationships,
+                    notes: c.sheet.notes,
+                },
+                voice_model: c.voice_model,
+                voice_name: c.voice_name,
+                avatar: avatar_from_tc_town(c.avatar),
+            };
+            (character, image_data_url)
         })
         .collect())
 }
@@ -358,8 +444,64 @@ mod tests {
         assert_eq!(chars[0].id, "abc123");
         assert_eq!(chars[0].sheet.name, "テスト");
         assert_eq!(chars[0].sheet.summary, "");
-        // An image avatar has no local counterpart, so it's dropped.
+        // The plain parse has nowhere to put inline bytes, so an image
+        // avatar is dropped here — `import_tc_town_export_into` is what
+        // turns one into a sheet (see the tests below).
         assert!(chars[0].avatar.is_none());
+    }
+
+    /// A tc-town image avatar carries its picture inline, so importing
+    /// *with* a data dir gives the character a body instead of dropping it.
+    #[test]
+    fn imports_an_image_avatar_as_a_generated_sprite_sheet() {
+        use base64::Engine as _;
+
+        let mut img = image::RgbaImage::new(4, 2);
+        img.put_pixel(0, 0, image::Rgba([12, 34, 56, 255]));
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let data_url = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&png)
+        );
+        let json = format!(
+            r#"{{"app":"tc-town","version":1,"kind":"character","characters":[
+                {{"id":"withpic","sheet":{{"name":"絵"}},
+                 "avatar":{{"kind":"image","mime":"image/png","dataUrl":"{data_url}"}}}}]}}"#
+        );
+
+        let dir = std::env::temp_dir().join(format!("npc-core-import-{}", uuid::Uuid::new_v4()));
+        let chars = import_tc_town_export_into(&json, &dir).unwrap();
+
+        let avatar = chars[0].avatar.as_ref().expect("image avatar became a body");
+        assert_eq!(avatar.kind, "sprite");
+        assert_eq!(avatar.file, "withpic.png");
+        assert!(
+            crate::sprite::sprite_exists(&dir, &avatar.file).unwrap(),
+            "the generated sheet must actually be in the library"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A picture that can't be turned into a sheet costs the character its
+    /// avatar, not its import — the sheet is worth far more than the image.
+    #[test]
+    fn a_broken_image_avatar_still_imports_the_character() {
+        let json = r#"{"app":"tc-town","version":1,"kind":"character","characters":[
+            {"id":"broken","sheet":{"name":"壊れ"},
+             "avatar":{"kind":"image","dataUrl":"data:image/png;base64,bm90LWFuLWltYWdl"}}]}"#;
+
+        let dir = std::env::temp_dir().join(format!("npc-core-import-{}", uuid::Uuid::new_v4()));
+        let chars = import_tc_town_export_into(json, &dir).unwrap();
+
+        assert_eq!(chars.len(), 1);
+        assert_eq!(chars[0].sheet.name, "壊れ");
+        assert!(chars[0].avatar.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -165,12 +165,141 @@ pub fn delete_sprite(data_dir: &Path, file: &str) -> anyhow::Result<bool> {
     Ok(true)
 }
 
+/// Cell edge, in pixels, of a generated sheet — the size tc-town's own
+/// exporter uses.
+const GENERATED_CELL_PX: u32 = 128;
+
+/// Columns in a generated sheet. Fixed by the renderer's convention (see
+/// `web/src/components/SpriteStage.tsx`), which cycles a row of this many
+/// cells.
+const GENERATED_COLUMNS: u32 = 8;
+
+/// Build a sheet from a single still image, given as a `data:` URL.
+///
+/// This is what a tc-town **image** avatar becomes. Such a character has one
+/// portrait and no animation whatsoever, so there are no frames to recover:
+/// every cell is the same picture, and the result reads as a still. That is
+/// the honest outcome — inventing motion the source doesn't contain would be
+/// worse than not having any — and it is still a real improvement on what
+/// happened before, which was that image avatars were **dropped entirely**
+/// and the character arrived with no body at all.
+///
+/// One row, [`GENERATED_COLUMNS`] wide: the renderer cycles a fixed number
+/// of columns, so the row has to be that wide even when every cell matches,
+/// and a second row would only claim a speaking animation that isn't there.
+///
+/// The portrait is cover-fitted into the square cell (scaled to fill, then
+/// centre-cropped) rather than letterboxed, matching what tc-town's own
+/// exporter draws.
+pub fn sheet_from_image_data_url(data_url: &str) -> anyhow::Result<Vec<u8>> {
+    use base64::Engine as _;
+
+    let encoded = data_url
+        .split_once("base64,")
+        .map(|(_, rest)| rest)
+        .ok_or_else(|| anyhow::anyhow!("avatar image is not a base64 data URL"))?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded.trim())
+        .map_err(|e| anyhow::anyhow!("avatar image is not valid base64: {e}"))?;
+
+    let source = image::load_from_memory(&bytes)
+        .map_err(|e| anyhow::anyhow!("avatar image could not be decoded: {e}"))?;
+
+    let cell = cover_fit_square(&source, GENERATED_CELL_PX);
+
+    let mut sheet = image::RgbaImage::new(GENERATED_CELL_PX * GENERATED_COLUMNS, GENERATED_CELL_PX);
+    for column in 0..GENERATED_COLUMNS {
+        image::imageops::replace(&mut sheet, &cell, (column * GENERATED_CELL_PX) as i64, 0);
+    }
+
+    let mut out = Vec::new();
+    image::DynamicImage::ImageRgba8(sheet)
+        .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+        .map_err(|e| anyhow::anyhow!("failed to encode sprite sheet: {e}"))?;
+    Ok(out)
+}
+
+/// Scale to fill a `size`×`size` square and centre-crop the overflow, so a
+/// portrait of any aspect ratio fills the cell without being squashed.
+fn cover_fit_square(source: &image::DynamicImage, size: u32) -> image::RgbaImage {
+    use image::GenericImageView as _;
+
+    let (width, height) = source.dimensions();
+    if width == 0 || height == 0 {
+        return image::RgbaImage::new(size, size);
+    }
+
+    // Scale by the *larger* ratio so neither axis is left short, then crop.
+    let scale = f64::max(size as f64 / width as f64, size as f64 / height as f64);
+    let scaled_w = ((width as f64 * scale).ceil() as u32).max(size);
+    let scaled_h = ((height as f64 * scale).ceil() as u32).max(size);
+    let scaled = source.resize_exact(scaled_w, scaled_h, image::imageops::FilterType::Lanczos3);
+
+    let x = (scaled_w - size) / 2;
+    let y = (scaled_h - size) / 2;
+    scaled.crop_imm(x, y, size, size).to_rgba8()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn temp_data_dir() -> PathBuf {
         std::env::temp_dir().join(format!("npc-core-sprite-test-{}", uuid::Uuid::new_v4()))
+    }
+
+    /// A 2x1 red/blue PNG as a data URL, for the generator tests.
+    fn sample_data_url() -> String {
+        use base64::Engine as _;
+        let mut img = image::RgbaImage::new(2, 1);
+        img.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
+        img.put_pixel(1, 0, image::Rgba([0, 0, 255, 255]));
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&png)
+        )
+    }
+
+    #[test]
+    fn generated_sheet_is_one_row_of_the_conventional_width() {
+        let png = sheet_from_image_data_url(&sample_data_url()).unwrap();
+        let decoded = image::load_from_memory(&png).unwrap();
+        use image::GenericImageView as _;
+        assert_eq!(
+            decoded.dimensions(),
+            (GENERATED_CELL_PX * GENERATED_COLUMNS, GENERATED_CELL_PX)
+        );
+    }
+
+    /// Every cell is the same picture — a still portrait has no frames, and
+    /// the renderer cycling columns must not make it appear to move.
+    #[test]
+    fn generated_cells_are_all_identical() {
+        let png = sheet_from_image_data_url(&sample_data_url()).unwrap();
+        let sheet = image::load_from_memory(&png).unwrap().to_rgba8();
+        for column in 1..GENERATED_COLUMNS {
+            for y in (0..GENERATED_CELL_PX).step_by(37) {
+                for x in (0..GENERATED_CELL_PX).step_by(37) {
+                    assert_eq!(
+                        sheet.get_pixel(x, y),
+                        sheet.get_pixel(column * GENERATED_CELL_PX + x, y),
+                        "cell {column} differs from cell 0 at ({x},{y})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn generator_rejects_input_that_is_not_a_base64_data_url() {
+        assert!(sheet_from_image_data_url("https://example.invalid/a.png").is_err());
+        assert!(sheet_from_image_data_url("data:image/png;base64,!!!not-base64").is_err());
+        // Well-formed base64 that isn't an image at all.
+        assert!(sheet_from_image_data_url("data:image/png;base64,aGVsbG8=").is_err());
     }
 
     #[test]

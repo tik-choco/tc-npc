@@ -18,5 +18,9 @@ chrono = { workspace = true }
 tokio-util = { workspace = true }
 async-trait = { workspace = true }
 uuid = { workspace = true }
+# Sprite-sheet generation from a tc-town image avatar (see src/sprite.rs).
+# jpeg alongside png because a tc-town avatar is whatever the user uploaded.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+base64 = "0.22"
 # VRChat chatbox OSC output, shared by npc-speech and npc-translate.
 rosc = "0.10"

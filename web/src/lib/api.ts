@@ -77,17 +77,59 @@ export function activateCharacter(id: string): Promise<void> {
 }
 
 /**
- * Point a character at a VRM in the server's model folder, or clear the
- * assignment with `file: null`. The model has to already be in the folder —
- * the server rejects a name that isn't there rather than storing a reference
- * that could never resolve.
+ * Point a character at a body in one of the server's libraries, or clear the
+ * assignment with `file: null`. `kind` selects the library: a `.vrm` model
+ * (the default) or a `.png` sprite sheet. The file has to already be in the
+ * matching folder — the server rejects a name that isn't there rather than
+ * storing a reference that could never resolve.
  */
-export function setCharacterAvatar(id: string, file: string | null): Promise<CharacterSummary> {
+export function setCharacterAvatar(
+  id: string,
+  file: string | null,
+  kind: "vrm" | "sprite" = "vrm",
+): Promise<CharacterSummary> {
   return request(`/api/characters/${encodeURIComponent(id)}/avatar`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ file }),
+    // `kind` is omitted when clearing: there is no library to name, and the
+    // server ignores it in that case anyway.
+    body: JSON.stringify(file === null ? { file } : { file, kind }),
   });
+}
+
+/** One sprite sheet in the server's `{data_dir}/sprites/` folder. */
+export interface SpriteSheet {
+  file: string;
+  name: string;
+  size: number;
+}
+
+/**
+ * The sheet library. Same "the folder *is* the library" arrangement as the
+ * VRM folder above — a `.png` dropped in by hand shows up here — and the
+ * same convenience upload. Sheets also arrive on their own: importing a
+ * tc-town character whose avatar is a picture generates one (see
+ * `import_tc_town_export_into` server-side).
+ */
+export function getSpriteSheets(): Promise<{ sheets: SpriteSheet[]; dir: string }> {
+  return request("/api/sprites");
+}
+
+export function addSpriteSheet(file: File): Promise<SpriteSheet> {
+  return request(`/api/sprites/${encodeURIComponent(file.name)}`, {
+    method: "POST",
+    headers: { "Content-Type": file.type || "image/png" },
+    body: file,
+  });
+}
+
+export function deleteSpriteSheet(file: string): Promise<void> {
+  return request(`/api/sprites/${encodeURIComponent(file)}`, { method: "DELETE" });
+}
+
+/** Where the browser fetches a sheet's pixels from. */
+export function spriteSheetUrl(file: string): string {
+  return `/api/sprites/file/${encodeURIComponent(file)}`;
 }
 
 // --- VRM model folder -------------------------------------------------
