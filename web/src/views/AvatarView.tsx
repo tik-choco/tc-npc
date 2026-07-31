@@ -11,7 +11,7 @@
 // the same `speaking` frames and wears the same affect-derived expression as
 // the avatar in the チャット tab; the two stay in step with no extra wiring.
 import { useState } from "preact/hooks";
-import { Frame, Image as ImageIcon, Loader2, Mic, MicOff, Subtitles, Volume2 } from "lucide-preact";
+import { Frame, Image as ImageIcon, Loader2, MessageCircle, Mic, MicOff, Subtitles, Volume2 } from "lucide-preact";
 import { SpriteStage } from "../components/SpriteStage";
 import { VrmStage } from "../components/VrmStage";
 import type { VrmFraming } from "../vrm/stage";
@@ -194,19 +194,63 @@ function saveBackdrop(backdrop: Backdrop): void {
   }
 }
 
-function loadCaptions(): boolean {
-  try {
-    const raw = localStorage.getItem(CAPTIONS_STORAGE_KEY);
-    if (raw !== null) return raw === "1";
-  } catch {
-    // localStorage unavailable (private mode, etc.) — fall back to default.
-  }
-  return true;
+/**
+ * How the spoken line is drawn, if at all.
+ *
+ * `strip` is the bar across the bottom this window has always had. `bubble`
+ * is a speech balloon by the model's head, ported from tc-assistant2's
+ * mascot — the same information, but reading as the character saying it
+ * rather than as a subtitle track, which is what a capture setup usually
+ * wants. `off` draws neither, and also silences the status pill (see where
+ * it is rendered for why the two share one switch).
+ */
+type CaptionStyle = "off" | "strip" | "bubble";
+
+const CAPTION_CYCLE: Record<CaptionStyle, CaptionStyle> = {
+  off: "strip",
+  strip: "bubble",
+  bubble: "off",
+};
+
+const CAPTION_LABEL_KEY: Record<CaptionStyle, MessageKey> = {
+  off: "avatar.window.caption.off",
+  strip: "avatar.window.caption.strip",
+  bubble: "avatar.window.caption.bubble",
+};
+
+/**
+ * Read a stored caption preference, including ones written before the
+ * bubble existed.
+ *
+ * This key held `"1"`/`"0"` while captions were a plain on/off toggle. A
+ * window set up back then must not lose its choice just because the value
+ * gained a third state — this window is deliberately configured once and
+ * left running, so a silent reset would undo a capture setup on the next
+ * reload, which is precisely what persisting it was for. Anything
+ * unrecognised (hand-edited, or written by a newer build) falls back to the
+ * default rather than leaving the window in a state with no valid style.
+ *
+ * Exported for its tests; `loadCaptions` is the caller.
+ */
+export function captionStyleFromStored(raw: string | null): CaptionStyle {
+  if (raw === "1") return "strip";
+  if (raw === "0") return "off";
+  if (raw === "strip" || raw === "bubble" || raw === "off") return raw;
+  return "strip";
 }
 
-function saveCaptions(captions: boolean): void {
+function loadCaptions(): CaptionStyle {
   try {
-    localStorage.setItem(CAPTIONS_STORAGE_KEY, captions ? "1" : "0");
+    return captionStyleFromStored(localStorage.getItem(CAPTIONS_STORAGE_KEY));
+  } catch {
+    // localStorage unavailable (private mode, etc.) — fall back to default.
+    return "strip";
+  }
+}
+
+function saveCaptions(captions: CaptionStyle): void {
+  try {
+    localStorage.setItem(CAPTIONS_STORAGE_KEY, captions);
   } catch {
     // Non-fatal — the choice just won't be remembered next visit.
   }
@@ -226,7 +270,9 @@ export function AvatarView({
   const { t } = useI18n();
   const [backdrop, setBackdrop] = useState<Backdrop>(loadBackdrop);
   const [framing, setFraming] = useState<VrmFraming>(loadFraming);
-  const [captions, setCaptions] = useState(loadCaptions);
+  const [captionStyle, setCaptionStyle] = useState<CaptionStyle>(loadCaptions);
+  /** The shared on/off the status pill and both caption forms gate on. */
+  const captions = captionStyle !== "off";
 
   // Which display mode this body wants. The server has already dropped a
   // reference whose file isn't in the matching library (see `avatar_ref`),
@@ -302,16 +348,16 @@ export function AvatarView({
           type="button"
           class="btn btn-ghost btn-small"
           aria-pressed={captions}
-          title={t("avatar.window.caption")}
+          title={t(CAPTION_LABEL_KEY[captionStyle])}
           onClick={() =>
-            setCaptions((v) => {
-              const next = !v;
+            setCaptionStyle((v) => {
+              const next = CAPTION_CYCLE[v];
               saveCaptions(next);
               return next;
             })
           }
         >
-          <Subtitles size={14} />
+          {captionStyle === "bubble" ? <MessageCircle size={14} /> : <Subtitles size={14} />}
         </button>
       </div>
 
@@ -355,10 +401,32 @@ export function AvatarView({
         />
       )}
 
-      {captions && (
+      {captionStyle === "strip" && (
         <div class="avatar-window-caption">
           {character && <span class="avatar-window-name">{character.name}</span>}
           <span class="avatar-window-line">{latestLine}</span>
+        </div>
+      )}
+
+      {/* The balloon is drawn only while there is something to say, unlike
+          the strip, which holds the last line indefinitely. A bubble is the
+          character speaking, so an empty one pointing at a silent model
+          would be a small lie — and an empty bar is merely blank. While a
+          reply is being composed it shows the thinking indicator instead,
+          which is the one case where "nothing said yet" is still worth
+          drawing. */}
+      {captionStyle === "bubble" && (status === "thinking" || latestLine) && (
+        <div class="avatar-window-bubble" role="status">
+          {character && <span class="avatar-window-bubble-name">{character.name}</span>}
+          {status === "thinking" && !latestLine ? (
+            <span class="avatar-window-bubble-thinking" aria-label={t("avatar.status.thinking")}>
+              <i />
+              <i />
+              <i />
+            </span>
+          ) : (
+            <span class="avatar-window-bubble-line">{latestLine}</span>
+          )}
         </div>
       )}
     </div>
