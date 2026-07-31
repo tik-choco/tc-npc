@@ -35,6 +35,11 @@ const SERVER_PORT_FILE_NAME: &str = "server-port.txt";
 /// much a single request can buffer in memory.
 const MAX_VRM_UPLOAD_BYTES: usize = 200 * 1024 * 1024;
 
+/// Upload cap for `POST /api/sprites/:file`. A sheet is one PNG — the
+/// tc-town-derived ones are a grid of 128 px cells, a few hundred KB — so
+/// this only needs to clear axum's 2 MB default, not approach the VRM cap.
+const MAX_SPRITE_UPLOAD_BYTES: usize = 16 * 1024 * 1024;
+
 #[derive(Clone)]
 struct AppState {
     ctx: ModuleCtx,
@@ -190,6 +195,16 @@ async fn run_server(ctx: ModuleCtx) -> anyhow::Result<()> {
             post(rest::api_upload_vrm)
                 .layer(DefaultBodyLimit::max(MAX_VRM_UPLOAD_BYTES))
                 .delete(rest::api_delete_vrm),
+        )
+        .route("/api/sprites", get(rest::api_list_sprites))
+        .route("/api/sprites/file/:file", get(rest::api_get_sprite_file))
+        .route(
+            "/api/sprites/:file",
+            // A sheet is a PNG, not a 3D model: it needs headroom over
+            // axum's 2 MB default but nowhere near the VRM route's.
+            post(rest::api_upload_sprite)
+                .layer(DefaultBodyLimit::max(MAX_SPRITE_UPLOAD_BYTES))
+                .delete(rest::api_delete_sprite),
         )
         .route("/api/scheduler/test", post(rest::api_scheduler_test))
         .route("/api/memory", get(rest::api_memory))

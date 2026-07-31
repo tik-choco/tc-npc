@@ -40,13 +40,18 @@ fn character_ref(state: &AppState) -> Option<CharacterRef> {
         })
 }
 
-/// Which VRM the UI should display: the active character's own avatar if it
+/// Which body the UI should display: the active character's own avatar if it
 /// has one, otherwise the standalone `config.character.avatar_file`.
 ///
-/// The fallback is what lets a VRM be used with no character sheet at all —
-/// tc-npc chats fine without one, so an avatar shouldn't require importing a
-/// tc-town export first. A name that isn't in the model folder is dropped
-/// here rather than sent for the browser to fail on.
+/// The fallback is what lets an avatar be used with no character sheet at
+/// all — tc-npc chats fine without one, so an avatar shouldn't require
+/// importing a tc-town export first. A name that isn't in the library it
+/// belongs to is dropped here rather than sent for the browser to fail on.
+///
+/// **Which library that is depends on `Avatar::kind`**: a `sprite` is looked
+/// up in the sheet folder, anything else in the VRM folder. The bare
+/// `avatar_file` fallback stays a VRM, since that config field predates
+/// there being a second kind and every existing value in it is a model.
 pub fn avatar_ref(state: &AppState) -> Option<AvatarRef> {
     let config = state.current_config();
     let from_character = npc_core::active_character(&state.ctx.data_dir, &config)
@@ -65,7 +70,17 @@ pub fn avatar_ref(state: &AppState) -> Option<AvatarRef> {
         }
     };
 
-    match npc_core::vrm_exists(&state.ctx.data_dir, &avatar.file) {
+    let exists = match avatar.kind.as_str() {
+        "sprite" => npc_core::sprite_exists(&state.ctx.data_dir, &avatar.file),
+        // Anything else is a model. Treating an unrecognised kind as VRM
+        // rather than rejecting it is deliberate: `Avatar::kind` exists so a
+        // new kind can be added without changing the wire shape, and a
+        // character written by a newer build should degrade to "the model
+        // isn't there" rather than to a hard failure.
+        _ => npc_core::vrm_exists(&state.ctx.data_dir, &avatar.file),
+    };
+
+    match exists {
         Ok(true) => Some(avatar.into()),
         _ => None,
     }
