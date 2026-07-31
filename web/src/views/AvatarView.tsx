@@ -12,6 +12,7 @@
 // the avatar in the チャット tab; the two stay in step with no extra wiring.
 import { useState } from "preact/hooks";
 import { Frame, Image as ImageIcon, Loader2, Mic, MicOff, Subtitles, Volume2 } from "lucide-preact";
+import { SpriteStage } from "../components/SpriteStage";
 import { VrmStage } from "../components/VrmStage";
 import type { VrmFraming } from "../vrm/stage";
 import type { AffectSnapshot, TtsLineEntry } from "../hooks/useNpcSocket";
@@ -227,6 +228,11 @@ export function AvatarView({
   const [framing, setFraming] = useState<VrmFraming>(loadFraming);
   const [captions, setCaptions] = useState(loadCaptions);
 
+  // Which display mode this body wants. The server has already dropped a
+  // reference whose file isn't in the matching library (see `avatar_ref`),
+  // so anything that arrives here is renderable — the only question is by
+  // which stage. An unrecognised kind draws nothing rather than guessing.
+  const sprite = avatar?.kind === "sprite" ? avatar.file : null;
   const file = avatar?.kind === "vrm" ? avatar.file : null;
   const latestLine = ttsLines.length > 0 ? ttsLines[ttsLines.length - 1].text : "";
   const status = deriveAvatarStatus({ voiceActive, pending, speaking });
@@ -234,7 +240,7 @@ export function AvatarView({
   const backdropClass =
     backdrop === "chroma" ? " avatar-window--chroma" : backdrop === "transparent" ? " avatar-window--bare" : "";
 
-  if (!file) {
+  if (!file && !sprite) {
     return (
       <div class="avatar-window">
         <div class="avatar-window-empty">
@@ -324,16 +330,30 @@ export function AvatarView({
         </div>
       )}
 
-      <VrmStage
-        class="avatar-window-stage"
-        file={file}
-        framing={framing}
-        speaking={speaking}
-        speakingLevelRef={speakingLevelRef}
-        emotion={emotionFromAffect(affect)}
-        interactive
-        initial={[...(character?.name ?? "N").trim()][0] ?? "N"}
-      />
+      {sprite ? (
+        // The 2D mode takes the same speech inputs as the 3D one, so the
+        // window's framing/backdrop/caption chrome around it is unchanged —
+        // only what draws the body differs. Camera framing is not passed:
+        // there is no camera.
+        <SpriteStage
+          file={sprite}
+          speaking={speaking}
+          speakingLevelRef={speakingLevelRef}
+          emotion={emotionFromAffect(affect)}
+          label={character?.name}
+        />
+      ) : (
+        <VrmStage
+          class="avatar-window-stage"
+          file={file!}
+          framing={framing}
+          speaking={speaking}
+          speakingLevelRef={speakingLevelRef}
+          emotion={emotionFromAffect(affect)}
+          interactive
+          initial={[...(character?.name ?? "N").trim()][0] ?? "N"}
+        />
+      )}
 
       {captions && (
         <div class="avatar-window-caption">

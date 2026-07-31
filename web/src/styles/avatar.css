@@ -433,3 +433,33 @@
     opacity: 1;
   }
 }
+
+/* --- 2D sprite stage (SpriteStage.tsx) ---------------------------------- */
+
+/* One cell of the sheet, slid into view by `background-position`. The
+   element is sized in JS from the measured cell, so no width/height here —
+   only how the sheet sits behind it and how it scales on screen. */
+.sprite-stage {
+  background-repeat: no-repeat;
+  /* Cells are pixel art often authored small: keep edges crisp rather than
+     letting the browser blur them when the stage is scaled up. */
+  image-rendering: pixelated;
+  /* Scale to the surrounding stage the same way the VRM canvas does, while
+     keeping the cell's own aspect ratio. */
+  max-width: 100%;
+  max-height: 100%;
+  transform-origin: center bottom;
+  filter: drop-shadow(0 12px 22px rgb(0 0 0 / 0.28));
+}
+
+/* Nothing to draw yet — reserve the space silently rather than flashing a
+   spinner for what is usually a single cached image. */
+.sprite-stage--loading {
+  opacity: 0;
+}
+
+/* A dangling sheet reference renders as nothing at all, matching how a
+   dangling VRM reference falls back rather than erroring. */
+.sprite-stage--missing {
+  display: none;
+}

@@ -672,6 +672,97 @@ pub async fn api_delete_vrm(State(state): State<AppState>, Path(file): Path<Stri
     }
 }
 
+/// Same split as [`vrm_error_status`]: a name the library refuses is the
+/// caller's mistake (400), anything else is ours (500).
+fn sprite_error_status(err: &anyhow::Error) -> StatusCode {
+    let text = err.to_string();
+    if text.contains("invalid sprite file name") || text.contains("not a .png file") {
+        StatusCode::BAD_REQUEST
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    }
+}
+
+/// `GET /api/sprites`: every `.png` in `{data_dir}/sprites/`. Like the VRM
+/// library, the folder *is* the library — a sheet dropped in by hand appears
+/// here with no import step.
+pub async fn api_list_sprites(State(state): State<AppState>) -> Response {
+    match npc_core::list_sprites(&state.ctx.data_dir) {
+        Ok(sheets) => Json(json!({
+            "sheets": sheets,
+            "dir": npc_core::sprite_dir(&state.ctx.data_dir),
+        }))
+        .into_response(),
+        Err(err) => error_response(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+    }
+}
+
+/// `GET /api/sprites/file/:file`: the raw PNG.
+///
+/// Unlike [`api_get_vrm_file`] this carries no `ETag`. That machinery exists
+/// because a VRM runs to tens of megabytes, where re-sending the body on
+/// every load is the difference worth engineering around; a sprite sheet is
+/// a few hundred kilobytes, so `no-cache` on its own (always revalidate,
+/// always a fresh body) costs little and keeps a replaced sheet from ever
+/// being served stale. Add a validator here only if sheets get big enough
+/// for it to matter.
+pub async fn api_get_sprite_file(
+    State(state): State<AppState>,
+    Path(file): Path<String>,
+) -> Response {
+    match npc_core::read_sprite(&state.ctx.data_dir, &file) {
+        Ok(Some(bytes)) => (
+            [
+                (axum::http::header::CONTENT_TYPE, "image/png".to_string()),
+                (axum::http::header::CACHE_CONTROL, VRM_FILE_CACHE_CONTROL.to_string()),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Ok(None) => error_response(StatusCode::NOT_FOUND, format!("sprite not found: {file}")),
+        Err(err) => error_response(sprite_error_status(&err), err.to_string()),
+    }
+}
+
+/// `POST /api/sprites/:file`: copy an uploaded sheet into the sprite folder,
+/// replacing one of the same name. A convenience over dropping the file in
+/// by hand, same as the VRM upload route.
+pub async fn api_upload_sprite(
+    State(state): State<AppState>,
+    Path(file): Path<String>,
+    body: axum::body::Bytes,
+) -> Response {
+    if body.is_empty() {
+        return error_response(StatusCode::BAD_REQUEST, "empty request body".to_string());
+    }
+    match npc_core::save_sprite(&state.ctx.data_dir, &file, &body) {
+        Ok(sheet) => {
+            // Adding a sheet can make an avatar appear, exactly as adding a
+            // model can: something may already name this file.
+            broadcast_avatar(&state);
+            Json(sheet).into_response()
+        }
+        Err(err) => error_response(sprite_error_status(&err), err.to_string()),
+    }
+}
+
+/// `DELETE /api/sprites/:file`. References to the deleted sheet are left
+/// alone for the same reason the VRM route leaves them: the reference is by
+/// name, so restoring the file restores the avatar.
+pub async fn api_delete_sprite(
+    State(state): State<AppState>,
+    Path(file): Path<String>,
+) -> Response {
+    match npc_core::delete_sprite(&state.ctx.data_dir, &file) {
+        Ok(true) => {
+            broadcast_avatar(&state);
+            Json(json!({ "ok": true })).into_response()
+        }
+        Ok(false) => error_response(StatusCode::NOT_FOUND, format!("sprite not found: {file}")),
+        Err(err) => error_response(sprite_error_status(&err), err.to_string()),
+    }
+}
+
 /// Body for `PUT /api/characters/:id/avatar`. A `file` of `null` (or an
 /// empty string) clears the avatar — that's how the UI's "解除" acts, so it
 /// doesn't need a second endpoint.

@@ -9,6 +9,7 @@ pub mod config;
 pub mod module;
 pub mod osc;
 pub mod person;
+pub mod sprite;
 pub mod vrm;
 
 pub use bus::{msg, topic, Bus, BusMessage, Envelope};
@@ -24,5 +25,8 @@ pub use module::{Module, ModuleCtx};
 pub use person::{
     delete_person, find_person, list_people, load_person, new_person, normalize_person_name,
     people_dir, person_to_wire, save_person, Person, PersonFact,
+};
+pub use sprite::{
+    delete_sprite, list_sprites, read_sprite, save_sprite, sprite_dir, sprite_exists, SpriteSheet,
 };
 pub use vrm::{delete_vrm, list_vrm_models, read_vrm, save_vrm, vrm_dir, vrm_exists, VrmModel};
