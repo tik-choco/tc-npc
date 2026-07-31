@@ -1,14 +1,21 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-//! `tc-npc-mascot` -- a SPIKE, not a product. See README.md for the exact
-//! question it exists to answer (can a transparent Tauri window composite a
-//! three.js/@pixiv/three-vrm WebGL canvas correctly on WebView2, instead of
-//! coming out as an opaque black rectangle) and how to read the result.
+//! `tc-npc-mascot` -- puts tc-npc's avatar on the desktop: a transparent,
+//! undecorated, always-on-top window showing the NPC's VRM directly over
+//! whatever else is on screen.
+//!
+//! This started as a spike asking whether WebView2 could composite a
+//! three.js/@pixiv/three-vrm WebGL canvas in a transparent window at all, or
+//! whether it would flatten to an opaque black rectangle. **It can** --
+//! measured, not eyeballed; see README.md for the result and how it was
+//! checked. So there is no chroma-key or opaque-window fallback here.
 //!
 //! Deliberately tiny: this binary opens one window against tc-npc's already-
 //! running `/#/avatar` page and gets out of the way. No chat logic, no
 //! state, no config UI -- if this file grows application logic, that logic
-//! belongs in tc-npc itself, not in the window shell that displays it.
+//! belongs in tc-npc itself, not in the window shell that displays it. The
+//! two scripts below are the only exception, and both are first-run defaults
+//! for the page rather than behaviour of their own.
 
 use std::path::PathBuf;
 
@@ -18,6 +25,7 @@ use tauri::{
     window::Color,
     Manager, WebviewUrl, WebviewWindowBuilder,
 };
+use tauri_plugin_window_state::StateFlags;
 
 /// tc-npc's own default bind port (see crates/npc-core/src/config.rs,
 /// where `"127.0.0.1:47950"` is the hardcoded fallback `addr`). Used here
@@ -47,13 +55,12 @@ const DEFAULT_PORT: u16 = 47950;
 /// VrmStage.tsx's `interactive` prop), so claiming the full window as a drag
 /// region would fight both of those instead of coexisting with them.
 ///
-/// UNVERIFIED -- see README.md's "dragging" section. This spike was
-/// explicitly told not to launch the app to check the visual/transparency
-/// result, and the same restriction means this drag mechanism (and the
-/// `remote` capability grant in capabilities/main.json it depends on) has
-/// never actually been exercised end-to-end. If it turns out not to work,
-/// per the spike's own instructions that is an acceptable outcome: the
-/// window still opens and sits wherever `inner_size`/the OS places it.
+/// Verified working end-to-end (synthetic press-drag-release on the strip;
+/// the window tracked the cursor exactly). That also settles the doubt this
+/// carried while it was a spike: the `remote.urls` allowlist in
+/// capabilities/main.json (`"http://127.0.0.1:*"`) really does match at
+/// runtime, with the port only known at startup -- so the remote page can
+/// reach the one IPC command it is granted.
 const DRAG_HANDLE_SCRIPT: &str = r#"
 (function () {
   function install() {
@@ -77,6 +84,52 @@ const DRAG_HANDLE_SCRIPT: &str = r#"
     document.addEventListener('DOMContentLoaded', install);
   } else {
     install();
+  }
+})();
+"#;
+
+/// Gives the avatar page the two defaults a desktop mascot wants, the first
+/// time this window ever loads.
+///
+/// The page's own defaults are the right ones for a browser tab and the
+/// wrong ones here:
+///
+/// - **backdrop**: defaults to the normal opaque app background
+///   (`avatar-window` / `var(--bg)`). In a transparent, undecorated window
+///   sitting directly on the desktop that comes up opaque and looks exactly
+///   like the compositing failure this app was originally built to detect.
+/// - **captions**: default to `strip`, the subtitle bar across the bottom.
+///   That bar is a full-width plate, so on the desktop it reads as a visible
+///   rectangle hanging under the character -- it undoes the transparency it
+///   is drawn on top of. `bubble` says the same line as a speech balloon by
+///   the model's head, which is what tc-assistant2's mascot did and what
+///   suits a character standing on the desktop.
+///
+/// Two details make writing to the page's own `localStorage` the right move
+/// rather than a hack:
+///
+/// - It is *this window's* storage, not the user's. A Tauri app gets its own
+///   WebView2 user-data folder, so the keys set here are invisible to the
+///   same page opened in a browser or used as a capture source. A capture
+///   setup left on "chroma" with a subtitle strip is not disturbed.
+/// - They are first-run defaults, not overrides: each write is skipped when
+///   its key already exists, so the page's own hover controls still win and
+///   their choices survive the next launch.
+const PAGE_DEFAULTS_SCRIPT: &str = r#"
+(function () {
+  try {
+    var defaults = {
+      'tc-npc:avatar-window:backdrop': 'transparent',
+      'tc-npc:avatar-window:captions': 'bubble'
+    };
+    for (var key in defaults) {
+      if (localStorage.getItem(key) === null) {
+        localStorage.setItem(key, defaults[key]);
+      }
+    }
+  } catch (e) {
+    // Storage unavailable -- the page falls back to its own defaults, which
+    // only costs an opaque window with a subtitle bar.
   }
 })();
 "#;
@@ -121,7 +174,7 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
 
     TrayIconBuilder::new()
         .icon(app.default_window_icon().unwrap().clone())
-        .tooltip("tc-npc mascot (spike)")
+        .tooltip("tc-npc mascot")
         .menu(&menu)
         .on_menu_event(|app, event| {
             let Some(window) = app.get_webview_window("main") else {
@@ -146,6 +199,19 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
 
 fn main() {
     tauri::Builder::default()
+        // Remembers where the window was left, which is the other half of
+        // being draggable: without it every launch drops the character back
+        // wherever the OS decides, and a mascot that has to be repositioned
+        // each time is not one you leave running. Restricted to size and
+        // position on purpose -- the default flag set also restores
+        // `decorations` and `visible`, and this window's answer to both is
+        // fixed by the builder below, not something a saved file should get
+        // a vote on.
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(StateFlags::SIZE | StateFlags::POSITION)
+                .build(),
+        )
         .setup(|app| {
             setup_tray(app)?;
 
@@ -158,12 +224,10 @@ fn main() {
             eprintln!("tc-npc-mascot: loading {url}");
 
             WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url.parse()?))
-                .title("tc-npc mascot (spike)")
+                .title("tc-npc mascot")
+                // First-run size and placement only: the window-state plugin
+                // overwrites both from the saved file on every later launch.
                 .inner_size(360.0, 480.0)
-                // No `.position(...)` call -- see README.md's "dragging"
-                // section. Whatever the OS/WebView2 defaults to is fine for
-                // a spike whose only job is to answer the transparency
-                // question.
                 .decorations(false)
                 .transparent(true)
                 // `.transparent(true)` alone toggles the window attribute,
@@ -181,6 +245,10 @@ fn main() {
                 .skip_taskbar(true)
                 .shadow(false)
                 .resizable(true)
+                // Both run before the page's own scripts, which is what lets
+                // the defaults be read as ordinary stored preferences rather
+                // than applied as a visible flash-and-swap.
+                .initialization_script(PAGE_DEFAULTS_SCRIPT)
                 .initialization_script(DRAG_HANDLE_SCRIPT)
                 .build()?;
 
