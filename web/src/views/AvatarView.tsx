@@ -10,7 +10,7 @@
 // It shares the same socket as every other tab, so the model lip-syncs to
 // the same `speaking` frames and wears the same affect-derived expression as
 // the avatar in the チャット tab; the two stay in step with no extra wiring.
-import { useState } from "preact/hooks";
+import { useEffect, useState } from "preact/hooks";
 import { Frame, Image as ImageIcon, Loader2, MessageCircle, Mic, MicOff, Subtitles, Volume2 } from "lucide-preact";
 import { SpriteStage } from "../components/SpriteStage";
 import { VrmStage } from "../components/VrmStage";
@@ -285,6 +285,24 @@ export function AvatarView({
 
   const backdropClass =
     backdrop === "chroma" ? " avatar-window--chroma" : backdrop === "transparent" ? " avatar-window--bare" : "";
+
+  // The transparent backdrop has to reach the root element, not just this
+  // subtree. `:root` carries `background: var(--bg)` (index.css), and a
+  // background on the root element propagates to the viewport canvas — so
+  // stripping it from `.avatar-window` alone leaves the page opaque no matter
+  // what the surrounding window does. Marked with a data attribute rather
+  // than a class because it is the *document* being reconfigured, not a
+  // component: see `:root[data-avatar-backdrop]` in styles/avatar.css.
+  //
+  // Only this route ever sets it, and the attribute is cleared on unmount, so
+  // navigating back to a normal tab restores the app background.
+  useEffect(() => {
+    const root = document.documentElement;
+    root.dataset.avatarBackdrop = backdrop;
+    return () => {
+      delete root.dataset.avatarBackdrop;
+    };
+  }, [backdrop]);
 
   if (!file && !sprite) {
     return (

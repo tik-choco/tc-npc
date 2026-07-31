@@ -233,6 +233,17 @@
   background: transparent;
 }
 
+/* …and the same for the root element, which is the one that actually decides
+   whether the page is see-through. `:root` carries `background: var(--bg)`
+   (index.css), and a background on the root element propagates to the
+   viewport canvas — it paints the whole window regardless of what any
+   descendant does. `.avatar-window--bare` alone therefore strips the div and
+   leaves an opaque page behind it; the two rules are only useful together.
+   The attribute is set by AvatarView's effect, and only on this route. */
+:root[data-avatar-backdrop="transparent"] {
+  background: transparent;
+}
+
 .avatar-window--chroma {
   background: #00b140; /* standard chroma-key green */
 }
