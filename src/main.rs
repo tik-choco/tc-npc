@@ -199,7 +199,7 @@ fn import(config_path: Option<PathBuf>, path: &Path) -> anyhow::Result<()> {
 
     let data = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", path.display()))?;
-    let characters = npc_core::import_tc_town_export(&data)?;
+    let characters = npc_core::import_tc_town_export_into(&data, &data_dir)?;
 
     if characters.is_empty() {
         println!("No characters found in {}", path.display());
