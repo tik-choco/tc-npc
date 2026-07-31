@@ -374,7 +374,10 @@ pub async fn api_list_characters(State(state): State<AppState>) -> Response {
 }
 
 pub async fn api_import_characters(State(state): State<AppState>, body: String) -> Response {
-    let characters = match npc_core::import_tc_town_export(&body) {
+    // `_into` rather than the plain parse: an image avatar in the bundle
+    // carries its picture inline, and this is where it becomes a sheet on
+    // disk (see `import_tc_town_export_into`).
+    let characters = match npc_core::import_tc_town_export_into(&body, &state.ctx.data_dir) {
         Ok(c) => c,
         Err(err) => return error_response(StatusCode::BAD_REQUEST, err.to_string()),
     };
@@ -877,6 +880,11 @@ pub async fn api_delete_sprite(
 struct SetAvatarRequest {
     #[serde(default)]
     file: Option<String>,
+    /// Which library `file` names: `"sprite"` for a sheet, anything else
+    /// (including omitted) for a VRM. Defaulting to VRM keeps every caller
+    /// written before sheets existed working unchanged.
+    #[serde(default)]
+    kind: Option<String>,
 }
 
 /// `PUT /api/characters/:id/avatar`: point a character at a model in the
@@ -902,6 +910,18 @@ pub async fn api_set_character_avatar(
     let file = file.trim();
     if file.is_empty() {
         character.avatar = None;
+    } else if req.kind.as_deref() == Some("sprite") {
+        match npc_core::sprite_exists(&state.ctx.data_dir, file) {
+            Ok(true) => {}
+            Ok(false) => {
+                return error_response(StatusCode::NOT_FOUND, format!("sprite not found: {file}"))
+            }
+            Err(err) => return error_response(sprite_error_status(&err), err.to_string()),
+        }
+        character.avatar = Some(npc_core::Avatar {
+            kind: "sprite".to_string(),
+            file: file.to_string(),
+        });
     } else {
         match npc_core::vrm_exists(&state.ctx.data_dir, file) {
             Ok(true) => {}

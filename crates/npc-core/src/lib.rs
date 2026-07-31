@@ -14,7 +14,7 @@ pub mod vrm;
 
 pub use bus::{msg, topic, Bus, BusMessage, Envelope};
 pub use character::{
-    active_character, import_tc_town_export, list_characters, load_character, persona_prompt,
+    active_character, import_tc_town_export, import_tc_town_export_into, list_characters, load_character, persona_prompt,
     save_character, Avatar, Character, CharacterSheet,
 };
 pub use chatlog::ChatLogEntry;
