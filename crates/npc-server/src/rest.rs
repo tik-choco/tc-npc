@@ -672,6 +672,113 @@ pub async fn api_delete_vrm(State(state): State<AppState>, Path(file): Path<Stri
     }
 }
 
+/// Body for `POST /api/llm/ocr`.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OcrPageRequest {
+    /// The rendered page, as a `data:` URL — the browser did the rasterising
+    /// (pdf.js), the server only runs the model over the result.
+    image_data_url: String,
+    /// Position in the document, used only to word the prompt. The model
+    /// reads one page at a time and never sees the others.
+    page_number: u32,
+    total_pages: u32,
+}
+
+/// `POST /api/llm/ocr`: run the 画像認識(vision) task's configured model over
+/// one rendered PDF page and return its text.
+///
+/// **Why this is a server route at all**, when tc-assistant2 did the same
+/// call straight from the browser: `GET /api/config` masks every `api_key`
+/// as `"***"` (see `redacted_json`), so the web UI structurally cannot hold
+/// a real credential and therefore cannot call an upstream itself. Anything
+/// needing inference has to come back through here.
+pub async fn api_llm_ocr(State(state): State<AppState>, body: String) -> Response {
+    let req: OcrPageRequest = match serde_json::from_str(&body) {
+        Ok(req) => req,
+        Err(err) => return error_response(StatusCode::BAD_REQUEST, err.to_string()),
+    };
+    if req.image_data_url.trim().is_empty() {
+        return error_response(StatusCode::BAD_REQUEST, "imageDataUrl is empty".to_string());
+    }
+
+    let resolved = state.current_config().resolve_llm(npc_core::LlmTask::Vision);
+    if resolved.base_url.trim().is_empty() {
+        // Not a failure of this request: the 画像認識 task simply has no
+        // connection configured, and the UI gates on the same condition.
+        return error_response(
+            StatusCode::PRECONDITION_FAILED,
+            "the vision task has no LLM connection configured".to_string(),
+        );
+    }
+
+    let client = npc_llm::LlmClient::new(resolved.base_url, resolved.api_key);
+    // Same wording tc-assistant2 used: the point is to get the page back
+    // verbatim, so the instruction spends its words forbidding the summary a
+    // chat-tuned model would otherwise volunteer.
+    let instruction = format!(
+        "Extract all readable text from PDF page {} of {}. Return only the \
+         extracted text from this page. Do not summarize or add commentary.",
+        req.page_number, req.total_pages
+    );
+    let messages = vec![npc_llm::ChatMessage::user_parts(vec![
+        npc_llm::ContentPart::text(instruction),
+        npc_llm::ContentPart::image_data_url(req.image_data_url),
+    ])];
+    let mut chat = npc_llm::ChatRequest::new(&resolved.model, messages);
+    // Transcription, not composition — sampling here only invents text that
+    // isn't on the page.
+    chat.temperature = Some(0.0);
+
+    match client.chat(chat).await {
+        Ok(resp) => {
+            let text = resp
+                .choices
+                .first()
+                .and_then(|c| c.message.content.clone())
+                .unwrap_or_default();
+            Json(json!({ "text": text })).into_response()
+        }
+        Err(err) => error_response(StatusCode::BAD_GATEWAY, err.to_string()),
+    }
+}
+
+/// `POST /api/llm/transcribe/:filename`: run the 音声認識(stt) task's
+/// configured model over one uploaded clip. The clip is the raw body, the
+/// way the VRM upload route takes model bytes.
+///
+/// `filename` is carried for diagnostics only. `LlmClient::transcribe`
+/// presents every upload to the upstream as `speech.wav`, which is what the
+/// voice cascade has always sent; a clip dropped in as `.mp3` is handed over
+/// under that name and is accepted by servers that sniff the content rather
+/// than trusting the extension. Preserving the real extension end-to-end
+/// means widening `transcribe`, which the voice cascade shares — out of
+/// scope here, and logged instead so a rejection is diagnosable.
+pub async fn api_llm_transcribe(
+    State(state): State<AppState>,
+    Path(filename): Path<String>,
+    body: axum::body::Bytes,
+) -> Response {
+    if body.is_empty() {
+        return error_response(StatusCode::BAD_REQUEST, "empty request body".to_string());
+    }
+
+    let resolved = state.current_config().resolve_llm(npc_core::LlmTask::Stt);
+    if resolved.base_url.trim().is_empty() {
+        return error_response(
+            StatusCode::PRECONDITION_FAILED,
+            "the speech-to-text task has no LLM connection configured".to_string(),
+        );
+    }
+
+    tracing::debug!(filename, bytes = body.len(), "npc-server: transcribing an uploaded clip");
+    let client = npc_llm::LlmClient::new(resolved.base_url, resolved.api_key);
+    match client.transcribe(&resolved.model, body.to_vec()).await {
+        Ok(text) => Json(json!({ "text": text })).into_response(),
+        Err(err) => error_response(StatusCode::BAD_GATEWAY, err.to_string()),
+    }
+}
+
 /// Same split as [`vrm_error_status`]: a name the library refuses is the
 /// caller's mistake (400), anything else is ours (500).
 fn sprite_error_status(err: &anyhow::Error) -> StatusCode {

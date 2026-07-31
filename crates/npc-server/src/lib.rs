@@ -40,6 +40,11 @@ const MAX_VRM_UPLOAD_BYTES: usize = 200 * 1024 * 1024;
 /// this only needs to clear axum's 2 MB default, not approach the VRM cap.
 const MAX_SPRITE_UPLOAD_BYTES: usize = 16 * 1024 * 1024;
 
+/// Upload cap for `POST /api/llm/transcribe/:filename`. Sized for a clip
+/// someone would actually drop on the composer — a long uncompressed
+/// recording, not a media library.
+const MAX_AUDIO_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
+
 #[derive(Clone)]
 struct AppState {
     ctx: ModuleCtx,
@@ -221,6 +226,14 @@ async fn run_server(ctx: ModuleCtx) -> anyhow::Result<()> {
                 .delete(rest::api_delete_person),
         )
         .route("/api/audio/devices", get(rest::api_audio_devices))
+        .route("/api/llm/ocr", post(rest::api_llm_ocr))
+        .route(
+            "/api/llm/transcribe/:filename",
+            // An audio clip is the raw body; the 2 MB default would reject a
+            // recording of any length. Well under the VRM cap: this is a
+            // voice clip, not a model.
+            post(rest::api_llm_transcribe).layer(DefaultBodyLimit::max(MAX_AUDIO_UPLOAD_BYTES)),
+        )
         .route("/api/llm/models", post(rest::api_llm_models))
         .route("/api/llm/voices", post(rest::api_llm_voices))
         .fallback(assets::static_handler)

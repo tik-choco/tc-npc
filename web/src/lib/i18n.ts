@@ -94,6 +94,16 @@ const ja = {
   "chat.voice.hint": "マイクに話しかけるとそのまま会話できます。",
   "chat.voice.disabled": "音声モジュールが無効です（設定で STT / TTS を有効化してください）",
 
+  // --- チャット: ファイルドロップ(音声文字起こし・PDF OCR) ---
+  "chat.drop.hint": "音声ファイルまたはPDFをドロップして文字起こし",
+  "chat.drop.processing": "ファイルを認識しています…",
+  "chat.drop.processingNamed": "「{name}」を認識しています…",
+  "chat.drop.unsupported": "対応していないファイル形式です（音声ファイルまたはPDF）",
+  "chat.drop.sttUnconfigured": "設定で音声認識(STT)用のモデルを設定してください",
+  "chat.drop.visionUnconfigured": "設定で視覚(OCR)用のモデルを設定してください",
+  "chat.drop.transcribeFailed": "音声の文字起こしに失敗しました: {error}",
+  "chat.drop.ocrFailed": "PDFの読み取りに失敗しました: {error}",
+
   // --- チャット: 状態パネル ---
   "status.title": "接続状態",
   "status.connection": "WS接続",
@@ -658,6 +668,15 @@ const en: Record<MessageKey, string> = {
   "chat.voice.hint": "Just speak into the mic to carry on the conversation.",
   "chat.voice.disabled": "Speech module is off — enable STT / TTS in settings",
 
+  "chat.drop.hint": "Drop an audio file or a PDF to transcribe it",
+  "chat.drop.processing": "Recognizing the file…",
+  "chat.drop.processingNamed": "Recognizing “{name}”…",
+  "chat.drop.unsupported": "Unsupported file type (audio file or PDF only)",
+  "chat.drop.sttUnconfigured": "Set up a speech-to-text (STT) model in settings",
+  "chat.drop.visionUnconfigured": "Set up a vision (OCR) model in settings",
+  "chat.drop.transcribeFailed": "Transcription failed: {error}",
+  "chat.drop.ocrFailed": "Reading the PDF failed: {error}",
+
   "status.title": "Connection",
   "status.connection": "WebSocket",
   "status.version": "Version",
@@ -1204,6 +1223,15 @@ const zh: Record<MessageKey, string> = {
   "chat.voice.off": "语音已关闭",
   "chat.voice.hint": "对着麦克风说话即可继续对话。",
   "chat.voice.disabled": "语音模块已关闭（请在设置中启用 STT / TTS）",
+
+  "chat.drop.hint": "拖放音频文件或 PDF 以进行文字转写",
+  "chat.drop.processing": "正在识别文件…",
+  "chat.drop.processingNamed": "正在识别「{name}」…",
+  "chat.drop.unsupported": "不支持的文件类型（仅支持音频文件或 PDF）",
+  "chat.drop.sttUnconfigured": "请在设置中配置语音识别(STT)模型",
+  "chat.drop.visionUnconfigured": "请在设置中配置视觉(OCR)模型",
+  "chat.drop.transcribeFailed": "语音转写失败: {error}",
+  "chat.drop.ocrFailed": "读取 PDF 失败: {error}",
 
   "status.title": "连接状态",
   "status.connection": "WS连接",
