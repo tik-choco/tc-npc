@@ -205,3 +205,23 @@
     transform: rotate(360deg);
   }
 }
+
+/* --- Sprite-sheet library (SpriteLibrary in CharactersView.tsx) --------- */
+
+/* A sheet's own first cell, used as its thumbnail. `background-size: 800%`
+   makes the sheet eight times the element's width, so exactly one cell of an
+   8-column sheet fills the square — independent of the sheet's pixel size or
+   how many rows it has. That is the whole reason this library needs no
+   thumbnail rendering or cache, unlike the VRM one above. */
+.sprite-thumb {
+  width: 48px;
+  height: 48px;
+  flex: none;
+  border-radius: 6px;
+  background-size: 800% auto;
+  background-position: 0 0;
+  background-repeat: no-repeat;
+  background-color: rgb(20 28 40 / 0.28);
+  /* Sheets are often small and scaled up; keep the cell crisp. */
+  image-rendering: pixelated;
+}

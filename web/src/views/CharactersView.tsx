@@ -10,16 +10,21 @@
 // avatar appear in the チャット tab's avatar layout and the `#/avatar`
 // window.
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
-import { Boxes, FolderOpen, Trash2, UploadCloud, UserCheck, Users, Loader2 } from "lucide-preact";
+import { Boxes, FolderOpen, Image as ImageIcon, Trash2, UploadCloud, UserCheck, Users, Loader2 } from "lucide-preact";
 import {
   activateCharacter,
+  addSpriteSheet,
   addVrmModel,
+  deleteSpriteSheet,
   deleteVrmModel,
   getCharacters,
+  getSpriteSheets,
   getVrmModels,
   importCharacter,
   setCharacterAvatar,
   setDefaultAvatar,
+  spriteSheetUrl,
+  type SpriteSheet,
 } from "../lib/api";
 import type { CharacterSummary, VrmModel } from "../lib/types";
 import { Toast, type ToastState } from "../components/Toast";
@@ -42,6 +47,219 @@ function formatBytes(bytes: number): string {
     index += 1;
   }
   return `${size.toFixed(size >= 10 ? 0 : 1)} ${units[index]}`;
+}
+
+/**
+ * The sprite-sheet library: everything in the server's sheet folder, and
+ * which sheet the selected character uses.
+ *
+ * Deliberately much thinner than [`VrmLibrary`] below, for one reason: a
+ * sheet's preview *is* the file. VrmLibrary has to spin up three.js to
+ * render a model into a picture and cache the result; here the picture is
+ * already a picture, so the thumbnail is CSS (`background-size: 800%` shows
+ * exactly the first cell of a sheet of `SHEET_COLUMNS` columns, whatever the
+ * sheet's pixel size or row count).
+ *
+ * **Unlike VrmLibrary there is no standalone-default path.** The standalone
+ * avatar is `config.character.avatar_file`, which predates there being a
+ * second kind and is resolved as a VRM (see npc-server's `avatar_ref`), so a
+ * sheet can only be assigned to a character. With no character selected the
+ * list is still shown — sheets arrive on import and are worth seeing — but
+ * the assign buttons are replaced by the reason they're unavailable, rather
+ * than silently doing nothing.
+ */
+function SpriteLibrary({
+  target,
+  assignedFile,
+  onAssigned,
+  onToast,
+  t,
+}: {
+  target: CharacterSummary | null;
+  /** The sheet `target` currently uses, so the list can mark it. */
+  assignedFile: string | null;
+  onAssigned: () => void;
+  onToast: (toast: ToastState) => void;
+  t: Translate;
+}) {
+  const [sheets, setSheets] = useState<SpriteSheet[] | null>(null);
+  const [dir, setDir] = useState<string>("");
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
+
+  function reload() {
+    getSpriteSheets()
+      .then((res) => {
+        setSheets(res.sheets);
+        setDir(res.dir);
+        setLoadError(null);
+      })
+      .catch((err) => setLoadError(err instanceof Error ? err.message : String(err)));
+  }
+
+  useEffect(reload, []);
+
+  async function handleUpload(file: File) {
+    if (!file.name.toLowerCase().endsWith(".png")) {
+      onToast({ kind: "error", message: t("sprite.notPngFile") });
+      return;
+    }
+    setBusy(true);
+    try {
+      const sheet = await addSpriteSheet(file);
+      reload();
+      // Adding a sheet can make a dangling reference resolve, so the
+      // character list is refreshed too — same reasoning as VrmLibrary.
+      onAssigned();
+      onToast({ kind: "success", message: t("sprite.toast.added", { name: sheet.name }) });
+    } catch (err) {
+      onToast({ kind: "error", message: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleAssign(sheet: SpriteSheet) {
+    if (!target) return;
+    setBusy(true);
+    try {
+      await setCharacterAvatar(target.id, sheet.file, "sprite");
+      reload();
+      onAssigned();
+      onToast({ kind: "success", message: t("sprite.toast.assigned") });
+    } catch (err) {
+      onToast({ kind: "error", message: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleDelete(sheet: SpriteSheet) {
+    if (!window.confirm(t("sprite.deleteConfirm", { name: sheet.name }))) return;
+    setBusy(true);
+    try {
+      await deleteSpriteSheet(sheet.file);
+      reload();
+      // A character still pointing at the deleted sheet keeps the reference:
+      // putting the file back restores the avatar, and a dangling one falls
+      // back to the initial glyph.
+      onAssigned();
+      onToast({ kind: "success", message: t("sprite.toast.deleted", { name: sheet.name }) });
+    } catch (err) {
+      onToast({ kind: "error", message: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section class="characters-list-section">
+      <h2 class="characters-list-title">
+        <ImageIcon size={16} />
+        {t("sprite.title")}
+      </h2>
+      <p class="vrm-desc">{t("sprite.desc")}</p>
+      {dir && (
+        <p class="vrm-dir">
+          <FolderOpen size={13} />
+          <code>{dir}</code>
+        </p>
+      )}
+
+      <div
+        class={`import-dropzone${dragOver ? " import-dropzone--active" : ""}`}
+        onDragOver={(e) => {
+          e.preventDefault();
+          setDragOver(true);
+        }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={(e) => {
+          e.preventDefault();
+          setDragOver(false);
+          const file = e.dataTransfer?.files?.[0];
+          if (file) void handleUpload(file);
+        }}
+      >
+        <UploadCloud size={18} />
+        <div>
+          <div class="import-dropzone-title">{t("sprite.drop.title")}</div>
+          <div class="import-dropzone-sub">{t("sprite.drop.sub")}</div>
+        </div>
+        <label class="button button--ghost">
+          {t("sprite.add")}
+          <input
+            type="file"
+            accept="image/png"
+            hidden
+            disabled={busy}
+            onChange={(e) => {
+              const input = e.currentTarget as HTMLInputElement;
+              const file = input.files?.[0];
+              if (file) void handleUpload(file);
+              // Clear so re-picking the same file fires onChange again.
+              input.value = "";
+            }}
+          />
+        </label>
+      </div>
+
+      {!target && <p class="vrm-usage">{t("sprite.needsCharacter")}</p>}
+      {target && <p class="vrm-usage">{t("sprite.usedBy", { name: target.name })}</p>}
+
+      {loadError && <p class="form-error">{loadError}</p>}
+
+      {sheets && sheets.length === 0 && <p class="empty-state-description">{t("sprite.empty")}</p>}
+
+      {sheets && sheets.length > 0 && (
+        <ul class="vrm-list">
+          {sheets.map((sheet) => {
+            const inUse = assignedFile === sheet.file;
+            return (
+              <li key={sheet.file} class={`vrm-item${inUse ? " vrm-item--current" : ""}`}>
+                <div
+                  class="sprite-thumb"
+                  role="img"
+                  aria-label={sheet.name}
+                  style={{ backgroundImage: `url(${spriteSheetUrl(sheet.file)})` }}
+                />
+                <div class="vrm-item-main">
+                  <div class="vrm-item-name">{sheet.name}</div>
+                  <div class="vrm-item-meta">{formatBytes(sheet.size)}</div>
+                </div>
+                {inUse ? (
+                  <span class="vrm-item-badge">
+                    <UserCheck size={13} />
+                    {t("sprite.assigned")}
+                  </span>
+                ) : (
+                  target && (
+                    <button
+                      type="button"
+                      class="button button--ghost"
+                      disabled={busy}
+                      onClick={() => void handleAssign(sheet)}
+                    >
+                      {t("sprite.assign")}
+                    </button>
+                  )
+                )}
+                <button
+                  type="button"
+                  class="button button--icon"
+                  disabled={busy}
+                  title={t("sprite.deleteConfirm", { name: sheet.name })}
+                  onClick={() => void handleDelete(sheet)}
+                >
+                  <Trash2 size={14} />
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </section>
+  );
 }
 
 /**
@@ -555,6 +773,14 @@ export function CharactersView() {
       <VrmLibrary
         target={target}
         assignedFile={target?.avatar?.kind === "vrm" ? target.avatar.file : null}
+        onAssigned={reload}
+        onToast={setToast}
+        t={t}
+      />
+
+      <SpriteLibrary
+        target={target}
+        assignedFile={target?.avatar?.kind === "sprite" ? target.avatar.file : null}
         onAssigned={reload}
         onToast={setToast}
         t={t}
