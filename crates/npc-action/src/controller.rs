@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
-use crate::osc::{VrcClient, MAX_AXIS_VALUE, MIN_AXIS_VALUE};
+use crate::actuator::{Actuator, MAX_AXIS_VALUE, MIN_AXIS_VALUE};
 
 /// `JumpPressDuration` in the Go original.
 const JUMP_PRESS_DURATION_MS: u64 = 100;
@@ -44,11 +44,11 @@ pub async fn sleep_cancellable(dur: Duration, cancel: &CancellationToken) -> (bo
 }
 
 pub struct Controller {
-    client: Arc<VrcClient>,
+    client: Arc<dyn Actuator>,
 }
 
 impl Controller {
-    pub fn new(client: Arc<VrcClient>) -> Self {
+    pub fn new(client: Arc<dyn Actuator>) -> Self {
         Self { client }
     }
 
@@ -104,5 +104,74 @@ impl Controller {
             sleep_cancellable(Duration::from_millis(JUMP_PRESS_DURATION_MS), cancel).await;
         self.client.jump(false).await?;
         Ok(completed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::actuator::test_support::{Call, RecordingActuator};
+
+    #[tokio::test]
+    async fn move_forward_holds_the_axis_then_zeroes_it() {
+        let body = Arc::new(RecordingActuator::default());
+        let controller = Controller::new(body.clone());
+
+        let completed = controller
+            .move_forward(0.0, &CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert!(completed);
+        assert_eq!(
+            body.calls(),
+            vec![Call::Vertical(MAX_AXIS_VALUE), Call::Vertical(0.0)]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_hold_still_zeroes_the_axis() {
+        // The axis stays where it was put, so cutting a move short without
+        // zeroing would leave the body walking forever. Cancelling before
+        // the hold begins is the sharpest version of that case.
+        let body = Arc::new(RecordingActuator::default());
+        let controller = Controller::new(body.clone());
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let completed = controller.move_forward(60.0, &cancel).await.unwrap();
+
+        assert!(!completed, "a cancelled hold reports incomplete");
+        assert_eq!(
+            body.calls(),
+            vec![Call::Vertical(MAX_AXIS_VALUE), Call::Vertical(0.0)],
+            "the axis must be released even though the hold was cut short"
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_releases_the_look_axis() {
+        let body = Arc::new(RecordingActuator::default());
+        let controller = Controller::new(body.clone());
+
+        controller
+            .turn(0.75, 0.0, &CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            body.calls(),
+            vec![Call::LookHorizontal(0.75), Call::LookHorizontal(0.0)]
+        );
+    }
+
+    #[tokio::test]
+    async fn jump_presses_then_releases() {
+        let body = Arc::new(RecordingActuator::default());
+        let controller = Controller::new(body.clone());
+
+        controller.jump(&CancellationToken::new()).await.unwrap();
+
+        assert_eq!(body.calls(), vec![Call::Jump(true), Call::Jump(false)]);
     }
 }

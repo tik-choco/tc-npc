@@ -20,6 +20,7 @@
 //! `action.osc_address` and `action.enabled` are read once above at
 //! startup and are NOT part of this hot-reload.
 
+mod actuator;
 mod autopilot;
 mod controller;
 mod dispatcher;
@@ -42,6 +43,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use autopilot::Autopilot;
 use controller::Controller;
 use navigator::Navigator;
+use actuator::Actuator;
 use osc::VrcClient;
 use state::{ActionState, MapData};
 
@@ -70,7 +72,10 @@ impl Module for ActionModule {
         // before this module is even spawned) are fixed for the process
         // lifetime — only `locations`/`routes` (via `map_data` below)
         // hot-reload.
-        let vrc = Arc::new(VrcClient::connect(&config.action.osc_address).await?);
+        // The only place the concrete body is named: everything below
+        // this line drives `dyn Actuator`.
+        let vrc: Arc<dyn Actuator> =
+            Arc::new(VrcClient::connect(&config.action.osc_address).await?);
         let controller = Controller::new(vrc.clone());
         let navigator = Arc::new(Navigator::new(vrc.clone(), ctx.bus.clone()));
         let autopilot = Autopilot::new(navigator.clone());
