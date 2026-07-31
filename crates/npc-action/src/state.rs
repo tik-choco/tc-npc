@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 use crate::autopilot::Autopilot;
 use crate::controller::Controller;
 use crate::navigator::Navigator;
-use crate::osc::VrcClient;
+use crate::actuator::Actuator;
 
 /// `config.action.locations` / `config.action.routes`, split out of the
 /// otherwise-immutable `Config` snapshot into their own lock so a
@@ -72,7 +72,7 @@ pub struct ActionState {
     /// shutdown also cancels any in-flight movement.
     pub shutdown: CancellationToken,
 
-    pub vrc: Arc<VrcClient>,
+    pub vrc: Arc<dyn Actuator>,
     pub controller: Controller,
     pub navigator: Arc<Navigator>,
     pub autopilot: Autopilot,

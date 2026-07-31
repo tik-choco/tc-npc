@@ -3,17 +3,20 @@
 //! `rosc` for message encoding and a plain `tokio::net::UdpSocket` for
 //! transport — VRChat's OSC input listens on UDP, fire-and-forget, no
 //! response is expected.
+//!
+//! This is one implementation of [`Actuator`], not the only shape a body
+//! can have: nothing above the trait names this type.
 
 use std::net::SocketAddr;
 
+use async_trait::async_trait;
 use rosc::{OscMessage, OscPacket, OscType};
 use tokio::net::UdpSocket;
 
+use crate::actuator::{Actuator, MAX_AXIS_VALUE, MIN_AXIS_VALUE};
+
 /// Fallback target when `osc_address` fails to resolve.
 const DEFAULT_OSC_ADDRESS: &str = "127.0.0.1:9000";
-
-pub const MAX_AXIS_VALUE: f32 = 1.0;
-pub const MIN_AXIS_VALUE: f32 = -1.0;
 
 pub struct VrcClient {
     socket: UdpSocket,
@@ -74,19 +77,25 @@ impl VrcClient {
         self.send(addr, vec![OscType::Int(if pressed { 1 } else { 0 })]).await
     }
 
-    pub async fn vertical(&self, value: f32) -> anyhow::Result<()> {
+}
+
+/// VRChat's OSC input addresses map one-for-one onto the trait's four
+/// calls, which is why the trait has the shape it does.
+#[async_trait]
+impl Actuator for VrcClient {
+    async fn vertical(&self, value: f32) -> anyhow::Result<()> {
         self.send_axis("/input/Vertical", value).await
     }
 
-    pub async fn horizontal(&self, value: f32) -> anyhow::Result<()> {
+    async fn horizontal(&self, value: f32) -> anyhow::Result<()> {
         self.send_axis("/input/Horizontal", value).await
     }
 
-    pub async fn look_horizontal(&self, value: f32) -> anyhow::Result<()> {
+    async fn look_horizontal(&self, value: f32) -> anyhow::Result<()> {
         self.send_axis("/input/LookHorizontal", value).await
     }
 
-    pub async fn jump(&self, pressed: bool) -> anyhow::Result<()> {
+    async fn jump(&self, pressed: bool) -> anyhow::Result<()> {
         self.send_button("/input/Jump", pressed).await
     }
 }

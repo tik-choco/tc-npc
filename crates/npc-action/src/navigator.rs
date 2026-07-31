@@ -13,7 +13,7 @@ use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
 use crate::controller::{secs, sleep_cancellable};
-use crate::osc::{VrcClient, MAX_AXIS_VALUE, MIN_AXIS_VALUE};
+use crate::actuator::{Actuator, MAX_AXIS_VALUE, MIN_AXIS_VALUE};
 
 // --- Speed model constants (ports Go `navigator.go`'s consts, unchanged) ---
 
@@ -124,13 +124,13 @@ impl Default for Position {
 
 /// Ports Go `osc.Navigator`.
 pub struct Navigator {
-    client: Arc<VrcClient>,
+    client: Arc<dyn Actuator>,
     pub pos: Position,
     bus: Bus,
 }
 
 impl Navigator {
-    pub fn new(client: Arc<VrcClient>, bus: Bus) -> Self {
+    pub fn new(client: Arc<dyn Actuator>, bus: Bus) -> Self {
         Self { client, pos: Position::new(), bus }
     }
 

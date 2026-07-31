@@ -37,7 +37,7 @@ crates/
   npc-memory/             short/long-term memory module       (ports agent-memory)
   npc-speech/              STT/TTS + mic/speaker I/O module     (ports agent-speech)
   npc-vision/              screen capture + description module (ports agent-vision)
-  npc-action/              movement/OSC module                 (ports agent-action)
+  npc-action/              movement module, VRChat/OSC body    (ports agent-action)
   npc-scheduler/           scheduled announcements module      (ports agent-scheduler)
   npc-translate/           simultaneous interpretation module  (ports agent-speech's translation)
   npc-server/              HTTP/WebSocket server + embedded web UI host
@@ -51,6 +51,25 @@ modules enabled in config, logs a warning and continues if a module is
 unavailable (which today means "always", since they're stubs), and always
 attempts to start `npc-server` since that's how the web UI and mascot client
 connect.
+
+### The actuator seam (`npc-action`)
+
+`npc_action::actuator::Actuator` is where "decide to move" stops and "move
+this particular body" starts — four calls (`vertical`, `horizontal`,
+`look_horizontal`, `jump`), axis values clamped to `-1.0..=1.0`. `Controller`
+(timed primitives), `Navigator` (dead-reckoned metres/degrees), `Autopilot`
+(routes) and the command dispatcher all hold an `Arc<dyn Actuator>` and name
+no concrete body; `VrcClient` (`osc.rs`) is the one implementor today, and
+`ActionModule::run` is the single place it is constructed. **An additional
+body is a second implementor swapped in there** — see [Role](#role).
+
+The trait is also what makes this layer testable: driving an axis used to
+require a real UDP socket, so the code above it was only ever tested for its
+arithmetic. `actuator::test_support::RecordingActuator` records calls in
+order, which is how `controller.rs`'s tests pin down the contract that
+matters most — an axis stays where it was put, so **a cancelled hold must
+still zero it** or the body walks on after the command that started it was
+cut short.
 
 ## The bus
 
