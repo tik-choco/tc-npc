@@ -186,6 +186,12 @@ pub struct ChatRequest {
     pub reasoning_effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    /// Sampling temperature. Left unset by every conversational caller —
+    /// the endpoint's own default is the right one for dialogue — and set
+    /// only where sampling is actively unwanted, such as reading text off a
+    /// page (`api_llm_ocr`), where any creativity is text that wasn't there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
 }

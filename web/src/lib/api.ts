@@ -254,6 +254,63 @@ export function listVoices(body: LlmProbeRequest): Promise<{ voices: string[] }>
   });
 }
 
+/**
+ * POST /api/llm/ocr — runs the 視覚(vision) task's configured model over one
+ * rendered PDF page image and returns the extracted text (see
+ * lib/pdf-ocr.ts, ChatView.tsx's file-drop composer entry point).
+ *
+ * `pageNumber`/`totalPages` are handed to the server rather than baked into
+ * a client-side prompt, so the OCR instruction text lives in one place
+ * (alongside the rest of the task's prompt-building) instead of being
+ * duplicated across the client/server boundary.
+ *
+ * The call goes through the server rather than straight to the upstream
+ * (which is what tc-assistant2 did) because `GET /api/config` masks every
+ * `api_key` as `"***"`: the web UI structurally cannot hold a credential, so
+ * anything needing inference comes back through here. A vision task with no
+ * connection configured answers `412` rather than attempting the call —
+ * lib/task-connection.ts gates the UI on the same condition, so that status
+ * should not normally be reachable.
+ */
+export interface OcrPageRequest {
+  imageDataUrl: string;
+  pageNumber: number;
+  totalPages: number;
+}
+
+export function ocrPdfPage(body: OcrPageRequest): Promise<{ text: string }> {
+  return request("/api/llm/ocr", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+/**
+ * `POST /api/llm/transcribe/:filename` — runs the 音声認識(stt) task's
+ * configured model over one audio clip and returns the transcript (see
+ * lib/audio-transcribe.ts, ChatView.tsx's file-drop composer entry point and
+ * mic recording). The clip is the raw request body (mirrors
+ * `addVrmModel`'s upload shape above) rather than a multipart form or
+ * base64 JSON field, so the server can hand the bytes straight to
+ * npc_llm::LlmClient::transcribe without decoding anything first;
+ * `filename` rides in the path only to preserve the original extension for
+ * logging/debugging, the way `addVrmModel` does for `.vrm` uploads.
+ *
+ * Note that `filename` really is diagnostics-only: the server hands every
+ * clip to the upstream as `speech.wav`, which is what the voice cascade has
+ * always sent. A `.mp3` still works against a server that sniffs the content
+ * rather than trusting the extension; carrying the real extension through
+ * would mean widening `LlmClient::transcribe`, which the cascade shares.
+ */
+export function transcribeAudio(file: Blob, filename: string): Promise<{ text: string }> {
+  return request(`/api/llm/transcribe/${encodeURIComponent(filename)}`, {
+    method: "POST",
+    headers: { "Content-Type": file.type || "application/octet-stream" },
+    body: file,
+  });
+}
+
 /** One persisted chat turn, oldest-first, as returned by the history endpoint. */
 export interface ChatHistoryEntry {
   time: string;

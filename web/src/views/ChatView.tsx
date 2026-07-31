@@ -71,9 +71,10 @@ import type {
   TtsLineEntry,
 } from "../hooks/useNpcSocket";
 import { useAutoScroll } from "../hooks/useAutoScroll";
+import { getConfig } from "../lib/api";
 import type { ConnectionState } from "../lib/ws";
 import type { ChatLayout, ChatPanel } from "../lib/router";
-import type { AvatarRef, CharacterRef } from "../lib/types";
+import type { AvatarRef, CharacterRef, ConfigDocument } from "../lib/types";
 import type { SpeakingLevelReading } from "../vrm/level";
 import { ConnectionStatus } from "../components/ConnectionStatus";
 import { ChatSidebar } from "../components/ChatSidebar";
@@ -81,6 +82,10 @@ import { VrmStage } from "../components/VrmStage";
 import { emotionFromAffect } from "../lib/vrm-emotion";
 import { useI18n } from "../hooks/useI18n";
 import type { Lang, Translate } from "../lib/i18n";
+import { isAudioFile, isPdfFile } from "../lib/file-drop";
+import { ocrPdf } from "../lib/pdf-ocr";
+import { transcribeAudioBlob } from "../lib/audio-transcribe";
+import { isTaskConfigured } from "../lib/task-connection";
 import { AvatarStatusBadge, deriveAvatarStatus } from "./AvatarView";
 import "../styles/components.css";
 import "../styles/chat.css";
@@ -715,6 +720,114 @@ export function ChatView({
   const speaker = character?.name ?? t("chat.translation.source.agent");
   const avatar = initialOf(speaker);
 
+  // File-drop → text (音声ファイルの文字起こし / PDFのOCR). `config` is read
+  // once, read-only, purely to gate the feature the same way tc-assistant2's
+  // main.tsx checked `sttProfile`/`ocrProfile` before firing a request — see
+  // lib/task-connection.ts. A load failure is treated the same as "nothing
+  // configured yet" (the composer just shows the normal "set this up in
+  // settings" message instead of the request going out to a 404 or an
+  // unresolved connection).
+  const [config, setConfig] = useState<ConfigDocument | null>(null);
+  useEffect(() => {
+    getConfig()
+      .then(setConfig)
+      .catch(() => setConfig(null));
+  }, []);
+  const [isDraggingFile, setIsDraggingFile] = useState(false);
+  const [isProcessingFile, setIsProcessingFile] = useState(false);
+  const [droppedFileName, setDroppedFileName] = useState<string | null>(null);
+  const [fileError, setFileError] = useState<string | null>(null);
+
+  function describeError(err: unknown): string {
+    return err instanceof Error ? err.message : String(err);
+  }
+
+  /** Appends recognized text to the current draft: a space between the
+   *  existing text and heard speech (mirrors tc-assistant2's
+   *  transcribeAndFill), a blank line between it and OCR'd PDF text (mirrors
+   *  ocrPdfAndFill) — matching how each kind of input reads naturally when
+   *  it's tacked onto whatever the operator had already typed. */
+  function appendToDraft(text: string, join: " " | "\n\n") {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    setDraft((current) => (current.trim() ? `${current}${join}${trimmed}` : trimmed));
+  }
+
+  async function transcribeDroppedAudio(file: File) {
+    if (!isTaskConfigured(config, "stt")) {
+      setFileError(t("chat.drop.sttUnconfigured"));
+      return;
+    }
+    setIsProcessingFile(true);
+    setDroppedFileName(file.name);
+    setFileError(null);
+    try {
+      const text = await transcribeAudioBlob(file, file.name);
+      appendToDraft(text, " ");
+    } catch (err) {
+      setFileError(t("chat.drop.transcribeFailed", { error: describeError(err) }));
+    } finally {
+      setIsProcessingFile(false);
+      setDroppedFileName(null);
+    }
+  }
+
+  async function ocrDroppedPdf(file: File) {
+    if (!isTaskConfigured(config, "vision")) {
+      setFileError(t("chat.drop.visionUnconfigured"));
+      return;
+    }
+    setIsProcessingFile(true);
+    setDroppedFileName(file.name);
+    setFileError(null);
+    try {
+      const text = await ocrPdf(file);
+      appendToDraft(text, "\n\n");
+    } catch (err) {
+      setFileError(t("chat.drop.ocrFailed", { error: describeError(err) }));
+    } finally {
+      setIsProcessingFile(false);
+      setDroppedFileName(null);
+    }
+  }
+
+  function handleFileDragOver(event: DragEvent) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+    setIsDraggingFile(true);
+  }
+
+  function handleFileDragLeave(event: DragEvent) {
+    event.preventDefault();
+    event.stopPropagation();
+    setIsDraggingFile(false);
+  }
+
+  function handleFileDrop(event: DragEvent) {
+    event.preventDefault();
+    event.stopPropagation();
+    setIsDraggingFile(false);
+    if (isProcessingFile) return;
+
+    const files = Array.from(event.dataTransfer?.files ?? []);
+    const audioFile = files.find((candidate) => isAudioFile(candidate));
+    if (audioFile) {
+      void transcribeDroppedAudio(audioFile);
+      return;
+    }
+
+    const pdfFile = files.find((candidate) => isPdfFile(candidate));
+    if (pdfFile) {
+      void ocrDroppedPdf(pdfFile);
+      return;
+    }
+
+    if (files.length > 0) {
+      setFileError(t("chat.drop.unsupported"));
+    }
+  }
+
   // The avatar layout needs a model to show. With none assigned — no
   // character avatar and no standalone default — the transcript layout holds
   // no matter what the URL asked for, so a stale `#/chat/voice/avatar`
@@ -793,9 +906,15 @@ export function ChatView({
 
   const placeholder = !connected
     ? t("chat.placeholder.disconnected")
-    : voiceActive && modules.speech
-      ? t("chat.placeholder.voice")
-      : t("chat.placeholder");
+    : isDraggingFile
+      ? t("chat.drop.hint")
+      : isProcessingFile
+        ? droppedFileName
+          ? t("chat.drop.processingNamed", { name: droppedFileName })
+          : t("chat.drop.processing")
+        : voiceActive && modules.speech
+          ? t("chat.placeholder.voice")
+          : t("chat.placeholder");
 
   return (
     <div class={`chat-view${avatarLayout ? " chat-view--avatar" : ""}`}>
@@ -924,13 +1043,23 @@ export function ChatView({
         </div>
 
         <div class="chat-composer">
-          <div class="chat-composer-shell">
+          {/* Drag&drop target for 音声ファイル/PDF → 文字起こし (see
+              handleFileDrop): wraps the whole shell rather than just the
+              textarea so the drop zone is as large as the visible input box,
+              matching tc-assistant2's mascot-stage-wide target. */}
+          <div
+            class={`chat-composer-shell${isDraggingFile ? " chat-composer-shell--dragging" : ""}`}
+            onDragEnter={handleFileDragOver}
+            onDragOver={handleFileDragOver}
+            onDragLeave={handleFileDragLeave}
+            onDrop={handleFileDrop}
+          >
             <textarea
               ref={composerRef}
               rows={1}
               placeholder={placeholder}
               value={draft}
-              disabled={!connected}
+              disabled={!connected || isProcessingFile}
               onInput={(e) => setDraft((e.target as HTMLTextAreaElement).value)}
               onKeyDown={(e) => {
                 // Shift+Enter inserts a newline; a bare Enter sends. The
@@ -953,6 +1082,11 @@ export function ChatView({
               <SendHorizontal size={16} />
             </button>
           </div>
+          {fileError && (
+            <div class="chat-composer-file-error" role="alert">
+              {fileError}
+            </div>
+          )}
           <div class="chat-composer-foot">
             <label class="chat-composer-speaker">
               <UserRound size={13} aria-hidden="true" />

@@ -709,6 +709,24 @@
   box-shadow: 0 0 0 3px var(--primary-soft);
 }
 
+/* Drag-over state for the 音声ファイル/PDF → 文字起こし drop target (see
+   ChatView's handleFileDrop). Deliberately styled like a focus ring rather
+   than a new color, so it reads as "this box is about to receive something"
+   without introducing another accent. */
+.chat-composer-shell--dragging {
+  border-color: var(--primary);
+  border-style: dashed;
+  box-shadow: 0 0 0 3px var(--primary-soft);
+}
+
+.chat-composer-file-error {
+  padding: var(--space-1) var(--space-2);
+  color: var(--danger-text);
+  background: var(--danger-soft);
+  border-radius: var(--radius-s);
+  font-size: 0.76rem;
+}
+
 /* Overrides the shared textarea shell from components.css — the border,
    fill and focus ring belong to .chat-composer-shell here. The
    :focus-visible rule is written at two classes deep on purpose so it
