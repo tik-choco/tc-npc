@@ -66,6 +66,14 @@ ratatui = { version = "0.29", features = ["unstable-rendered-line-info"] }
 # loop can `tokio::select!` between keystrokes and incoming WebSocket frames
 # rather than needing a second thread just to poll stdin.
 crossterm = { version = "0.28", features = ["event-stream"] }
+# Display width, not byte or char count: the TUI's labels are Japanese, where
+# one char occupies two columns, so `len()` and `chars().count()` both lie and
+# every truncate/pad/wrap silently drifts. Pinned to 0.2 deliberately —
+# ratatui itself depends directly on 0.2, and measuring widths with a
+# different version than the renderer uses is how off-by-one border corruption
+# gets in. (0.1.14 is also in the graph via unicode-truncate; that one is
+# ratatui's business, not ours.)
+unicode-width = "0.2"
 # default-features = false drops the TLS backends: tc-npc's server binds a
 # bare TcpListener and never terminates TLS, so this client only ever dials
 # `ws://` — directly or through an SSH port-forward. Carrying native-tls for

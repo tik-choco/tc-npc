@@ -20,6 +20,7 @@ dirs.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
 tokio-tungstenite.workspace = true
+unicode-width.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
