@@ -30,6 +30,7 @@ OpenAI-compatible API with none of that present.
 
 ```
 tc-npc/                 root binary crate (src/main.rs) — CLI, wiring, startup
+  src/desktop/           Tauri windows (`app`/`mascot`) — only compiled with --features desktop
 crates/
   npc-core/              bus, Module trait, config, character sheets — no I/O to external services
   npc-llm/                OpenAI-compatible API client (chat/stream/embeddings/STT/TTS)
@@ -41,16 +42,70 @@ crates/
   npc-scheduler/           scheduled announcements module      (ports agent-scheduler)
   npc-translate/           simultaneous interpretation module  (ports agent-speech's translation)
   npc-server/              HTTP/WebSocket server + embedded web UI host
+  npc-tui/                 terminal UI — a *client* of npc-server, not a module
 ```
 
-`npc-talk`, `npc-memory`, `npc-speech`, `npc-vision`, `npc-action`,
-`npc-scheduler`, and `npc-server` currently contain only stub
-`module(&ModuleCtx) -> anyhow::Result<Box<dyn Module>>` constructors that
-`bail!("... not yet implemented")`. `src/main.rs` calls each constructor for
-modules enabled in config, logs a warning and continues if a module is
-unavailable (which today means "always", since they're stubs), and always
-attempts to start `npc-server` since that's how the web UI and mascot client
-connect.
+Every crate above exposes the same constructor,
+`module(&ModuleCtx) -> anyhow::Result<Box<dyn Module>>`, and all of them are
+implemented. `src/main.rs` calls the constructor, logs a warning and
+continues if one returns `Err` — a module that can't start is not a reason to
+take the rest of the process down with it.
+
+Which ones get spawned is not simply "whatever config enables", because two
+different things are being expressed:
+
+- **Spawned only when enabled in config**: `npc-talk`, `npc-memory`,
+  `npc-vision`, `npc-action`, and (behind the `mist` feature) `npc-mist`.
+  Turning these on takes a restart.
+- **Always spawned, idling when their feature is off**: `npc-speech`,
+  `npc-scheduler`, `npc-translate`, and `npc-server`. These watch the
+  `npc:config` bus topic and pick up changes made from the web UI live.
+  Gating their *spawn* on the startup config is what made the voice toggles
+  and schedule edits appear broken until a restart, which reads as the
+  feature being broken rather than merely deferred — hence the split.
+
+`npc-server` is in the second group for a further reason: it is how the web
+UI, the desktop windows and the TUI all connect, so it has to be running
+regardless of what else is.
+
+## One binary, four modes
+
+There is exactly one executable. What it does is chosen by subcommand, not by
+which artifact you shipped:
+
+| Mode | Owns a server? | Needs `--features desktop`? |
+|---|---|---|
+| `app` (default) | yes | yes |
+| `mascot` | no — attaches to one | yes |
+| `serve` (alias `run`) | yes | no |
+| `tui` | no — attaches to one | no |
+
+Two consequences are worth stating outright, because both are easy to break:
+
+**Tauri must never reach a headless build.** The roadmap's AR and physical-
+robot targets, and any server deployment, have no display to put a window on.
+`tauri`/`tauri-plugin-window-state`/`tauri-build` are therefore optional
+dependencies behind the `desktop` feature, and `src/desktop/` is declared
+behind the same `cfg` — the same shape `crates/npc-mist` uses for the `mist`
+feature, for the same reason. `cargo tree -e normal` with no features must
+report zero `tauri` lines; that is the invariant, and it is cheap to check.
+Without the feature, `app`/`mascot` return a plain error telling you to
+rebuild, rather than failing to compile.
+
+**Tauri's event loop owns the main thread on Windows.** That is why
+`src/main.rs` has no `#[tokio::main]`: the runtime is built by hand, handed to
+Tauri via `tauri::async_runtime::set`, and the modules are started on it
+before `app` blocks on the event loop. `serve` builds the same runtime and
+just `block_on`s instead. `start_modules` is the shared startup path, so the
+two modes cannot drift apart in what they bring up.
+
+`npc-tui` is a **client**, deliberately: it holds no bus, no modules, and no
+`npc-core` dependency, and reaches tc-npc only over the HTTP/WebSocket API the
+web UI already uses. That is what lets `tc-npc tui` attach to a tc-npc running
+on another machine through an SSH port-forward. It learns the port the same
+way any out-of-process client must — `~/.tc-npc/server-port.txt`, which
+records the port actually bound, since `bind_with_retry` may have moved off
+the configured one.
 
 ### The actuator seam (`npc-action`)
 
