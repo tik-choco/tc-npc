@@ -22,12 +22,15 @@
 //! `protocol.rs`'s module doc for why frames belonging to those simply land
 //! in the log panel labeled `unhandled` instead.
 
+mod api;
 mod app;
 mod protocol;
+mod theme;
 mod ui;
+mod widgets;
 mod ws_client;
 
-pub use app::{App, ConnectionState, Focus};
+pub use app::{App, ConfigFocus, ConnectionState, Focus, MainFocus, SystemActivity, ViewState};
 pub use protocol::{ClientMsg, ServerMsg};
 
 use std::io;
@@ -115,12 +118,23 @@ pub async fn run(addr: SocketAddr) -> anyhow::Result<()> {
     result
 }
 
+/// Results of the REST calls the Config screen makes. They arrive on their
+/// own channel rather than being awaited inline: `GET /api/characters` is
+/// allowed up to `api`'s 5-second timeout, and awaiting that in the event
+/// loop would freeze the whole UI — including the quit key — whenever the
+/// server is wedged. That is the failure this indirection exists to prevent.
+enum ApiEvent {
+    Characters(Vec<app::CharacterEntry>),
+    Failed(String),
+}
+
 async fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     addr: SocketAddr,
 ) -> anyhow::Result<()> {
     let mut app = App::default();
     let (mut client_events, outgoing, ws_handle) = ws_client::spawn(addr);
+    let (api_tx, mut api_events) = tokio::sync::mpsc::unbounded_channel::<ApiEvent>();
     let mut term_events = EventStream::new();
 
     terminal.draw(|frame| ui::draw(frame, &app))?;
@@ -141,10 +155,30 @@ async fn run_app(
                     None => break,
                 }
             }
+            api_event = api_events.recv() => {
+                match api_event {
+                    Some(ApiEvent::Characters(list)) => app.set_characters(list),
+                    Some(ApiEvent::Failed(message)) => {
+                        app.set_error(message, std::time::Instant::now());
+                    }
+                    // The sender is held by this function, so it outlives the
+                    // loop; `None` cannot happen while we're still running.
+                    None => {}
+                }
+            }
             term_event = term_events.next() => {
                 match term_event {
                     Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
-                        handle_key(&mut app, &outgoing, key.code, key.modifiers);
+                        let before = app.view;
+                        handle_key(&mut app, &outgoing, addr, &api_tx, key.code, key.modifiers);
+                        // Refetch on the way *into* the Config screen, and
+                        // after activating a character, so the list is never
+                        // stale from a previous visit.
+                        if app.view == ViewState::Config
+                            && (before != ViewState::Config || app.characters.is_empty())
+                        {
+                            spawn_character_fetch(addr, api_tx.clone());
+                        }
                     }
                     Some(Ok(_)) => {}
                     Some(Err(_)) | None => break,
@@ -152,11 +186,68 @@ async fn run_app(
             }
         }
 
+        // `App` never reads the clock itself — that is what keeps its state
+        // transitions testable without faking time (see `app.rs`). The cost
+        // is that something has to hand it "now" so timed things can expire;
+        // once per frame, here, is that something.
+        app.tick(std::time::Instant::now());
         terminal.draw(|frame| ui::draw(frame, &app))?;
     }
 
     ws_handle.abort();
     Ok(())
+}
+
+/// Fetch the character list off the event loop and post the result back.
+/// Detached on purpose: see [`ApiEvent`].
+fn spawn_character_fetch(addr: SocketAddr, tx: tokio::sync::mpsc::UnboundedSender<ApiEvent>) {
+    tokio::spawn(async move {
+        let event = match api::list_characters(addr).await {
+            Ok(list) => ApiEvent::Characters(
+                list.into_iter()
+                    .map(|c| app::CharacterEntry {
+                        id: c.id,
+                        name: c.name,
+                        active: c.active,
+                    })
+                    .collect(),
+            ),
+            Err(e) => ApiEvent::Failed(format!("キャラクタ一覧の取得に失敗: {e}")),
+        };
+        // A send failure means the UI already exited; nothing to report to.
+        let _ = tx.send(event);
+    });
+}
+
+/// Activate a character, then refetch so the `active` flags on screen match
+/// what the server now thinks. Same detached shape, same reason.
+fn spawn_character_activate(
+    addr: SocketAddr,
+    id: String,
+    tx: tokio::sync::mpsc::UnboundedSender<ApiEvent>,
+) {
+    tokio::spawn(async move {
+        if let Err(e) = api::activate_character(addr, &id).await {
+            let _ = tx.send(ApiEvent::Failed(format!("キャラクタの切替に失敗: {e}")));
+            return;
+        }
+        match api::list_characters(addr).await {
+            Ok(list) => {
+                let _ = tx.send(ApiEvent::Characters(
+                    list.into_iter()
+                        .map(|c| app::CharacterEntry {
+                            id: c.id,
+                            name: c.name,
+                            active: c.active,
+                        })
+                        .collect(),
+                ));
+            }
+            Err(e) => {
+                let _ = tx.send(ApiEvent::Failed(format!("一覧の再取得に失敗: {e}")));
+            }
+        }
+    });
 }
 
 /// Page-scroll step, in lines, for PageUp/PageDown — an arbitrary but
@@ -168,28 +259,85 @@ const PAGE_SCROLL_LINES: u16 = 20;
 fn handle_key(
     app: &mut App,
     outgoing: &tokio::sync::mpsc::UnboundedSender<protocol::ClientMsg>,
+    // The Config screen's one write action (activating a character) needs to
+    // reach the server, and it must not do so inline — see [`ApiEvent`].
+    addr: SocketAddr,
+    api_tx: &tokio::sync::mpsc::UnboundedSender<ApiEvent>,
     code: KeyCode,
     modifiers: KeyModifiers,
 ) {
-    if code == KeyCode::Esc
-        || (code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL))
-    {
+    // Ctrl+C is the only unconditional quit. `q` cannot be, because the main
+    // view has a text box and typing "q" must produce a q; `Esc` cannot be
+    // either, now that there are two screens and Esc's job is backing out of
+    // the inner one.
+    if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
         app.should_quit = true;
         return;
     }
 
-    if code == KeyCode::Tab {
-        app.toggle_focus();
+    // Esc backs out one level: Config -> Main, and Main -> quit. `q` from a
+    // non-text focus is the same idea by a shorter route (handled below,
+    // where it is known not to collide with typing).
+    if code == KeyCode::Esc {
+        if app.view == ViewState::Config {
+            app.return_to_main();
+        } else {
+            app.should_quit = true;
+        }
         return;
     }
 
-    // Scroll keys act on whichever panel is focused (see `Focus`'s doc for
-    // why that's a clean 1:1 mapping in this layout: Input <-> chat, Log <->
-    // log) regardless of what else is bound below.
-    let scroll = if app.focus == Focus::Input {
-        &mut app.chat_scroll
-    } else {
-        &mut app.log_scroll
+    // F2 rather than Tab for switching screens: Tab is spent on cycling
+    // focus *within* a screen, which this layout needs because there are
+    // three focusable panels on the main view. A function key also can't be
+    // swallowed by the input box.
+    if code == KeyCode::F(2) {
+        app.toggle_view();
+        return;
+    }
+
+    if code == KeyCode::Tab {
+        if modifiers.contains(KeyModifiers::SHIFT) {
+            app.prev_focus();
+        } else {
+            app.next_focus();
+        }
+        return;
+    }
+    if code == KeyCode::BackTab {
+        app.prev_focus();
+        return;
+    }
+
+    if app.view == ViewState::Config {
+        // The module list is read-only: those flags are read once at startup
+        // to decide what to spawn, so a toggle here would silently do nothing
+        // until relaunch (see `ui::RESTART_REQUIRED`). Character switching is
+        // the opposite — the server applies it immediately — so that is what
+        // this screen actually lets you do.
+        if app.focus == Focus::Config(ConfigFocus::Characters) {
+            match code {
+                KeyCode::Up => app.move_character_cursor(-1),
+                KeyCode::Down => app.move_character_cursor(1),
+                KeyCode::Enter => {
+                    if let Some(entry) = app.selected_character() {
+                        let (id, name) = (entry.id.clone(), entry.name.clone());
+                        app.set_notice(format!("{name} に切り替えています..."));
+                        app.add_event_log(format!("activate character: {name}"));
+                        spawn_character_activate(addr, id, api_tx.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+        return;
+    }
+
+    // Scroll keys act on whichever panel is focused. Input focus scrolls the
+    // transcript, since that is what you are reading while you type.
+    let scroll = match app.focus {
+        Focus::Main(MainFocus::Log) => &mut app.log_scroll,
+        _ => &mut app.chat_scroll,
     };
     match code {
         KeyCode::Up => {
@@ -211,10 +359,9 @@ fn handle_key(
         _ => {}
     }
 
-    if app.focus != Focus::Input {
-        // Log-focused: no text entry to accept, and 'q' is a convenience
-        // quit key here specifically because it can't collide with typing
-        // (there is nothing to type into while the log panel has focus).
+    if app.focus != Focus::Main(MainFocus::Input) {
+        // Not the text box: `q` is a convenience quit here specifically
+        // because it cannot collide with typing.
         if code == KeyCode::Char('q') {
             app.should_quit = true;
         }
