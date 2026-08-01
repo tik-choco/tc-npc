@@ -2,7 +2,7 @@
 // VoicePanel.test.ts: the component itself needs a DOM, but the choices it
 // makes are pure and are where the mistakes would be.
 import { describe, expect, it } from "vitest";
-import { captionStyleFromStored, deriveAvatarStatus } from "./AvatarView";
+import { AvatarDragHandle, captionStyleFromStored, deriveAvatarStatus } from "./AvatarView";
 
 describe("captionStyleFromStored", () => {
   // The important case. This key held "1"/"0" while captions were on/off,
@@ -55,5 +55,38 @@ describe("deriveAvatarStatus", () => {
     expect(deriveAvatarStatus({ voiceActive: false, pending: false, speaking: false })).toBe(
       "idle",
     );
+  });
+});
+
+describe("AvatarDragHandle", () => {
+  // AvatarDragHandle is deliberately hook-free (unlike AvatarView itself),
+  // so — like AvatarStatusBadge — it can be invoked directly as a plain
+  // function here: JSX just builds a plain vnode object (`{ type, props }`),
+  // and building that object needs no DOM or render pass, only a rendering
+  // context if hooks are involved. That lets this window's move handle be
+  // asserted on without pulling in a DOM test environment this project
+  // doesn't otherwise need.
+
+  it("carries Tauri's drag-region marker when it renders", () => {
+    const vnode = AvatarDragHandle({ bare: true });
+    expect(vnode).not.toBeNull();
+    expect(vnode?.type).toBe("div");
+    expect(vnode?.props.class).toBe("avatar-window-drag");
+    // Asserted exactly, not for truthiness: the value is what was wrong the
+    // first time. Tauri's drag.js reads a *bare* attribute as "only a direct
+    // click on this element counts" (`return el === composedPath[0]`), which
+    // left the grip span inside the strip as the one place a drag wouldn't
+    // start — the affordance that says "grab here" being the only spot that
+    // didn't. Caught by synthetic drag: on the grip the window didn't move,
+    // 60px to its left it tracked the cursor exactly. `deep` opts the whole
+    // subtree in, so a decorative child can't break the handle again.
+    expect(vnode?.props["data-tauri-drag-region"]).toBe("deep");
+  });
+
+  // The whole point of confining this to a `bare` flag: a caller that is
+  // not the popped-out `#/avatar` window must render nothing here, so a
+  // click inside it can never be hijacked into an OS-level window drag.
+  it("renders nothing when the caller is not the bare avatar window", () => {
+    expect(AvatarDragHandle({ bare: false })).toBeNull();
   });
 });

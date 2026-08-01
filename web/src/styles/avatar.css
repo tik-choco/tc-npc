@@ -281,11 +281,67 @@
   color: var(--text-muted);
 }
 
+/* The window's own move handle — see AvatarDragHandle in AvatarView.tsx for
+   what `data-tauri-drag-region` does. A strip along the top edge only, not
+   the whole window: the model's body underneath is VrmStage's own drag
+   surface for camera orbit/pan (`interactive`), and this must never compete
+   with that. 24px (`--space-6`) rather than the old 10px, and no longer
+   invisible — see the grip below — because "grab the completely blank top
+   edge" was never discoverable.
+   Sits under `.avatar-window-controls` in stacking order (z-index 1 vs 2) so
+   the corner buttons keep first claim on hover/click across the sliver of
+   top strip they occupy — the browser resolves both hover and clicks to
+   whichever element is topmost at a point, so the lower z-index here never
+   steals either from the controls above it, even where the two overlap. */
+.avatar-window-drag {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--space-6);
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 120ms ease;
+  cursor: grab;
+}
+
+.avatar-window-drag:active {
+  cursor: grabbing;
+}
+
+.avatar-window:hover .avatar-window-drag {
+  opacity: 1;
+}
+
+/* The grip itself: a short bar, the same "drag me" affordance a bottom
+   sheet or a resizable panel divider uses, so it reads as a handle rather
+   than a stray decoration. */
+.avatar-window-drag-grip {
+  width: 36px;
+  height: 4px;
+  border-radius: var(--radius-pill);
+  background: var(--border-strong);
+}
+
 /* The window's controls stay out of the way until the pointer is over it —
-   the whole point of this screen is that it's clean enough to capture. */
+   the whole point of this screen is that it's clean enough to capture.
+
+   `top` clears `.avatar-window-drag` rather than starting at `--space-3` like
+   the status badge opposite it, and that is load-bearing, not alignment
+   fussiness. These are labelled buttons ("Full body", "Transparent"), so the
+   row is ~245px of a 360px-wide mascot window — nothing like the corner
+   cluster it reads as in source. At `--space-3` it overlapped the lower half
+   of the drag strip across almost its whole width, won the hit test on
+   z-index (2 over 1), and left the strip draggable only in the ~90px to the
+   left of the row. Measured: a synthetic drag 60px from the left edge tracked
+   the cursor exactly, the same drag at the centre moved the window not at
+   all. Starting below the strip gives each one an uncontested band. */
 .avatar-window-controls {
   position: absolute;
-  top: var(--space-3);
+  top: var(--space-6);
   right: var(--space-3);
   z-index: 2;
   display: flex;
