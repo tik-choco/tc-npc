@@ -47,8 +47,8 @@ English README: [README.md](README.md)
 前提: Rust (stable)、Node.js(Web UIビルド用)
 
 ```bash
-just all              # Web UIビルド + Rustビルド
-tc-npc run             # 初回実行
+just release          # Web UIビルド + 単一バイナリ(デスクトップUI付き)
+tc-npc                # 初回実行 — サーバー、Web UI ウィンドウ、マスコット
 ```
 
 または手動で:
@@ -56,8 +56,11 @@ tc-npc run             # 初回実行
 ```bash
 cd web && npm install && npm run build
 cd ..
-cargo build --release
+cargo build --release --features desktop
 ```
+
+ウィンドウシステムに依存しないビルドが欲しい場合は `--features desktop` を
+外してください(`just release-headless`)。詳細は[モード](#モード)を参照。
 
 起動すると `config.server.addr`(既定 `http://127.0.0.1:47950`)でWeb UIが開きます。
 ブラウザを自動で開かせたくない場合は `--no-open`(または
@@ -71,17 +74,33 @@ cargo test --workspace     # Rust
 cd web && npm test         # Web UI (vitest)
 ```
 
-## デスクトップマスコット (実験的)
+## モード
 
-`mascot/` は tc-npc の `#/avatar` を透過・枠なし・最前面のウィンドウで開く
-だけの薄い Tauri シェルです。ブラウザのタブではなくデスクトップ上にアバターを
-置きます。ロジックは一切持たず、起動中のサーバーを
-`~/.tc-npc/server-port.txt` から見つけてウィンドウを向けるだけです。
+実行ファイルは1つ、顔が4つあります。サブコマンドで切り替えます。
 
-現時点では**検証用**で、`crates/npc-mist` と同様に独自の Cargo ワークスペース
-として本体のビルドから切り離してあります。WebView2 が透過ウィンドウ上で WebGL
-キャンバスを正しく合成できるかがまだ未確認のためです。実行方法と確認すべき点は
-`mascot/README.md` を参照してください。
+| コマンド | 内容 |
+|---|---|
+| `tc-npc` / `tc-npc app` | **既定**。サーバー + デスクトップウィンドウ2枚(Web UI と、デスクトップに立つキャラクター) |
+| `tc-npc mascot` | キャラクターのウィンドウだけ。起動中の tc-npc に接続 |
+| `tc-npc serve` | GUI なし。サーバーのみで、Web UI はブラウザで開く(`run` はエイリアス) |
+| `tc-npc tui` | 端末UI。起動中の tc-npc に接続 |
+
+`app` と `mascot` は `--features desktop` ビルド(`just release`)が必要です。
+これが Tauri を引き込む唯一のスイッチです。付けないビルド
+(`just release-headless`)はウィンドウシステムへの依存が一切なく、サーバーや
+ディスプレイの無いマシン向けに小さくなります。そこでも `serve` と `tui` は
+動き、`app` は誤動作せず「desktop 付きで再ビルドしてください」と言って終了
+します。
+
+デスクトップのキャラクターは `#/avatar` を透過・枠なし・最前面で表示した
+ウィンドウです。**移動はウィンドウ上端の帯をドラッグ**してください。ウィンドウに
+カーソルを乗せるとグリップが浮かび上がります。キャラクターの体をドラッグすると
+カメラが回転しますが、これは意図した挙動です。閉じる・隠す・表示するはトレイ
+アイコンから行います(タイトルバーが無いため)。
+
+`tui` はサーバーではなくクライアントです。Web UI と同じ HTTP/WebSocket API を
+話すので、SSH ポートフォワード越しの tc-npc にもそのまま繋がります
+(`tc-npc tui --addr 127.0.0.1:47950`)。
 
 ## 設定
 

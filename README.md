@@ -52,8 +52,8 @@ bus, and protocol fit together, including a deeper look at person memory.
 Prerequisites: Rust (stable), Node.js (for the Web UI build).
 
 ```bash
-just all              # build web UI + Rust binary
-tc-npc run             # first run
+just release          # build web UI + the one binary, with the desktop UI
+tc-npc                # first run — server, web UI window, and the mascot
 ```
 
 Or manually:
@@ -61,8 +61,11 @@ Or manually:
 ```bash
 cd web && npm install && npm run build
 cd ..
-cargo build --release
+cargo build --release --features desktop
 ```
+
+Drop `--features desktop` (or use `just release-headless`) for a build with
+no window system attached — see [Modes](#modes).
 
 The Web UI opens at `config.server.addr` (default `http://127.0.0.1:47950`).
 Pass `--no-open` (or set `config.server.auto_open: false`) to skip
@@ -76,17 +79,32 @@ cargo test --workspace     # Rust
 cd web && npm test         # Web UI (vitest)
 ```
 
-## Desktop mascot (experimental)
+## Modes
 
-`mascot/` is a thin Tauri shell that opens tc-npc's `#/avatar` page in a
-transparent, undecorated, always-on-top window — the avatar on your desktop
-rather than in a browser tab. It holds no logic of its own: it finds the
-running server (via `~/.tc-npc/server-port.txt`) and points a window at it.
+One executable, four faces. The subcommand picks which:
 
-It is a **spike**, deliberately kept out of the main build (its own Cargo
-workspace, like `crates/npc-mist`), because one question is still unanswered:
-whether WebView2 composites a WebGL canvas correctly in a transparent window.
-See `mascot/README.md` for how to run it and what to look for.
+| Command | What you get |
+|---|---|
+| `tc-npc` / `tc-npc app` | **Default.** Server plus two desktop windows: the web UI, and the character standing on your desktop |
+| `tc-npc mascot` | The desktop character alone, attached to a tc-npc already running |
+| `tc-npc serve` | No GUI at all — just the server and the web UI in your browser (`run` is an alias) |
+| `tc-npc tui` | A terminal UI, attached to a tc-npc already running |
+
+`app` and `mascot` need a `--features desktop` build (`just release`), which
+is what pulls in Tauri. A build without it — `just release-headless` — is
+smaller and has no window-system dependencies at all, for a server or a
+machine with no display; `serve` and `tui` still work there, and `app` exits
+with a message rather than misbehaving.
+
+The desktop character is a transparent, undecorated, always-on-top window
+showing the `#/avatar` page. Drag the strip along its top edge to move it — a
+grip fades in when you hover the window. Dragging the character's body
+instead orbits the camera, which is deliberate. Right-click the tray icon to
+hide, show, or quit; there is no title bar to close.
+
+`tui` is a client, not a second server: it speaks the same HTTP/WebSocket API
+the web UI does, so it works just as well against a tc-npc on the far end of
+an SSH port-forward (`tc-npc tui --addr 127.0.0.1:47950`).
 
 ## Configuration
 
