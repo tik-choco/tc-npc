@@ -115,6 +115,46 @@ export function AvatarStatusBadge({ status, volume, t }: { status: AvatarStatus;
   );
 }
 
+/**
+ * The bare window's own move handle — a thin strip along the top edge
+ * carrying Tauri's `data-tauri-drag-region` attribute, which its built-in
+ * per-window script (loaded into every Tauri window, no Rust wiring needed)
+ * promotes into an OS-level window drag on `mousedown`. Outside Tauri the
+ * attribute is simply inert.
+ *
+ * Confined to a strip rather than the whole window because the model's own
+ * body is already a drag surface for VrmStage's camera orbit/pan — see
+ * `interactive` there. Before this, the only way to move the window at all
+ * was a 10px fully-transparent band injected from the Rust side (mascot's
+ * `DRAG_HANDLE_SCRIPT`), which nobody could find; this replaces it with
+ * something the operator can actually see, sized and hover-revealed the same
+ * way as `.avatar-window-controls` above (avatar.css) so the two chrome
+ * pieces read as one family rather than two designs bolted together.
+ *
+ * `bare` is threaded through explicitly rather than assumed, so a caller
+ * that *isn't* the popped-out `#/avatar` window — say, a future embedding of
+ * this view inline in the app shell — renders nothing here rather than
+ * silently letting a click inside it start dragging the whole browser
+ * window. Deliberately hook-free (unlike `AvatarView` itself) so it can be
+ * exercised as a plain function in a test with no DOM: see
+ * AvatarView.test.ts.
+ */
+export function AvatarDragHandle({ bare }: { bare: boolean }) {
+  if (!bare) return null;
+  return (
+    // `deep`, not a bare attribute. Tauri's built-in drag.js treats a bare
+    // `data-tauri-drag-region` as "only a direct click on *this* element
+    // counts" (`return el === composedPath[0]`), so the grip span below —
+    // the very thing that says "grab here" — would be the one spot in the
+    // strip that doesn't drag. `deep` opts the whole subtree in. Its own
+    // walk still refuses to start a drag from a button/link/input nested
+    // inside, so this can't swallow a control added here later.
+    <div class="avatar-window-drag" data-tauri-drag-region="deep" aria-hidden="true">
+      <span class="avatar-window-drag-grip" />
+    </div>
+  );
+}
+
 export interface AvatarViewProps {
   /** Only used for the caption's name — the model comes from `avatar`, so
    *  this window works with no character sheet loaded. */
@@ -307,6 +347,7 @@ export function AvatarView({
   if (!file && !sprite) {
     return (
       <div class="avatar-window">
+        <AvatarDragHandle bare />
         <div class="avatar-window-empty">
           <div>
             <div class="empty-state-title">{t("avatar.window.empty.title")}</div>
@@ -319,6 +360,7 @@ export function AvatarView({
 
   return (
     <div class={`avatar-window${backdropClass}`}>
+      <AvatarDragHandle bare />
       <div class="avatar-window-controls">
         <button
           type="button"
