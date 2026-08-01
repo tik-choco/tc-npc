@@ -13,6 +13,16 @@ use tokio_util::sync::CancellationToken;
 
 use npc_core::{Bus, Config, Module, ModuleCtx};
 
+// Declared (and everything under it compiled) only for a `--features
+// desktop` build. This is the one place `cfg(feature = "desktop")` appears
+// for the module *declaration*; `src/desktop/` itself doesn't need to
+// sprinkle its own `cfg` attributes since the whole tree simply doesn't
+// exist otherwise. The other place it appears is the dispatch wrappers
+// (`run_app`/`run_mascot`) right below `main`, which is the whole surface
+// this feature gate has in this file.
+#[cfg(feature = "desktop")]
+mod desktop;
+
 #[derive(Parser)]
 #[command(name = "tc-npc", version, about = "Unified AI mascot agent suite")]
 struct Cli {
@@ -33,8 +43,28 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Run the agent suite and web server (default when no subcommand is given).
-    Run,
+    /// Start the desktop app: the full agent suite/server plus a decorated
+    /// main window and a transparent desktop-mascot overlay window (default
+    /// when no subcommand is given). Requires a `--features desktop` build.
+    App,
+    /// Desktop mascot window only, connecting to an already-running
+    /// `tc-npc serve`/`app` instance. Requires a `--features desktop` build.
+    Mascot,
+    /// Run the agent suite and web server with no GUI (this was the
+    /// previous default subcommand, `run`, kept below as an alias).
+    #[command(alias = "run")]
+    Serve,
+    /// Attach a terminal UI to an already-running instance. A client, not a
+    /// server: it speaks the same HTTP/WebSocket API the web UI does, so it
+    /// works just as well against a tc-npc on the other end of an SSH
+    /// port-forward as against a local one.
+    Tui {
+        /// Server to attach to. Defaults to whichever port the local server
+        /// last actually bound (`~/.tc-npc/server-port.txt`), falling back to
+        /// 127.0.0.1:47950 — see `npc_tui::resolve_addr`.
+        #[arg(long)]
+        addr: Option<std::net::SocketAddr>,
+    },
     /// Import characters from a tc-town character export JSON file.
     Import { path: PathBuf },
     /// List stored characters.
@@ -43,17 +73,67 @@ enum Command {
     ConfigPath,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+/// No `#[tokio::main]` here: on Windows, Tauri's event loop (`app` and
+/// `mascot` below) must own the main thread, so the tokio runtime is built
+/// by hand instead and handed to Tauri via `tauri::async_runtime::set`
+/// (see `src/desktop/app.rs`). `serve`/`import`/etc. build their own
+/// runtime the same way, just to drive a single `block_on` rather than
+/// share it with anything.
+fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let config_path = cli.config;
 
-    match cli.command.unwrap_or(Command::Run) {
-        Command::Run => run(config_path, cli.no_open).await,
+    match cli.command.unwrap_or(Command::App) {
+        Command::App => run_app(config_path, cli.no_open),
+        Command::Mascot => run_mascot(),
+        Command::Serve => {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?;
+            rt.block_on(run(config_path, cli.no_open))
+        }
+        Command::Tui { addr } => {
+            // No `init_tracing()` for this one: the TUI owns the terminal
+            // (raw mode + alternate screen), and a tracing line written into
+            // that from a background task lands in the middle of the drawn
+            // frame and corrupts it. What the server is doing shows up in
+            // the TUI's own log panel instead, which is the point.
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?;
+            rt.block_on(npc_tui::run(npc_tui::resolve_addr(addr)?))
+        }
         Command::Import { path } => import(config_path, &path),
         Command::Characters => list_characters_cmd(config_path),
         Command::ConfigPath => config_path_cmd(config_path),
     }
+}
+
+#[cfg(feature = "desktop")]
+fn run_app(config_path: Option<PathBuf>, no_open: bool) -> anyhow::Result<()> {
+    desktop::run_app(config_path, no_open)
+}
+
+#[cfg(not(feature = "desktop"))]
+fn run_app(_config_path: Option<PathBuf>, _no_open: bool) -> anyhow::Result<()> {
+    Err(no_desktop_ui_error())
+}
+
+#[cfg(feature = "desktop")]
+fn run_mascot() -> anyhow::Result<()> {
+    desktop::run_mascot()
+}
+
+#[cfg(not(feature = "desktop"))]
+fn run_mascot() -> anyhow::Result<()> {
+    Err(no_desktop_ui_error())
+}
+
+#[cfg(not(feature = "desktop"))]
+fn no_desktop_ui_error() -> anyhow::Error {
+    anyhow::anyhow!(
+        "this build has no desktop UI; rebuild with --features desktop, or use `tc-npc serve`"
+    )
 }
 
 fn init_tracing() {
@@ -63,7 +143,31 @@ fn init_tracing() {
         .init();
 }
 
-async fn run(config_path: Option<PathBuf>, no_open: bool) -> anyhow::Result<()> {
+/// Result of [`start_modules`]: everything a caller needs to either wait on
+/// (headless `serve`) or hand off to something else that owns the shutdown
+/// sequencing (`app`, which waits on the Tauri event loop instead of on
+/// Ctrl+C — see `src/desktop/app.rs`).
+pub(crate) struct StartedModules {
+    // Only read by `app` mode (src/desktop/app.rs), to build window URLs and
+    // the healthcheck target from `config.server.addr`; `serve`/`run` above
+    // never touches it, hence the `allow` for a headless build.
+    #[allow(dead_code)]
+    pub(crate) config: Arc<Config>,
+    pub(crate) shutdown: CancellationToken,
+    pub(crate) handles: Vec<JoinHandle<()>>,
+}
+
+/// Loads config, wires up the bus, and spawns every enabled module —
+/// everything `run` used to do up through starting `npc-server`. Split out
+/// so `app` mode (`src/desktop/app.rs`) can reuse exactly this startup path
+/// on its own tokio runtime and then hand the resulting windows/event loop
+/// to Tauri instead of awaiting Ctrl+C the way `run` does below. Moving this
+/// out changes nothing about `run`/`serve`'s own behavior — it calls this
+/// and then does exactly what it always did with the result.
+pub(crate) async fn start_modules(
+    config_path: Option<PathBuf>,
+    no_open: bool,
+) -> anyhow::Result<StartedModules> {
     let mut config = Config::load(config_path.as_deref())?;
     if no_open {
         config.server.auto_open = false;
@@ -127,12 +231,22 @@ async fn run(config_path: Option<PathBuf>, no_open: bool) -> anyhow::Result<()> 
     // client connect, regardless of which other modules are enabled.
     spawn_module(&mut handles, &ctx, "npc-server", npc_server::module(&ctx));
 
+    Ok(StartedModules {
+        config,
+        shutdown,
+        handles,
+    })
+}
+
+async fn run(config_path: Option<PathBuf>, no_open: bool) -> anyhow::Result<()> {
+    let started = start_modules(config_path, no_open).await?;
+
     tracing::info!("tc-npc running — press Ctrl+C to stop");
     tokio::signal::ctrl_c().await?;
     tracing::info!("shutdown requested, stopping modules...");
-    shutdown.cancel();
+    started.shutdown.cancel();
 
-    for handle in handles {
+    for handle in started.handles {
         let _ = handle.await;
     }
 

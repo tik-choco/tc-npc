@@ -1,9 +1,0 @@
-{
-  "identifier": "mascot-main",
-  "description": "Scopes Tauri's IPC bridge to the 'main' window, and additionally exposes it to tc-npc's own loopback origin. The mascot window loads a REMOTE page (tc-npc's own HTTP server, not bundled app content -- see WebviewUrl::External in src/main.rs), so without this 'remote' block Tauri would refuse that page any IPC access at all, and the drag-handle script injected from src/main.rs (DRAG_HANDLE_SCRIPT) would have no way to call the start_dragging command. Permissions are kept to exactly the one command that script uses -- nothing else is exposed to remote content.",
-  "windows": ["main"],
-  "remote": {
-    "urls": ["http://127.0.0.1:*"]
-  },
-  "permissions": ["core:window:allow-start-dragging"]
-}

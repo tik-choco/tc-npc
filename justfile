@@ -19,39 +19,89 @@ check-mist:
 build-mist:
     cargo build --features mist
 
-# Run the tc-npc binary.
+# Run the server with no GUI.
 run:
-    cargo run -p tc-npc
+    cargo run -p tc-npc -- serve --no-open
 
-# Build the web UI (owned by another crate/worker; requires web/ to exist).
+# Run the full desktop app: server plus main window and mascot overlay.
+app:
+    cargo run --features desktop -- app
+
+# Run the mascot overlay alone, against a tc-npc already serving.
+mascot:
+    cargo run --features desktop -- mascot
+
+# Attach the terminal UI to an already-running instance.
+tui:
+    cargo run -- tui
+
+# The bundle is embedded into the Rust binary at compile time, so anything
+# that ships has to run this first or it ships the previous one.
+#
+# Build the web UI.
 web-build:
     cd web && npm install && npm run build
 
 # Build the web UI then the Rust binary.
 all: web-build build
 
-# Release build (web UI first — it's embedded into the binary at compile time).
+# The web UI goes first because it is embedded into the binary at compile
+# time, so building it second would ship the previous bundle. `--features
+# desktop` is what lets the one resulting exe open its own windows rather
+# than only serve.
+#
+# Ship this: one executable, four modes (`app` default, `mascot`, `serve`, `tui`).
 release: web-build
+    cargo build --release --features desktop
+
+# For a machine with no display to put a window on — a server, or the
+# roadmap's robot target. `serve` and `tui` still work; `app`/`mascot` exit
+# with a message telling you to rebuild.
+#
+# Same, minus the desktop UI: no Tauri in the dependency graph at all.
+release-headless: web-build
     cargo build --release
 
-# Rebuild & rerun on Rust source changes (requires `cargo install cargo-watch`).
+# Drop build artifacts no current build can reuse. Cargo appends
+# content-hashed files to target/ and never collects the old ones, so a
+# save-driven loop like `just watch` piles up generations: 484 incremental
+# sessions accumulated here over 8 days, of which only the newest per crate is
+# ever reused again. Sweeping costs nothing in rebuild time for exactly that
+# reason — what it removes was already dead. Run it after a heavy watch
+# session, or on a schedule.
+#
+# Needs `cargo install cargo-sweep`.
+sweep:
+    cargo sweep --installed
+    cargo sweep --time 7
+
+# Show what `just sweep` would remove, without removing it.
+sweep-dry:
+    cargo sweep --dry-run --installed
+    cargo sweep --dry-run --time 7
+
 # Uses cargo-watch's `-- <full command>` form: `-x "run -p tc-npc"` breaks under
 # the cmd.exe shell above, which doesn't unquote what just passes it.
 # `--no-open` keeps each restart from popping a new browser tab: the tab you
 # already have reconnects over /ws by itself.
+#
+# Rebuild & rerun on Rust source changes (needs `cargo install cargo-watch`).
 watch:
-    cargo watch -w src -w crates -w Cargo.toml -- cargo run -p tc-npc -- --no-open
+    cargo watch -w src -w crates -w Cargo.toml -- cargo run -p tc-npc -- serve --no-open
 
-# Vite dev server with HMR for the web UI. Run `just run` in another terminal —
-# /ws, /api and /healthz are proxied to the binary on 127.0.0.1:47950.
+# Run `just run` in another terminal — /ws, /api and /healthz are proxied to
+# the binary on 127.0.0.1:47950.
+#
+# Vite dev server with HMR for the web UI.
 dev-web:
     cd web && npm run dev
 
-# Rebuild web/dist on every web/src change, for when the UI has to be checked
-# through the Rust binary itself rather than the Vite dev server (`just run` /
-# `just watch` in another terminal). No Rust rebuild is needed to pick the
-# result up: rust-embed serves web/dist from disk in debug builds, so a browser
-# reload is enough. Skips the `tsc -b` that `just web-build` runs — use that (or
-# `npx tsc --noEmit`) for the type check.
+# For when the UI has to be checked through the Rust binary itself rather than
+# the Vite dev server (`just run` / `just watch` in another terminal). No Rust
+# rebuild is needed to pick the result up: rust-embed serves web/dist from disk
+# in debug builds, so a browser reload is enough. Skips the `tsc -b` that
+# `just web-build` runs — use that (or `npx tsc --noEmit`) for the type check.
+#
+# Rebuild web/dist on every web/src change.
 watch-web:
     cd web && npx vite build --watch
