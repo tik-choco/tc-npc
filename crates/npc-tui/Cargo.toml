@@ -1,0 +1,25 @@
+[package]
+name = "npc-tui"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Terminal UI client for tc-npc, speaking the same HTTP/WebSocket API as the web UI"
+
+[dependencies]
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+futures-util.workspace = true
+# For `resolve_addr`'s `~/.tc-npc/server-port.txt` lookup — see npc-server's
+# `SERVER_PORT_FILE_NAME` doc comment for what that file is and why it exists.
+dirs.workspace = true
+
+# The three this crate exists for. Each carries a non-obvious feature choice;
+# the reasoning lives with the version in the root `[workspace.dependencies]`.
+ratatui.workspace = true
+crossterm.workspace = true
+tokio-tungstenite.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

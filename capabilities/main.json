@@ -1,0 +1,9 @@
+{
+  "identifier": "main-capabilities",
+  "description": "Scopes Tauri's IPC bridge to tc-npc's own desktop windows ('main' and 'mascot'), and additionally exposes it to tc-npc's own loopback origin. Every window here loads a REMOTE page (tc-npc's own HTTP server, not bundled app content -- see WebviewUrl::External in src/desktop/app.rs and src/desktop/mascot.rs), so without this 'remote' block Tauri would refuse those pages any IPC access at all, and the page's own move handle (AvatarDragHandle in web/src/views/AvatarView.tsx, which carries data-tauri-drag-region) would have no way to reach the start_dragging command. Permissions are kept to exactly that one command -- nothing else is exposed to remote content.",
+  "windows": ["main", "mascot"],
+  "remote": {
+    "urls": ["http://127.0.0.1:*"]
+  },
+  "permissions": ["core:window:allow-start-dragging"]
+}

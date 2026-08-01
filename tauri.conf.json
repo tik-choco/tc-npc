@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "tc-npc Mascot",
+  "productName": "tc-npc",
   "version": "0.1.0",
-  "identifier": "local.tc-npc.mascot",
+  "identifier": "local.tc-npc.app",
   "build": {
     "frontendDist": "dist"
   },

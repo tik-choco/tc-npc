@@ -1,0 +1,14 @@
+<!doctype html>
+<!--
+  This file is never shown to a user. Tauri's config schema requires
+  `build.frontendDist` (tauri.conf.json) to point at a real directory even
+  though `tc-npc app`/`mascot` never actually load anything from it: every
+  window is built with `WebviewUrl::External`, pointing at tc-npc's own
+  running HTTP server (see src/desktop/app.rs and src/desktop/mascot.rs).
+  Mirrors mascot/dist/index.html, which solves the identical problem for the
+  standalone mascot spike this was ported from.
+-->
+<html>
+  <head><title>tc-npc placeholder</title></head>
+  <body></body>
+</html>
