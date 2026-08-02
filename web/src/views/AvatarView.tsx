@@ -18,7 +18,7 @@ import type { VrmFraming } from "../vrm/stage";
 import type { AffectSnapshot, TtsLineEntry } from "../hooks/useNpcSocket";
 import type { AvatarRef, CharacterRef } from "../lib/types";
 import type { SpeakingLevelReading } from "../vrm/level";
-import { emotionFromAffect } from "../lib/vrm-emotion";
+import { useEmotion } from "../hooks/useEmotion";
 import { useI18n } from "../hooks/useI18n";
 import type { MessageKey, Translate } from "../lib/i18n";
 import "../styles/components.css";
@@ -322,6 +322,15 @@ export function AvatarView({
   const file = avatar?.kind === "vrm" ? avatar.file : null;
   const latestLine = ttsLines.length > 0 ? ttsLines[ttsLines.length - 1].text : "";
   const status = deriveAvatarStatus({ voiceActive, pending, speaking });
+  // Called once, here, for the whole component — not once per stage branch
+  // below. useEmotion owns a single hysteresis-aware state machine
+  // (decideEmotion's "held" streak); calling it from both the sprite and
+  // VRM branches would create two independent state machines that each
+  // only advance while their own branch is the one being rendered, so
+  // switching between sprite/VRM avatars would silently reset (or stall)
+  // whichever one wasn't mounted. One call, passed to both branches, keeps
+  // it a single continuous state machine regardless of which stage draws.
+  const emotion = useEmotion(affect);
 
   const backdropClass =
     backdrop === "chroma" ? " avatar-window--chroma" : backdrop === "transparent" ? " avatar-window--bare" : "";
@@ -445,7 +454,7 @@ export function AvatarView({
           file={sprite}
           speaking={speaking}
           speakingLevelRef={speakingLevelRef}
-          emotion={emotionFromAffect(affect)}
+          emotion={emotion}
           label={character?.name}
         />
       ) : (
@@ -455,7 +464,7 @@ export function AvatarView({
           framing={framing}
           speaking={speaking}
           speakingLevelRef={speakingLevelRef}
-          emotion={emotionFromAffect(affect)}
+          emotion={emotion}
           interactive
           initial={[...(character?.name ?? "N").trim()][0] ?? "N"}
         />

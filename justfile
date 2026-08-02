@@ -105,3 +105,16 @@ dev-web:
 # Rebuild web/dist on every web/src change.
 watch-web:
     cd web && npx vite build --watch
+
+# Replay the labelled conversations through the affect model, dumping the
+# frames the web UI would have received (see eval/emotion/CONTRACT.md).
+eval-trace:
+    cargo run -p npc-talk --example affect_trace
+
+# Score the expression pipeline end to end: replay the labelled conversations
+# through the affect model, then run the frames it produced through the real
+# affect -> VRM expression mapping and print accuracy, the confusion matrix,
+# and the dev/holdout gap. Run this after touching affect.rs's vocabulary or
+# vrm-emotion.ts's scoring — neither can be judged by reading the diff.
+eval-emotion: eval-trace
+    cd web && npm run eval:emotion

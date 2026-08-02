@@ -482,6 +482,59 @@ currently in context, so memories about the person you're talking to surface
 ahead of otherwise-similar chunks about someone else. `GET /api/people/:id`
 reuses the same `metadata.person_id` field to list a person's memories.
 
+## The face (affect → VRM expression)
+
+The avatar's expression is not chosen by asking a model to label the reply.
+It falls out of the affect state the chat turn already computed, in two
+stages that live on opposite sides of the wire:
+
+1. `npc-talk`'s `AffectState::update` (crates/npc-talk/src/affect.rs) folds
+   the partner's utterance into 22 drives, published as the `affect` frame.
+2. `decideEmotion` (web/src/lib/vrm-emotion.ts) reduces one frame to one of
+   the six VRM standard expressions, which `VrmAnimator` eases in.
+
+Three properties of that pipeline are easy to get wrong and impossible to
+see in a diff, so they are worth stating:
+
+- **The integrator is bounded.** A drive's step is scaled by its remaining
+  headroom (`delta * (1 - level)` upward, `delta * level` downward). The
+  original port integrated without bound, which put its fixed point at
+  `base + delta/pull` — above 1.0 for every drive that ordinary conversation
+  nudges each turn. Those drives pinned to 1.0 within a few turns and stopped
+  carrying information at all, freezing both the face *and* the top-3 drives
+  `to_prompt` feeds the persona. This is the one place affect.rs knowingly
+  diverges from its TypeScript original; see the note in that file.
+- **Wariness reaches the prompt but not the face.** A low `familiarity` adds
+  to cortisol/noradrenaline so the NPC reads as guarded toward a stranger,
+  which is right for the persona and wrong for the face — untreated it makes
+  a polite first hello look like anger. `vrm-emotion.ts` subtracts an
+  estimate of that contribution rather than affect.rs suppressing it, so the
+  two consumers can disagree on purpose.
+- **The decision is stateful.** `decideEmotion` takes the previous decision
+  and applies a switch margin plus a minimum hold, because a per-frame argmax
+  flickers whenever two emotions score closely. Consumers must therefore go
+  through `useEmotion` (web/src/hooks/useEmotion.ts) and call it once per
+  surface — two call sites are two independent state machines.
+
+### Evaluating a change
+
+Neither stage can be judged by reading it, so both are scored against
+hand-labelled conversations. `just eval-emotion` replays
+`eval/emotion/dataset.jsonl` through the real affect model, runs the frames
+it produces through the real mapping, and prints accuracy, a confusion
+matrix, and the dev/holdout gap. See
+[eval/emotion/CONTRACT.md](../eval/emotion/CONTRACT.md) for the data format
+and the reason the dataset is split.
+
+Two numbers decide whether a change is an improvement. The first is the
+**constant "always predict neutral" model**, printed beside every accuracy:
+most turns in a real conversation genuinely are neutral, so a mapping can
+post a respectable-looking score while having stopped expressing anything —
+the vote-based mapping this replaced actually scored *below* that constant.
+The second is the **dev/holdout gap**: vocabulary lists get tuned by people
+who can read dev's phrasings, and a gap that opens up is that tuning failing
+to generalise. `emotion-eval.test.ts` asserts on both.
+
 ## WS / REST protocol (implemented by `npc-server`)
 
 The WS surface is deliberately a superset of the "extension API" a sibling

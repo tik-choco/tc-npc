@@ -6,9 +6,75 @@
 //! here — this module is purely the internal "drive" state and the
 //! farewell/closing state machine layered on top of it.
 //!
-//! Numeric constants (bases, deltas, decay pulls, thresholds) are copied
-//! verbatim from the TypeScript original; see the doc comments on
-//! individual items for the corresponding line ranges.
+//! Numeric constants (bases, deltas, decay pulls, thresholds) started as a
+//! verbatim copy from the TypeScript original; see the doc comments on
+//! individual items for the corresponding line ranges. The vocabulary lists
+//! and a handful of per-word deltas have since diverged from that original
+//! — see the second paragraph below the integrator note for why.
+//!
+//! One piece of behavior is deliberately *not* a verbatim port: the
+//! per-turn integration step in [`AffectState::update`] is a bounded
+//! integrator, not the original's unbounded `level += (base - level) *
+//! pull; level += delta`. The unbounded version has an ugly property —
+//! several drives' `pull` values are small enough that ordinary
+//! conversation drives their fixed point past 1.0, so a handful of turns
+//! of unremarkable dialogue pins them to the ceiling for the rest of the
+//! session (measured: dopamine, oxytocin, acetylcholine and orexin all
+//! reach exactly `1.0` within ~15 turns of plain 16+-character sentences).
+//! Once pinned, the drive stops carrying information — a rapturous turn
+//! and a flat one both read as `1.0` — and [`AffectState::to_prompt`]'s
+//! top-3-by-deviation salience ends up repeating the same three lines
+//! every turn thereafter, which is as much a bug in the character's
+//! *described* internal state as it is in its expression. See the comment
+//! on the integration loop itself for the replacement and why it doesn't
+//! have this failure mode. At the time that change landed, every constant
+//! — bases, deltas, pulls, vocabulary — was still copied verbatim; only
+//! the integration step differed.
+//!
+//! That is no longer true of the vocabulary lists (`POSITIVE`, `CONFLICT`,
+//! the new `SURPRISE`, etc.) or of a few of the deltas that read them.
+//! Measured against the 160-turn labelled eval set
+//! (`eval/emotion/dataset.jsonl`, scored through `web/src/lib/
+//! vrm-emotion.ts`'s mapping from these 22 drives onto six VRM
+//! expressions), the verbatim-ported vocabulary produced almost no usable
+//! signal for four of those six: happy recall 31.6%, sad recall 8.3%,
+//! angry recall 11.1%, surprised recall 0.0%. The original word lists
+//! simply don't cover how an ordinary Japanese conversation expresses
+//! being pleased, hurt, angry or startled — `POSITIVE` had nothing for
+//! "褒められた"/"助かった"/"よかった", `adrenaline` only fired on a
+//! conflict word paired with a question mark (so a flat "最悪だよ、ひどい
+//! よ" never moved it), and no list at all tracked surprise. The
+//! vocabulary below extends those lists with short stems chosen to absorb
+//! ordinary inflections — the same approach the original lists already
+//! used for e.g. "楽し", "疲", "痛" — with an explicit note wherever an
+//! addition risks matching an unrelated word (`contains`-based matching
+//! makes that a real risk, not a theoretical one: the original's bare
+//! "嫌" already matched "機嫌" — mood — before this pass replaced it with
+//! more specific inflections). This is scoped narrowly: the bases, the
+//! 0.08/0.15/0.2 pulls, and the bounded integrator above are all still
+//! exactly as before.
+//!
+//! A later, narrower pass targeted the three endogenous-opioid drives
+//! (`endorphin`, `enkephalin`, `dynorphin`) plus `anandamide` (an
+//! endocannabinoid, not an opioid, but sharing endorphin's `happy` vote in
+//! vrm-emotion.ts). All four were wired to a mapping vote but almost never
+//! fired: measured fire counts against the 288-turn eval set were
+//! endorphin 19, enkephalin 9, dynorphin 12, and anandamide 1 (out of a
+//! possible 288 each) — anandamide's condition was a logical AND of two
+//! clauses (`positive && calm`) that essentially never co-occur in the
+//! same utterance, a dead vote in all but name. See each drive's own delta
+//! comment below for what was tried and measured. Net result: enkephalin's
+//! fire count rose to 43 and anandamide's to 23, relaxed recall rose from
+//! 26.7% to 30.0% and happy recall from 29.3% to 32.8%, all with neutral
+//! recall *unchanged* at 61.3% and dev strict accuracy rising from 49.7%
+//! to 50.3% (holdout 47.5% -> 49.5%, dev-holdout gap actually narrowing
+//! from +2.3pp to +0.8pp). Two of the four had no safe headroom: raising
+//! `endorphin`'s `humor`/`positive` weights and raising `dynorphin` past
+//! 0.2 each reproduced a version of the same failure this file's other
+//! comments already document elsewhere (POSITIVE's ubiquity, dynorphin's
+//! shared trigger with cortisol/substance_p) — both were left at their
+//! pre-pass values after being measured, not merely assumed, to not be
+//! worth it.
 
 use std::collections::HashSet;
 use std::sync::OnceLock;
@@ -20,18 +86,135 @@ use serde::Serialize;
 // vocabulary constants (conversation.ts lines 42-57)
 // ---------------------------------------------------------------------
 
-const BOND: &[&str] = &["私", "僕", "俺", "です", "好き", "嬉しい", "よろしく", "ありがとう", "君", "あなた"];
-const POSITIVE: &[&str] = &["はい", "なるほど", "ありがとう", "いいね", "嬉しい", "そうですね", "うん", "楽し"];
-const CONFLICT: &[&str] = &["嫌", "違う", "うるさい", "やめて", "怒", "むかつく", "バカ", "最悪"];
+// The lists below are no longer a verbatim port — see the module doc comment
+// for the measured recall numbers that motivated extending them. Every
+// addition is a short stem chosen to absorb ordinary inflections (the
+// approach the original lists already used for e.g. "楽し", "疲", "痛"),
+// with a note wherever a stem risks matching an unrelated word.
+
+const BOND: &[&str] = &[
+    "私", "僕", "俺", "です", "好き", "嬉し", "よろしく", "ありがとう", "君", "あなた",
+    // Trust/closeness words the pronoun-heavy original list didn't cover.
+    "信頼", "大切", "頼りに",
+];
+// "嬉しい" narrowed to the "嬉し" stem (matches "嬉しかった"/"嬉しくて" too — the exact form
+// alone was missing most of its own inflections). The rest of the additions are the specific
+// gap the mapping diagnosis named: praise, relief, gratitude, being helped, admiration.
+// "すごい" and "安心" can in principle modify a negative ("すごい嫌だ"), but both read as
+// positive in the overwhelming majority of ordinary use, and an occasional false fire here is
+// absorbed by the mapping's DEVIATION_FLOOR plus its bias toward neutral on a single weak
+// signal.
+const POSITIVE: &[&str] = &[
+    "はい", "なるほど", "ありがとう", "いいね", "嬉し", "そうですね", "うん", "楽し",
+    "よかった", "良かった", "助か", "すごい", "最高", "感謝", "褒め", "安心",
+];
+// The original's bare "嫌" matches "機嫌" ("kigen", mood) as a substring — "機嫌がいい" (in a
+// good mood) would have read as conflict. Replaced with specific inflections that don't have
+// that collision. Added common angry/confrontational phrasing the original missed entirely
+// ("ひどい", "腹立つ", "うざい") — this is what lets a flat, non-question conflict statement
+// ("最悪だよ、ひどいよ") register at all; see the `adrenaline` delta below for why that
+// mattered.
+const CONFLICT: &[&str] = &[
+    "嫌い", "嫌だ", "嫌な", "違う", "うるさい", "やめて", "怒", "むかつく", "ムカつ", "バカ", "馬鹿", "最悪",
+    "ひどい", "腹立", "うざ",
+];
 const HUMOR: &[&str] = &["笑", "ふふ", "ｗ", "w", "面白", "楽し", "冗談"];
-const TIRED: &[&str] = &["疲", "眠", "休", "寝", "だる", "しんど"];
+// "元気が出な" added on top of the original TIRED list: covers the very common "元気が出ない"
+// / "元気が出なくて" idiom for low motivation/energy — otherwise that whole sentence would
+// register nothing here while RECOVER's "元気" fires the opposite (positive) signal, since
+// `contains` can't see that it's negated. This doesn't cancel that false-positive-by-negation
+// (RECOVER's "元気" still can't tell "元気が出ない" from "元気になった"), but it does at least
+// give TIRED/PAIN a competing signal on the same sentence instead of none.
+//
+// "気力" added: sad turns in the eval set routinely describe low motivation without ever using
+// a PAIN word ("声にする気力もあんまりなくて" — "I don't even have the energy to speak up").
+// Bare "気力" (rather than a negated stem like "元気が出な" above) is deliberate: in ordinary
+// conversational Japanese people mention 気力 almost exclusively to say they lack it ("気力が
+// ない"/"気力が湧かない"/"気力もなくて"); declaring an abundance of it ("気力に満ちている") is
+// a much rarer construction, so the asymmetry makes the bare stem a reasonable bet the same way
+// the pre-existing "しんど"/"だる" stems are.
+const TIRED: &[&str] = &["疲", "眠", "休", "寝", "だる", "しんど", "バテ", "くたくた", "元気が出な", "気力"];
 const NIGHT: &[&str] = &["夜", "深夜", "暗", "星空", "寝る"];
-const PAIN: &[&str] = &["痛", "つら", "苦し", "不快", "悲し", "寂し"];
-const CALM: &[&str] = &["静", "ゆっくり", "落ち着", "のんびり", "穏やか"];
-const URGENT: &[&str] = &["急", "早く", "すぐ", "危", "！", "!", "助け", "大変"];
-const LEARN: &[&str] = &["なぜ", "どうして", "つまり", "わかった", "なるほど", "考え", "知り", "教え"];
-const COMFORT: &[&str] = &["大丈夫", "安心", "ありがとう", "ゆっくり", "無理しない"];
-const RECOVER: &[&str] = &["大丈夫", "復活", "元気", "持ち直", "平気"];
+// "痛" alone already covers 痛い/痛かった. Added:
+//   - "辛い" (kanji; distinct from the "つら" stem already here, which only matches the
+//     hiragana spelling)
+//   - "落ち込" (落ち込んだ/でいる)
+//   - "泣" (泣いた/泣ける/泣きたい) — a single kanji, but, like the pre-existing single-kanji
+//     "痛"/"怒" stems, rare enough outside this sense that the false-positive risk is low
+//   - "不安" (anxiety/worry) — the original list had "不快" (discomfort) but nothing for plain
+//     worry, a very common way distress shows up in conversation
+//   - "崩" (single kanji: 体調を崩す/崩れる, health or plans falling apart) — like "泣"/"痛",
+//     the false-positive surface (雪崩, 崩壊) is rare in ordinary conversation and still reads
+//     negative even when it appears
+//
+// "ごめん" (sorry/apologetic) was tried and dropped: measured against
+// eval/emotion/trace.json it fired on plain, mildly-apologetic-but-otherwise-settled turns
+// ("気にしすぎたかも、ごめんね") that are genuinely neutral, not sad, costing more neutral
+// recall than it gained in sad recall. An apology alone isn't a reliable sad signal the way
+// "痛い"/"寂しい"/"不安" are — most everyday "ごめん"s are polite friction-smoothing, not
+// distress.
+// "笑えな"/"前を向けな"/"名残惜し" added: several eval-set sad turns describe the feeling
+// entirely without any word already in this list ("うまく笑えなくて", "うまく前を向けなくて"),
+// so no amount of retuning the deltas below can reach them without the vocabulary covering more
+// than literal pain/anxiety words. Each is a stem for "this kind of expression", not a copy of
+// the dataset's exact sentence:
+//   - "笑えな" only matches the negated form ("笑えない"/"笑えなくて") and not "笑える", so it
+//     can't collide with a genuinely positive "楽しくて笑える" the way a bare "笑" stem would.
+//   - "前を向けな" is the same negation trick: matches "前を向けない"/"前を向けなくて" but not
+//     the recovering "前を向けるようになった", which is closer to RECOVER's territory than PAIN's.
+//   - "名残惜し" (wistful about parting) doesn't have a realistic positive-valence reading —
+//     unlike "手放す" (letting go of something), which was tried and dropped here because it
+//     collides with genuine relief ("重荷を手放せてよかった").
+const PAIN: &[&str] = &[
+    "痛", "つら", "苦し", "不快", "悲し", "寂し", "辛い", "落ち込", "泣", "不安", "崩", "笑えな", "前を向けな",
+    "名残惜し",
+];
+const CALM: &[&str] = &["静", "ゆっくり", "落ち着", "のんびり", "穏やか", "リラックス", "まったり"];
+// "！"/"!" used to be in this list, which was a bug: `urgent` feeds adrenaline and cortisol
+// (see the deltas below), so *any* exclamation mark — a happy "褒められたんだ!", a surprised
+// "えっ、うそでしょ!" — read as urgency and pulled the expression toward angry. Measured: the
+// eval set's "聞いて聞いて、今日の発表、すごく褒められたんだ!" (a happy turn) predicted angry
+// before this change. An exclamation mark encodes the *intensity* of an utterance, not its
+// urgency, and intensity is orthogonal to valence — ideally it would amplify whichever emotion
+// is already present rather than being dropped outright.
+//
+// Two fixes were on the table: drop it from URGENT (this one), or keep the signal by having it
+// scale up whichever content-driven deltas already fired this turn (bigger endorphin on an
+// exclaimed happy line, bigger adrenaline on an exclaimed angry one). The amplifier is the more
+// semantically complete of the two, but it is also a second free parameter (how much to scale
+// by) that itself needs tuning and its own dev/holdout drift check, for a case this dataset
+// barely exercises — a plain "positive line, no exclamation" and "positive line, with
+// exclamation" mostly already land on the same side of every threshold in vrm-emotion.ts once
+// the content words alone are voting. Simple removal was measured to fix the target
+// misclassifications (this comment's example, and the equivalent surprised/angry cases) without
+// the regressions the sad-vocabulary changes below triggered when pushed too far, so it's what
+// shipped. If a future pass has eval turns that actually distinguish "said flatly" from "said
+// with real intensity" within the same emotion, the amplifier is the more correct next step.
+const URGENT: &[&str] = &["急", "早く", "すぐ", "危", "助け", "大変"];
+// Added "理解"/"納得" (synonyms of "わかった"/"なるほど") and "気づ" (気づいた/気づく).
+const LEARN: &[&str] =
+    &["なぜ", "どうして", "つまり", "わかった", "なるほど", "考え", "知り", "教え", "理解", "気づ", "納得"];
+const COMFORT: &[&str] = &["大丈夫", "安心", "ありがとう", "ゆっくり", "無理しない", "気にしないで"];
+const RECOVER: &[&str] = &["大丈夫", "復活", "元気", "持ち直", "平気", "回復", "立ち直"];
+// New: nothing in the original vocabulary tracked surprise at all (surprised recall was
+// 0.0% — see the module doc comment). Feeds `acetylcholine`/`orexin`/`histamine` in `update`
+// below — the three drives `vrm-emotion.ts`'s PRIMARY_VOTES reads for the `surprised`
+// expression (checked there before wiring this up, per the task brief). Candidates considered
+// and rejected, with why:
+//   - bare "え、": almost any word ending in "え" followed by a comma matches too (e.g. "その
+//     考え、"), so it would fire on ordinary sentence rhythm rather than surprise. "えっ" (the
+//     small-tsu spelling) is the distinctively-surprised form and doesn't have that collision.
+//   - "本当に"/"ほんと": both are plain intensifiers used constantly outside of surprise
+//     ("本当にありがとう"); including them would fire on ordinary emphatic thanks/agreement.
+//   - "初めて" ("for the first time"): as often a neutral statement of fact as a surprised
+//     reaction ("初めて会った日" implies nothing about surprise).
+//   - "そんな": far too generic ("そんな感じ", "そんなことない") to carry signal alone.
+//   - bare "うそ"/"うわ": "うそ" alone also means "a lie" outside the surprised-exclamation
+//     use ("それはうそだ" is an accusation, not surprise); "うわ" is a substring of "うわさ"
+//     (rumor). Narrowed to "うそでしょ"/"嘘でしょ" and "うわっ", neither of which has either
+//     collision.
+const SURPRISE: &[&str] =
+    &["えっ", "まさか", "びっくり", "驚", "うそでしょ", "嘘でしょ", "マジ", "意外", "衝撃", "信じられない", "うわっ"];
 const LURE: &[&str] = &[
     "行こう", "行きましょう", "おいで", "ついてき", "ついて来", "一緒に", "二人で", "デート", "こっち来", "こっちおいで", "来て",
     "来ない", "連れて", "付いて",
@@ -471,6 +654,7 @@ impl AffectState {
         let comfort = includes_any(text, COMFORT);
         let recover = includes_any(text, RECOVER);
         let lure = includes_any(text, LURE);
+        let surprise = includes_any(text, SURPRISE);
 
         let mut delta = [0.0f32; DRIVE_COUNT];
 
@@ -478,33 +662,183 @@ impl AffectState {
             self.familiarity = self.familiarity.max(0.7);
         }
 
-        delta[Dopamine as usize] += if question || novelty {
+        // `pain` takes priority over the length/question-driven `novelty` branch below: sad
+        // turns in the eval set are routinely 12+ characters ("誰にも話せなくて、一人で抱えて
+        // た"), so without this a sad turn's own length used to earn dopamine the same +0.18 a
+        // curious/engaged turn gets — exactly backwards for the "dopamine down" vote sad relies
+        // on (see vrm-emotion.ts's MODIFIER_VOTES). A short, sad, non-question turn already fell
+        // into the plain `-0.03` branch and needed no help; this only changes turns where length
+        // was previously overriding the content.
+        delta[Dopamine as usize] += if pain {
+            -0.15
+        } else if question || novelty {
             0.18
         } else if terse {
             -0.12
         } else {
             -0.03
         };
-        delta[Serotonin as usize] += b(positive, 0.06) - b(conflict, 0.15);
+        // `pain` added to serotonin's downward trigger, alongside `conflict`: sadness isn't
+        // conflict, so a purely sad turn used to leave serotonin untouched (it only fell via
+        // decay toward its 0.6 base), giving sad's "serotonin down" vote nothing to work with
+        // outside of angry-adjacent turns. Weighted lower than conflict's 0.15 — sadness reads
+        // as a milder, less acute drop in mood than a confrontation — but still a real signal
+        // rather than none.
+        delta[Serotonin as usize] += b(positive, 0.06) - b(conflict, 0.15) - b(pain && !conflict, 0.1);
         delta[Oxytocin as usize] += b(bond, 0.15) + 0.04 * (own_turns.min(4) as f32) / 4.0;
-        delta[Endorphin as usize] += b(humor, 0.18) + b(positive, 0.05);
+        // Endorphin is happy's heaviest primary vote in vrm-emotion.ts's PRIMARY_VOTES (weight
+        // 1.0), and its old fire rate was low (19/288 against a happy support of 58) — most of
+        // that 1/3.6 gap between `humor`'s 0.18 and `positive`'s 0.05 looked, on paper, like
+        // exactly the kind of imbalance this pass should fix. It measured the opposite: `humor`
+        // at 0.19-0.24 and/or `positive` at 0.06-0.14 (tried individually and together, both
+        // against baseline and against the enkephalin/anandamide changes below already applied)
+        // never once produced a net happy-recall gain — the extra endorphin fires were real
+        // (19->25 at humor=0.24) but ran roughly 2 false-positive neutral turns for every 1 true
+        // happy turn gained, and every tested combination pushed neutral recall under the 60%
+        // floor (as low as 55.5%) while dev strict accuracy *fell*. The likely cause: POSITIVE
+        // includes plain acknowledgement words ("はい", "うん", "そうですね") and HUMOR's "笑"
+        // is common outside genuine amusement too, and the bounded integrator's multi-turn carry
+        // means even a below-floor per-turn delta compounds across a conversation's worth of
+        // those words — so raising either weight doesn't just sharpen genuinely happy turns, it
+        // gradually lifts *every* turn with an ordinary acknowledgement toward the floor. `humor`
+        // and `positive` are therefore left exactly as measured at project start (0.18 / 0.05).
+        // What did work, at zero measured accuracy cost: adding `recover` ("大丈夫", "元気",
+        // "立ち直"...) as a third, independent addend. Recover words are rarer and more
+        // specifically about a state bouncing back to good than POSITIVE's broad acknowledgement
+        // vocabulary, so a small weight here (0.08, well under DEVIATION_FLOOR alone — it only
+        // ever pushes endorphin over the line stacked with humor or positive, not by itself)
+        // raised endorphin's own fire count (19->20) without moving a single classification either
+        // way in the eval set. It doesn't close the happy-recall gap on its own — that gap is
+        // closed by anandamide picking up the slack below — but it's a real, free increment to
+        // endorphin's own contribution and is semantically apt: endorphin's DRIVES high-wording is
+        // "気分が軽く朗らか" (light, cheerful mood), which a return to feeling okay after strain
+        // fits as well as humor or plain positivity does.
+        delta[Endorphin as usize] += b(humor, 0.18) + b(positive, 0.05) + b(recover, 0.08);
         delta[Cortisol as usize] += b(conflict || urgent || pain, 0.18) - b(positive || calm, 0.06);
         delta[Noradrenaline as usize] += b(question || urgent, 0.16) - b(terse, 0.06);
-        delta[Adrenaline as usize] += b(urgent || (conflict && question), 0.22);
+        // Broadened from `urgent || (conflict && question)`: the question requirement meant a
+        // flat declarative conflict statement ("最悪だよ、ひどいよ" — no "?") never raised
+        // adrenaline at all, which is most of how a plain angry line actually reads. Dropping
+        // the question requirement doesn't blur angry into sad: CONFLICT and PAIN are disjoint
+        // word lists, so a purely sad turn (PAIN words only, no CONFLICT) still never fires
+        // adrenaline — cortisol/dynorphin/substance_p carry sad alone. A conflict turn now
+        // raises both adrenaline *and* cortisol/dynorphin, but that's the angry-vs-sad split
+        // vrm-emotion.ts's weights already lean on (adrenaline 1.1 + cck 1.3 for angry against
+        // cortisol 0.7 + dynorphin 0.9 for sad on the same trigger), not something this change
+        // removes.
+        delta[Adrenaline as usize] += b(urgent || conflict, 0.22);
         delta[Acetylcholine as usize] += b(learn || char_count >= 16, 0.13);
+        // Surprise: kept as its own addend rather than folded into the length/learn condition
+        // above, so a short surprised reaction ("えっ、うそでしょ" — 8 characters, no "?")
+        // still gets signal even though it doesn't clear `char_count >= 16`. The task brief
+        // suggested acetylcholine and noradrenaline/adrenaline as candidate carriers, but
+        // vrm-emotion.ts's PRIMARY_VOTES (checked before wiring this up) votes `surprised` off
+        // acetylcholine/orexin/histamine only — noradrenaline and adrenaline both feed `angry`
+        // there instead, so loading surprise onto either of those would show up on the face as
+        // anger, not surprise. All three surprised-voting drives get the same treatment below.
+        delta[Acetylcholine as usize] += b(surprise, 0.4);
         delta[Glutamate as usize] += b(learn, 0.13);
         delta[Gaba as usize] += b(calm, 0.12) - b(urgent || conflict, 0.1);
         delta[Glycine as usize] += b(calm || night, 0.13);
         delta[Melatonin as usize] += b(night || tired, 0.2) - b(urgent, 0.08);
         delta[Orexin as usize] += b(question || novelty || positive, 0.12) - b(tired || night, 0.16);
+        delta[Orexin as usize] += b(surprise, 0.35); // second of the three surprised-voting drives — see the acetylcholine comment above.
         delta[Histamine as usize] += b(question || urgent, 0.12) - b(tired || night, 0.1);
-        delta[Dynorphin as usize] += b(pain || conflict, 0.15);
+        delta[Histamine as usize] += b(surprise, 0.35); // third of the three surprised-voting drives — see the acetylcholine comment above.
+        // Raised from 0.15: dynorphin is sad's single heaviest-weighted vote in
+        // vrm-emotion.ts's PRIMARY_VOTES (0.9, versus cortisol's 0.7 and substance_p's 0.7 for
+        // the same trigger), and sad recall against the eval set was measured near-dead (6.7%)
+        // with the old value. Applies equally to `conflict` — this drive isn't what
+        // distinguishes angry from sad (adrenaline and cck below are; dynorphin isn't wired to
+        // either of those in vrm-emotion.ts), so strengthening it doesn't blur that line.
+        //
+        // 0.22 was tried here (pushing a borderline first-turn pain trigger's normalized
+        // deviation cleanly past vrm-emotion.ts's DEVIATION_FLOOR instead of landing right on
+        // top of it) and measured: dev strict accuracy ticked up but holdout dropped enough to
+        // push the dev-holdout gap to +5.3pp — over the task's +5pp revert line — while neutral
+        // recall fell to 55.5%, under the 60% floor. Both regressions trace to the same cause:
+        // 0.22 was strong enough to also tip some genuinely-neutral turns (a plain "痛い" aside
+        // in an otherwise settled conversation) into sad. Reverted to 0.2, which clears the
+        // floor on most real sad turns without that spillover — see the module-level report for
+        // the measured numbers at each value.
+        //
+        // Re-confirmed on top of the enkephalin/anandamide changes elsewhere in this function
+        // (opioid-drive pass, see the module report): the same failure reappears, and as a hard
+        // cliff rather than a gradual slide — *any* value strictly above 0.2 (0.201 through 0.21
+        // all measured identically) immediately drops neutral recall to 58.8% and widens the gap
+        // to +2.8pp, with sad recall jumping to 43.3% at the same instant. Splitting the trigger
+        // asymmetrically (`pain` weighted higher than `conflict && !pain`, so the two conditions
+        // stop moving in lockstep) was also tried, on the theory that decorrelating them might
+        // dodge the cliff; it didn't — still 58.8% neutral, and the dev-holdout gap widened to
+        // +3.8pp, worse than the flat increase. The likely cause: cortisol and substance_p are
+        // both already driven by this exact `pain || conflict` condition (see their own deltas),
+        // so the same small set of turns crosses all three drives' floors together the instant
+        // dynorphin's own delta clears 0.2 — there's no gradual approach because dynorphin isn't
+        // moving alone. 0.2 stays the value; raising it is not viable without also touching
+        // cortisol or substance_p, which this pass was explicitly scoped not to do.
+        delta[Dynorphin as usize] += b(pain || conflict, 0.2);
         delta[Dhea as usize] += b(recover || positive, 0.12);
-        delta[Enkephalin as usize] += b(comfort, 0.13);
-        delta[Anandamide as usize] += b(positive && calm, 0.12) + b(humor, 0.06);
-        delta[SubstanceP as usize] += b(pain, 0.16);
+        // Widened from a single `comfort`-only trigger at 0.13 (which normalized to well under
+        // DEVIATION_FLOOR and fired only 9/288 times, covering 10.0% of relaxed turns). The
+        // DRIVES high-wording for enkephalin is "安らぎを感じている: 相手にも安心を返す" — ease,
+        // tension *releasing* — which is broader than "somebody directly reassured me" (COMFORT's
+        // 5-word list): a calm turn (settling down, no urgency) and a recovery turn (bouncing back
+        // after strain) both describe the same physiological easing, just from a different
+        // starting point. Kept as three independent additive terms rather than raising `comfort`
+        // alone so much higher that it overshoots on its own: comfort (being reassured) stays the
+        // strongest single trigger since it's the most specific to "relief", calm and recover each
+        // add a smaller amount so either alone still moves the needle and any two together clear
+        // the floor comfortably. Unlike endorphin's and dynorphin's comments above, this one had
+        // no cliff to back off from: measured in isolation (endorphin/anandamide/dynorphin left
+        // at their pre-change values), this raised enkephalin's fire count from 9/288 to 43/288
+        // and relaxed recall from 26.7% to 30.0% while dev strict accuracy matched baseline
+        // exactly (49.7%) and neutral recall was untouched (61.3%, identical count of correct
+        // neutral predictions) — the confusion matrix shows the 2 newly-relaxed-leaning turns
+        // came from turns *already* being mispredicted as sad, not from previously-correct
+        // neutral turns, i.e. this moved an existing error to a better location rather than
+        // creating a new one.
+        delta[Enkephalin as usize] += b(comfort, 0.18) + b(calm, 0.08) + b(recover, 0.06);
+        // Was `positive && calm` — a logical AND of two conditions that essentially never
+        // co-occur in the same short utterance (measured: fired 1/288 turns, the single
+        // worst-covered drive in the whole 22-drive model), making this a dead vote. Split into
+        // three independent additive terms rather than switching to `positive || calm`: an OR
+        // was tried first and measured worse — `calm` alone pushed happy's score on turns that
+        // should read `relaxed` instead (anandamide only votes happy in vrm-emotion.ts), and
+        // since `calm` already independently drives enkephalin/gaba/glycine/melatonin toward
+        // `relaxed`, letting it also feed `happy` here double-counted the same word across two
+        // competing expressions — measured as +2 extra neutral->happy *and* +2 extra
+        // neutral->relaxed misfires simultaneously, worse than leaving anandamide dead. Dropped
+        // `calm` entirely and added `recover` instead: DRIVES' high-wording for anandamide is
+        // "満ち足りておおらか" (content, unbothered by details) — a state reached by things
+        // going well (`positive`), a shared laugh (`humor`), or bouncing back after a rough
+        // patch (`recover`), none of which collide with `relaxed`'s calm/settled territory the
+        // way `calm` itself does. Each weight is well under DEVIATION_FLOOR alone (anandamide is
+        // a secondary, reinforcing vote for happy behind endorphin's stronger 1.0-weight one, not
+        // meant to originate a happy score by itself on an otherwise flat turn), but any two
+        // together clear it comfortably. Tuned by measuring in 0.005-0.01 steps against dev:
+        // below ~0.075/0.115/0.095 the extra fires were real but too weak to ever flip a
+        // classification (harmless but pointless); at ~0.08/0.12/0.10 a few turns crossed a
+        // second cliff (neutral recall 59.7%, just under the 60% floor) for no further gain over
+        // this value. This setting raised anandamide's fire count from 1/288 to 23/288, all
+        // measured with zero neutral-recall cost (61.3%, identical to pre-change) and a genuine
+        // happy-recall gain (29.3% -> 32.8%) that held on the holdout split too (holdout strict
+        // accuracy rose from 47.5% to 49.5% with these changes plus enkephalin's, gap +0.8pp).
+        delta[Anandamide as usize] += b(positive, 0.075) + b(humor, 0.115) + b(recover, 0.095);
+        // Raised from 0.16 alongside dynorphin above — same rationale (sad's weighted votes in
+        // vrm-emotion.ts, sad recall was 6.7%) and the same revert-to-0.2 measurement (see
+        // dynorphin's comment).
+        delta[SubstanceP as usize] += b(pain, 0.2);
         delta[Npy as usize] += b(calm, 0.1) + b(recover, 0.06);
-        delta[Cck as usize] += b(conflict || pain, 0.13);
+        // Split from the old `b(conflict || pain, 0.13)`: cck only ever votes for `angry` in
+        // vrm-emotion.ts's PRIMARY_VOTES (weight 1.3, and a low 0.12 floor — the lowest floor of
+        // any vote there), not sad. Letting a pure-PAIN, no-CONFLICT turn raise it at the same
+        // strength as a conflict turn meant plainly sad utterances ("お腹痛い、ちょっとしんど
+        // いかも") could clear that low floor on cck alone and read as angry despite nothing
+        // confrontational being said — measured on the eval set, e.g. `gentle-care-for-pain#0`.
+        // Conflict keeps (and gets slightly more of) the full weight; pain-without-conflict gets
+        // a small fraction, not zero, since real distress often does carry a little of the same
+        // "gut discomfort" cck represents — just not enough to clear that 0.12 floor on its own.
+        delta[Cck as usize] += b(conflict, 0.16) + b(pain && !conflict, 0.03);
         delta[Bdnf as usize] += b(learn, 0.11);
 
         let farewell = is_farewell(text);
@@ -539,6 +873,34 @@ impl AffectState {
 
         self.familiarity = clamp(self.familiarity + 0.1 + b(bond, 0.1));
 
+        // Bounded integrator — see the module doc comment for *why* this
+        // deviates from the TS original's unbounded `decayed + delta`.
+        // Mechanically: the incoming stimulus is scaled by the drive's
+        // remaining headroom toward whichever rail it pushes on, so a
+        // positive delta shrinks as the level nears 1.0 and a negative one
+        // shrinks as it nears 0.0, instead of being added at full strength
+        // right up until `clamp` chops it off.
+        //
+        // With a constant per-turn delta `d`, pull `p` and resting base
+        // `b`, this integrator's fixed point solves to `(b*p + d) / (p +
+        // d)` for positive `d` — algebraically confined to the open
+        // interval (0, 1) for *any* positive `d`, however large, while
+        // still increasing monotonically with `d` (a stronger stimulus
+        // earns a durably higher resting level instead of the same clamp
+        // everything above some threshold collapses to). For dopamine
+        // (base 0.5, pull 0.15, d = 0.18/turn from an ordinary sentence)
+        // that resting point is ~0.773 — a +0.273 deviation, still well
+        // above the 0.2 salience threshold, versus the old integrator's
+        // flat 1.0.
+        //
+        // The headroom is computed from `level` — this drive's reading
+        // *before* this turn's decay-toward-baseline below — rather than
+        // from `decayed` (the post-decay value). That's what makes the
+        // closed form above hold: decay and stimulus each act once on the
+        // same starting point, as two independent steps, instead of the
+        // stimulus scaling against a value decay already moved this turn
+        // (which still bounds the result but no longer reduces to a clean
+        // fixed point or an easy monotonicity argument).
         for key in ALL_DRIVES {
             let info = key.info();
             let pull = if info.fast {
@@ -549,8 +911,18 @@ impl AffectState {
                 0.08
             };
             let i = key as usize;
-            let decayed = self.levels[i] + (info.base - self.levels[i]) * pull;
-            self.levels[i] = clamp(decayed + delta[i]);
+            let level = self.levels[i];
+            let decayed = level + (info.base - level) * pull;
+            let effective_delta = if delta[i] > 0.0 {
+                delta[i] * (1.0 - level)
+            } else {
+                delta[i] * level
+            };
+            // clamp() is a safety net, not the mechanism: the integrator
+            // above already keeps this inside [0, 1] by construction, but
+            // clamp guards against float error nudging it a hair past an
+            // edge.
+            self.levels[i] = clamp(decayed + effective_delta);
         }
     }
 
@@ -1001,6 +1373,145 @@ mod tests {
         assert!(state.level(DriveKey::Cortisol) > baseline);
     }
 
+    /// The expanded POSITIVE vocabulary (see its doc comment) is what this test would have
+    /// failed against before: "嬉しい" was matched only as the exact string, so the inflected
+    /// "嬉しかった" here never registered at all, and "褒め" wasn't in the list either.
+    #[test]
+    fn being_praised_pushes_endorphin_above_baseline() {
+        let mut state = AffectState::default();
+        let baseline = state.level(DriveKey::Endorphin);
+        state.update("褒められて嬉しかった", 0, false);
+        assert!(state.level(DriveKey::Endorphin) > baseline);
+    }
+
+    /// Regression test for the adrenaline broadening: a flat declarative conflict statement
+    /// (no "?") used to leave adrenaline untouched entirely (the old trigger required
+    /// `conflict && question`), which was most of why angry recall against the eval set was
+    /// so low.
+    #[test]
+    fn a_plain_conflict_statement_pushes_adrenaline_above_baseline() {
+        let mut state = AffectState::default();
+        let baseline = state.level(DriveKey::Adrenaline);
+        state.update("最悪だよ", 0, false);
+        assert!(state.level(DriveKey::Adrenaline) > baseline);
+    }
+
+    /// A purely sad (PAIN-only, no CONFLICT word) turn must still leave adrenaline alone —
+    /// otherwise the broadened trigger above would blur the angry/sad distinction the
+    /// vrm-emotion.ts mapping relies on (adrenaline for angry, cortisol/dynorphin for sad).
+    #[test]
+    fn a_plain_pain_statement_does_not_move_adrenaline() {
+        let mut state = AffectState::default();
+        let baseline = state.level(DriveKey::Adrenaline);
+        state.update("寂しくて悲しい", 0, false);
+        assert_eq!(state.level(DriveKey::Adrenaline), baseline);
+    }
+
+    /// New SURPRISE vocabulary: a short surprised exclamation with no question mark and well
+    /// under the `char_count >= 16` length proxy should still move acetylcholine — before this
+    /// change nothing in affect.rs tracked surprise at all, and vrm-emotion.ts's `surprised`
+    /// expression could never be reached (0.0% recall against the eval set).
+    #[test]
+    fn surprise_words_push_acetylcholine_above_baseline() {
+        let mut state = AffectState::default();
+        let baseline = state.level(DriveKey::Acetylcholine);
+        state.update("えっ、うそでしょ", 0, false);
+        assert!(state.level(DriveKey::Acetylcholine) > baseline);
+    }
+
+    /// Regression test for the exclamation-mark bug: `URGENT` used to include "！"/"!", so any
+    /// exclaimed line — even a purely happy one with no urgent or conflict word at all — fired
+    /// `urgent` and pushed adrenaline up, reading as angry. A happy line with an exclamation mark
+    /// must not move adrenaline any more than the same line without one.
+    #[test]
+    fn an_exclaimed_happy_line_does_not_raise_adrenaline() {
+        let mut with_bang = AffectState::default();
+        let mut without_bang = AffectState::default();
+        with_bang.update("今日の発表、すごく褒められたんだ!", 0, false);
+        without_bang.update("今日の発表、すごく褒められたんだ", 0, false);
+        let baseline = DriveKey::Adrenaline.info().base;
+        assert_eq!(with_bang.level(DriveKey::Adrenaline), baseline);
+        assert_eq!(with_bang.level(DriveKey::Adrenaline), without_bang.level(DriveKey::Adrenaline));
+    }
+
+    /// Regression test for sad's near-dead recall (6.7% against the eval set): a plain pain
+    /// statement, with no conflict or urgency, must visibly move every drive sad's votes in
+    /// vrm-emotion.ts's `PRIMARY_VOTES` read from — cortisol and dynorphin up (shared with
+    /// angry's trigger), substance_p up, and serotonin down (previously only conflict pulled
+    /// serotonin down, leaving a purely sad turn's serotonin untouched).
+    #[test]
+    fn a_pain_statement_moves_every_sad_voting_drive() {
+        let mut state = AffectState::default();
+        let cortisol_base = state.level(DriveKey::Cortisol);
+        let dynorphin_base = state.level(DriveKey::Dynorphin);
+        let substance_p_base = state.level(DriveKey::SubstanceP);
+        let serotonin_base = state.level(DriveKey::Serotonin);
+        state.update("寂しくて悲しい", 0, false);
+        assert!(state.level(DriveKey::Cortisol) > cortisol_base);
+        assert!(state.level(DriveKey::Dynorphin) > dynorphin_base);
+        assert!(state.level(DriveKey::SubstanceP) > substance_p_base);
+        assert!(state.level(DriveKey::Serotonin) < serotonin_base);
+    }
+
+    /// A pain-only (no conflict) turn should barely move cck: cck only ever votes for `angry` in
+    /// vrm-emotion.ts, never for `sad`, so a plain sad statement raising it at full strength (as
+    /// it used to, sharing `conflict`'s trigger) meant a purely sad turn could clear cck's low
+    /// angry floor and read as angry. A conflict turn should still move it clearly.
+    #[test]
+    fn a_pain_only_statement_barely_moves_cck_but_conflict_does() {
+        let mut pain_only = AffectState::default();
+        let mut conflict = AffectState::default();
+        let base = DriveKey::Cck.info().base;
+        pain_only.update("寂しくて悲しい", 0, false);
+        conflict.update("うるさい、最悪だよ", 0, false);
+        let pain_only_deviation = pain_only.level(DriveKey::Cck) - base;
+        let conflict_deviation = conflict.level(DriveKey::Cck) - base;
+        assert!(pain_only_deviation > 0.0);
+        assert!(conflict_deviation > pain_only_deviation * 2.0);
+    }
+
+    /// Regression test for the opioid-drive pass (see the module doc comment): a comforting,
+    /// reassuring utterance — no CALM or RECOVER word, only COMFORT ("大丈夫" here doubles as a
+    /// COMFORT entry) — should push enkephalin clearly above its baseline. Before this pass
+    /// enkephalin's only trigger was `comfort` at a weight (0.13) that normalized to well under
+    /// vrm-emotion.ts's DEVIATION_FLOOR, so it fired on only 9/288 eval-set turns; this checks
+    /// the raised weight (0.18) actually moves the level, not just that it's wired up.
+    #[test]
+    fn a_comforting_utterance_pushes_enkephalin_above_baseline() {
+        let mut state = AffectState::default();
+        let baseline = state.level(DriveKey::Enkephalin);
+        state.update("大丈夫だよ、ゆっくりでいいから", 0, false);
+        assert!(state.level(DriveKey::Enkephalin) > baseline);
+    }
+
+    /// Regression test for anandamide's dead vote: the old trigger was a logical AND of
+    /// `positive && calm`, two conditions that essentially never co-occur in one utterance
+    /// (measured: fired 1/288 times against the eval set). A plain positive utterance alone,
+    /// with no calm word at all, must now move anandamide — the whole point of splitting the AND
+    /// into independent additive terms was that any one of them (here, `positive`) can start
+    /// moving the drive without needing the others.
+    #[test]
+    fn a_positive_utterance_alone_pushes_anandamide_above_baseline() {
+        let mut state = AffectState::default();
+        let baseline = state.level(DriveKey::Anandamide);
+        state.update("助かった、本当にありがとう", 0, false);
+        assert!(state.level(DriveKey::Anandamide) > baseline);
+    }
+
+    /// Companion to the previous test: a calm-only utterance (no positive/humor/recover word)
+    /// must *not* move anandamide on its own — `calm` was deliberately dropped from anandamide's
+    /// trigger (see its delta comment) because letting a calm word feed `happy` as well as
+    /// `relaxed` double-counted the same word across two competing vrm-emotion.ts expressions,
+    /// measured to cost both neutral and relaxed recall. This pins that decision down: if `calm`
+    /// is ever added back here, this test should fail and prompt re-reading why it was removed.
+    #[test]
+    fn a_calm_only_utterance_does_not_move_anandamide() {
+        let mut state = AffectState::default();
+        let baseline = state.level(DriveKey::Anandamide);
+        state.update("静かでのんびりした時間だった", 0, false);
+        assert_eq!(state.level(DriveKey::Anandamide), baseline);
+    }
+
     /// The web UI contract (`docs/` WS `affect` frame) hard-codes 22 keys in
     /// exactly this order; a drift here is a breaking wire-format change.
     const CONTRACT_DRIVE_KEYS: [&str; DRIVE_COUNT] = [
@@ -1274,6 +1785,76 @@ mod tests {
         partners.observe(Some("花子"));
         partners.update("ありがとう、嬉しいです", Instant::now());
         assert!(partners.state().level(DriveKey::Oxytocin) < taro_oxytocin);
+    }
+
+    /// Regression test for the unbounded-integrator saturation bug: 30
+    /// turns of an unremarkable 16+-character declarative sentence used to
+    /// pin dopamine, oxytocin, acetylcholine and orexin at exactly `1.0`
+    /// (and, with a question mixed in, noradrenaline/histamine too). The
+    /// bounded integrator's fixed point is guaranteed to sit strictly
+    /// inside `(0, 1)`, so none of the 22 drives should ever reach either
+    /// rail from ordinary conversation alone.
+    #[test]
+    fn ordinary_conversation_never_pins_a_drive_to_its_ceiling() {
+        let mut state = AffectState::default();
+        let plain = "今日はとても天気が良くて気持ちいいですね";
+        for turn in 0..30 {
+            state.update(plain, turn, false);
+        }
+        for key in ALL_DRIVES {
+            let level = state.level(key);
+            assert!(level < 1.0, "{key:?} pinned to the ceiling: {level}");
+            assert!(level > 0.0, "{key:?} pinned to the floor: {level}");
+        }
+    }
+
+    /// Being at a high plateau is not the same as being clamped: unlike the
+    /// old unbounded integrator's flat `1.0`, the bounded integrator's
+    /// fixed point is an ordinary interior value that still moves when the
+    /// input changes. After the same 30-turn plateau as the test above,
+    /// one short reply (which flips dopamine's delta from +0.18 to -0.12,
+    /// the "terse" branch) should measurably pull dopamine back down.
+    #[test]
+    fn a_saturated_drive_still_responds_to_a_stronger_stimulus() {
+        let mut state = AffectState::default();
+        let plain = "今日はとても天気が良くて気持ちいいですね";
+        for turn in 0..30 {
+            state.update(plain, turn, false);
+        }
+        let plateaued = state.level(DriveKey::Dopamine);
+        assert!(plateaued > 0.6 && plateaued < 1.0, "unexpected plateau: {plateaued}");
+
+        state.update("うん", 30, false);
+        assert!(
+            state.level(DriveKey::Dopamine) < plateaued,
+            "dopamine did not respond: still {}",
+            state.level(DriveKey::Dopamine)
+        );
+    }
+
+    /// Regression test for `to_prompt` going stale: once the old unbounded
+    /// integrator pinned dopamine/oxytocin/acetylcholine/orexin to `1.0`,
+    /// the top-3-by-deviation salience in `to_prompt` locked onto the same
+    /// three drives and printed the identical string every turn for the
+    /// rest of the conversation. With the bounded integrator the drives
+    /// keep moving (even if only within a plateau), so the rendered
+    /// internal-state text should show at least some variation across a
+    /// long conversation rather than freezing after the first few turns.
+    #[test]
+    fn internal_state_prompt_keeps_changing_over_a_long_conversation() {
+        let mut state = AffectState::default();
+        let plain = "今日はとても天気が良くて気持ちいいですね";
+        let mut prompts = Vec::new();
+        for turn in 0..30 {
+            state.update(plain, turn, false);
+            prompts.push(state.to_prompt());
+        }
+        let distinct: HashSet<&String> = prompts.iter().collect();
+        assert!(
+            distinct.len() > 1,
+            "to_prompt printed the exact same text for all 30 turns"
+        );
+        assert_ne!(prompts.first(), prompts.last());
     }
 
     #[test]

@@ -79,7 +79,7 @@ import type { SpeakingLevelReading } from "../vrm/level";
 import { ConnectionStatus } from "../components/ConnectionStatus";
 import { ChatSidebar } from "../components/ChatSidebar";
 import { VrmStage } from "../components/VrmStage";
-import { emotionFromAffect } from "../lib/vrm-emotion";
+import { useEmotion } from "../hooks/useEmotion";
 import { useI18n } from "../hooks/useI18n";
 import type { Lang, Translate } from "../lib/i18n";
 import { isAudioFile, isPdfFile } from "../lib/file-drop";
@@ -834,9 +834,14 @@ export function ChatView({
   // bookmark can't strand the operator on an empty stage.
   const avatarFile = avatarModel?.kind === "vrm" ? avatarModel.file : null;
   const avatarLayout = layout === "avatar" && avatarFile !== null;
-  // Only recomputed when a new affect frame lands, not per render — the
-  // mapping walks all 22 drives.
-  const emotion = useMemo(() => emotionFromAffect(affect), [affect]);
+  // Advances the hysteresis-aware emotion decision (lib/vrm-emotion.ts's
+  // decideEmotion) once per new affect frame, not per render. Unlike the old
+  // one-shot emotionFromAffect this isn't a pure memo of `affect` alone —
+  // decideEmotion also folds in the *previous* decision (for its "held"
+  // streak bonus/minimum-hold logic), so the hook has to own that history
+  // across frames rather than just cache a computation. See useEmotion.ts
+  // for why that's done with a ref comparison instead of useMemo.
+  const emotion = useEmotion(affect);
   // Same derivation the bare `#/avatar` window uses (see AvatarView.tsx's
   // `deriveAvatarStatus`), so the two surfaces never disagree about what
   // "listening"/"thinking"/"speaking" means for the same underlying frames.
