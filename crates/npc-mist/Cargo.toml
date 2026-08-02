@@ -16,7 +16,7 @@
 name = "npc-mist"
 version = "0.1.0"
 edition = "2021"
-license = "MIT"
+license = "MPL-2.0"
 description = "Optional mistlib P2P integration for tc-npc: presence/messaging room + tc-town character catalog discovery (mist feature)"
 
 [dependencies]

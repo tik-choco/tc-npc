@@ -25,7 +25,7 @@ exclude = ["crates/npc-mist"]
 
 [workspace.package]
 edition = "2021"
-license = "MIT"
+license = "MPL-2.0"
 repository = "https://github.com/tik-choco/tc-npc"
 
 [workspace.dependencies]
