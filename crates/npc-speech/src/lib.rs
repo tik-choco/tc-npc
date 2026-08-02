@@ -31,6 +31,7 @@
 
 mod capture;
 mod device;
+mod mixer;
 mod playback;
 mod resample;
 mod vad;
@@ -677,6 +678,38 @@ async fn run_interrupt_task(ctx: ModuleCtx, shared: Arc<Shared>, suspend: Arc<Su
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
+                let volume = msg
+                    .env
+                    .payload
+                    .get("volume")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(1.0) as f32;
+                let bgm_file = msg
+                    .env
+                    .payload
+                    .get("bgm_file")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let bgm_volume = msg
+                    .env
+                    .payload
+                    .get("bgm_volume")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0) as f32;
+                let bgm_play_full = msg
+                    .env
+                    .payload
+                    .get("bgm_play_full")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let bgm_end_time = msg
+                    .env
+                    .payload
+                    .get("bgm_end_time")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 if content.is_empty() && chime_file.is_empty() {
                     continue;
                 }
@@ -685,7 +718,19 @@ async fn run_interrupt_task(ctx: ModuleCtx, shared: Arc<Shared>, suspend: Arc<Su
                 tokio::spawn(async move {
                     let cfg = shared.config();
                     let character = shared.active_character.read().unwrap().clone();
-                    handle_priority_tts(&cfg, character, content, chime_file, &shared).await;
+                    handle_priority_tts(
+                        &cfg,
+                        character,
+                        content,
+                        chime_file,
+                        volume,
+                        bgm_file,
+                        bgm_volume,
+                        bgm_play_full,
+                        bgm_end_time,
+                        &shared,
+                    )
+                    .await;
                 });
             }
             t if t == npc_core::msg::SUSPEND => {
@@ -791,13 +836,28 @@ async fn handle_priority_tts(
     character: Option<Arc<Character>>,
     content: String,
     chime_file: String,
+    volume: f32,
+    bgm_file: String,
+    bgm_volume: f32,
+    bgm_play_full: bool,
+    bgm_end_time: String,
     shared: &Arc<Shared>,
 ) {
     let mut items: Vec<Vec<u8>> = Vec::new();
 
     if !chime_file.is_empty() {
         match tokio::fs::read(&chime_file).await {
-            Ok(bytes) => items.push(bytes),
+            Ok(bytes) => {
+                // No BGM on the chime — `mix_announcement` is reused purely
+                // for its volume-scaling path, so the chime also respects
+                // the announcement's overall `volume`.
+                match mixer::mix_announcement(&bytes, volume, None) {
+                    Ok(mixed) => items.push(mixed),
+                    Err(err) => {
+                        tracing::warn!(error = %err, file = %chime_file, "npc-speech: failed to mix chime_file, skipping");
+                    }
+                }
+            }
             Err(err) => {
                 tracing::warn!(error = %err, file = %chime_file, "npc-speech: chime_file not found, skipping");
             }
@@ -814,7 +874,32 @@ async fn handle_priority_tts(
             if cfg.vrc.chatbox {
                 osc::send_chatbox(&cfg.vrc.osc_address, &text);
             }
-            items.push(wav);
+
+            let bgm = if !bgm_file.is_empty() {
+                match tokio::fs::read(&bgm_file).await {
+                    Ok(bytes) => Some(mixer::BgmMix {
+                        bytes,
+                        volume: bgm_volume,
+                        play_full: bgm_play_full,
+                        end_time: bgm_end_time.clone(),
+                    }),
+                    Err(err) => {
+                        // Log+skip, same as chime_file above: a missing BGM
+                        // file must not silence the announcement itself.
+                        tracing::warn!(error = %err, file = %bgm_file, "npc-speech: bgm_file not found, playing tts without bgm");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            match mixer::mix_announcement(&wav, volume, bgm) {
+                Ok(mixed) => items.push(mixed),
+                Err(err) => {
+                    tracing::warn!(error = %err, "npc-speech: failed to mix tts announcement, skipping");
+                }
+            }
         }
     }
 

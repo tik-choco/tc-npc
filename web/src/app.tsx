@@ -171,7 +171,9 @@ export function App() {
             onCommand={(text) => npc.send({ type: "command", text })}
           />
         )}
-        {tab === "schedule" && <ScheduleView />}
+        {tab === "schedule" && (
+          <ScheduleView speaking={npc.speaking} onInterrupt={() => npc.send({ type: "interrupt" })} />
+        )}
         {tab === "brain" && (
           <BrainView affect={npc.affect} affectHistory={npc.affectHistory} memoryVersion={npc.memoryVersion} />
         )}

@@ -1,6 +1,6 @@
 // Thin REST client for the tc-npc server (same origin as the WS endpoint —
 // see vite.config.ts's dev proxy for the local-dev equivalent).
-import type { ScheduledActionEntry } from "./config-types";
+import type { ScheduledActionEntry, SchedulerSection } from "./config-types";
 import type {
   AffectHistoryDocument,
   CharacterSummary,
@@ -210,6 +210,10 @@ export interface SchedulerTestRequest {
   text?: string;
   chime_file?: string;
   actions?: ScheduledActionEntry[];
+  bgm_file?: string;
+  bgm_volume?: number;
+  bgm_play_full?: boolean;
+  bgm_end_time?: string;
 }
 
 export interface SchedulerTestResult {
@@ -225,6 +229,86 @@ export function testAnnouncement(body: SchedulerTestRequest): Promise<SchedulerT
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+}
+
+/**
+ * GET /api/scheduler/export — the whole scheduler section (enabled,
+ * announcements, defaults), for the 予定 view's "エクスポート" button to save
+ * as a JSON file.
+ */
+export function exportScheduler(): Promise<SchedulerSection> {
+  return request("/api/scheduler/export");
+}
+
+/**
+ * POST /api/scheduler/import — replaces the entire scheduler config
+ * server-side (destructive to the current schedule; the caller must confirm
+ * with the operator first). The response echoes back the section actually
+ * saved, but callers should `reload()` the whole config doc afterward rather
+ * than trying to splice this in locally.
+ */
+export interface SchedulerImportResult {
+  ok: boolean;
+  scheduler: SchedulerSection;
+}
+
+export function importScheduler(body: SchedulerSection): Promise<SchedulerImportResult> {
+  return request("/api/scheduler/import", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+/**
+ * Named, server-saved snapshots of the scheduler config — a persistent
+ * counterpart to `exportScheduler`/`importScheduler`'s one-off JSON file.
+ * `active` marks whichever profile's content currently matches the live
+ * scheduler (at most one, set by the server after a save or an activate).
+ */
+export interface ScheduleProfileSummary {
+  id: string;
+  label: string;
+  active: boolean;
+  created_at?: string;
+  updated_at?: string;
+}
+
+/** GET /api/schedule-profiles — the 予定 view's profile list. */
+export function listScheduleProfiles(): Promise<ScheduleProfileSummary[]> {
+  return request("/api/schedule-profiles");
+}
+
+/**
+ * POST /api/schedule-profiles — snapshots the current *live* scheduler
+ * config server-side into a new saved profile, or overwrites an existing one
+ * if `id` already names one.
+ */
+export function saveScheduleProfile(body: { id: string; label: string }): Promise<{
+  ok: boolean;
+  profile: ScheduleProfileSummary;
+}> {
+  return request("/api/schedule-profiles", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+/**
+ * POST /api/schedule-profiles/:id/activate — loads a saved profile's content
+ * into the live config, replacing the entire current schedule (announcements,
+ * defaults, enabled flag). Destructive to whatever was being edited and not
+ * yet saved as a profile — the caller must confirm with the operator first,
+ * same as `importScheduler`. Callers should `reload()` the whole config doc
+ * afterward rather than splicing the returned section in locally.
+ */
+export function activateScheduleProfile(id: string): Promise<{ ok: boolean; scheduler: SchedulerSection }> {
+  return request(`/api/schedule-profiles/${encodeURIComponent(id)}/activate`, { method: "POST" });
+}
+
+export function deleteScheduleProfile(id: string): Promise<{ ok: boolean }> {
+  return request(`/api/schedule-profiles/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
 /** List all tracked people, newest-seen first — the 人物 tab's roster. */

@@ -29,11 +29,25 @@ export interface AnnouncementEntry {
   chime_file?: string;
   volume?: number;
   actions?: ScheduledActionEntry[];
+  /** Background music played alongside the announcement. */
+  bgm_file?: string;
+  /** 0 (or omitted) means "use scheduler.defaults.bgm_volume". */
+  bgm_volume?: number;
+  /** Play the BGM file to its end rather than stopping when the announcement/actions finish. */
+  bgm_play_full?: boolean;
+  /** "m:ss" cutoff — stop the BGM at this position even if it hasn't finished. */
+  bgm_end_time?: string;
 }
 
 export interface SchedulerSection {
   enabled?: boolean;
   announcements?: AnnouncementEntry[];
+  /** Scheduler-wide fallbacks used when a per-entry field is left blank or 0. */
+  defaults?: {
+    chime_file?: string;
+    volume?: number;
+    bgm_volume?: number;
+  };
 }
 
 /** config.translation — simultaneous interpretation (通訳タブ). */

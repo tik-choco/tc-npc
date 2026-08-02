@@ -108,9 +108,13 @@ cd web && npm test         # Web UI (vitest)
 cp config.example.json config.json
 ```
 
-設定ファイルは既定で `config.json`(または `--config <path>`)から読み込まれます。
-APIキーなどの秘匿情報は `.env` に記載します(`.env.example` を参照)。`.env` は
-先に読み込まれ、一部の環境変数が対応するJSONフィールドを上書きします。
+設定ファイルは既定で `~/.tc-npc/config.json` から読み込まれます(別の場所を
+使う場合は `--config <path>` を指定してください)。上記でリポジトリ直下に
+コピーした場合は、`tc-npc` の初回起動時に `~/.tc-npc/config.json` へ自動で
+移行されます(一度きりのコピーで、既に新しい場所に設定ファイルがある場合は
+上書きしません)。APIキーなどの秘匿情報は `.env` に記載します
+(`.env.example` を参照)。`.env` は先に読み込まれ、一部の環境変数が対応する
+JSONフィールドを上書きします。
 
 **APIキーは絶対にコミットしないでください。** `config.json` と `.env` は
 `.gitignore` 済みです。

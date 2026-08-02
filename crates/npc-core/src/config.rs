@@ -1,9 +1,10 @@
-//! Application configuration: a single JSON document (`config.json` by
-//! default) with sections mirroring the config each Go agent-* service used
-//! to load independently. `.env` (via `dotenvy`) is loaded first, then a
-//! small set of environment variables can override the corresponding JSON
-//! fields — this matches how the OpenAI-style API key was historically kept
-//! out of the checked-in config file.
+//! Application configuration: a single JSON document (`~/.tc-npc/config.json`
+//! by default, overridable with `--config <path>`) with sections mirroring
+//! the config each Go agent-* service used to load independently. `.env`
+//! (via `dotenvy`) is loaded first, then a small set of environment
+//! variables can override the corresponding JSON fields — this matches how
+//! the OpenAI-style API key was historically kept out of the checked-in
+//! config file.
 
 use std::path::{Path, PathBuf};
 
@@ -40,6 +41,10 @@ pub struct Config {
     pub vrc: VrcConfig,
     #[serde(default)]
     pub scheduler: SchedulerConfig,
+    /// Which [`crate::schedule_profile::ScheduleProfile`] is currently
+    /// loaded into `scheduler` — a display/UI pointer only.
+    #[serde(default)]
+    pub schedule_profile: ScheduleProfileState,
     #[serde(default)]
     pub translation: TranslationConfig,
     #[serde(default)]
@@ -714,6 +719,10 @@ fn default_volume() -> f32 {
     1.0
 }
 
+fn default_bgm_volume() -> f32 {
+    0.5
+}
+
 /// One extra thing an announcement does when it fires, on top of speaking its
 /// `text`. Ports Go `agent-scheduler`'s `announcements[].redis_actions`
 /// (`{channel, type, payload}` published to Redis) — since every former
@@ -770,15 +779,37 @@ pub enum ScheduledAction {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AnnouncementConfig {
     /// "HH:MM" or "HH:MM:SS".
     pub time: String,
     pub text: String,
     #[serde(default)]
     pub chime_file: String,
-    #[serde(default = "default_volume")]
+    /// `0.0` (the zero-value / omitted-in-JSON case) is a sentinel meaning
+    /// "use the scheduler-wide default volume" — see
+    /// [`AnnouncementConfig::effective_volume`].
+    #[serde(default)]
     pub volume: f32,
+    /// Path to a background-music wav played simultaneously under the TTS
+    /// voice line; empty means no BGM for this entry.
+    #[serde(default)]
+    pub bgm_file: String,
+    /// Linear gain override for this entry's BGM. `0.0` (the zero-value /
+    /// omitted-in-JSON case) is a sentinel meaning "use the scheduler-wide
+    /// default" — see [`AnnouncementConfig::effective_bgm_volume`].
+    #[serde(default)]
+    pub bgm_volume: f32,
+    /// If `true`, let the BGM play to its own natural end (or to
+    /// `bgm_end_time`) even after the TTS line finishes; if `false` (default),
+    /// fade the BGM out ~2s after the TTS line finishes.
+    #[serde(default)]
+    pub bgm_play_full: bool,
+    /// `""` (no cutoff) or `"M:SS"` (e.g. `"1:30"`) — once BGM playback
+    /// reaches this point, force a fade-out regardless of `bgm_play_full`.
+    /// Stored as-is here; parsing happens in the consuming crate.
+    #[serde(default)]
+    pub bgm_end_time: String,
     /// Extra bus messages published when this announcement fires, in order.
     /// An announcement with an empty `text` and a non-empty `actions` list is
     /// a perfectly good "do something at 17:00" entry — that's exactly what
@@ -787,12 +818,55 @@ pub struct AnnouncementConfig {
     pub actions: Vec<ScheduledAction>,
 }
 
+impl AnnouncementConfig {
+    /// This announcement's chime file, falling back to the scheduler-wide
+    /// default when left empty.
+    pub fn effective_chime_file<'a>(&'a self, defaults: &'a SchedulerDefaults) -> &'a str {
+        if self.chime_file.is_empty() { &defaults.chime_file } else { &self.chime_file }
+    }
+    /// This announcement's volume, falling back to the scheduler-wide default
+    /// when `<= 0.0` (the "unset" sentinel — see the `volume` field doc).
+    pub fn effective_volume(&self, defaults: &SchedulerDefaults) -> f32 {
+        if self.volume <= 0.0 { defaults.volume } else { self.volume }
+    }
+    /// Same fallback rule as `effective_volume`, for `bgm_volume`.
+    pub fn effective_bgm_volume(&self, defaults: &SchedulerDefaults) -> f32 {
+        if self.bgm_volume <= 0.0 { defaults.bgm_volume } else { self.bgm_volume }
+    }
+}
+
+/// Scheduler-wide fallbacks applied when an [`AnnouncementConfig`] leaves a
+/// field at its "unset" sentinel (empty `chime_file`, `volume`/`bgm_volume`
+/// `<= 0.0`) — ports Go `agent-scheduler`'s `common_params` defaulting
+/// (`if entry.ChimeFile == "" { chime = defaultChime }`, `if annVol <= 0 { annVol = DefaultAnnVolume }`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchedulerDefaults {
+    #[serde(default)]
+    pub chime_file: String,
+    #[serde(default = "default_volume")]
+    pub volume: f32,
+    #[serde(default = "default_bgm_volume")]
+    pub bgm_volume: f32,
+}
+
+impl Default for SchedulerDefaults {
+    fn default() -> Self {
+        Self {
+            chime_file: String::new(),
+            volume: default_volume(),
+            bgm_volume: default_bgm_volume(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SchedulerConfig {
     #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
     pub announcements: Vec<AnnouncementConfig>,
+    #[serde(default)]
+    pub defaults: SchedulerDefaults,
 }
 
 impl Default for SchedulerConfig {
@@ -800,8 +874,24 @@ impl Default for SchedulerConfig {
         Self {
             enabled: false,
             announcements: Vec::new(),
+            defaults: SchedulerDefaults::default(),
         }
     }
+}
+
+// ---------------------------------------------------------------------
+// schedule profiles
+// ---------------------------------------------------------------------
+
+/// Which [`crate::schedule_profile::ScheduleProfile`] is currently loaded
+/// into `Config.scheduler` — a display/UI pointer only; the actual
+/// schedule content lives in `scheduler` itself; see
+/// `schedule_profile::ScheduleProfile` for why (activation copies content
+/// rather than resolving a pointer at read time).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ScheduleProfileState {
+    #[serde(default)]
+    pub active_id: String,
 }
 
 // ---------------------------------------------------------------------
@@ -1211,22 +1301,35 @@ impl Config {
 
 impl Config {
     /// Resolve the config path: the explicit `--config` path if given,
-    /// otherwise `./config.json`.
+    /// otherwise `~/.tc-npc/config.json`.
     pub fn resolve_path(explicit: Option<&Path>) -> PathBuf {
         explicit
             .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("config.json"))
+            .unwrap_or_else(|| data_dir().join("config.json"))
     }
 
-    /// Load configuration from `path` (or `./config.json` if `path` is
-    /// `None`). A missing file is not an error — it just yields defaults.
+    /// Load configuration from `path` (or `~/.tc-npc/config.json` if `path`
+    /// is `None`). A missing file is not an error — it just yields defaults.
     /// `.env` is loaded first (via `dotenvy`), then a fixed set of
     /// environment variables override the corresponding JSON fields.
+    ///
+    /// When `path` is `None` (i.e. no explicit `--config`), a one-time
+    /// migration also runs: if nothing exists yet at the new default but a
+    /// `./config.json` exists (the pre-`~/.tc-npc/` default), it's copied
+    /// over so existing settings survive the upgrade. See
+    /// [`migrate_legacy_config`]. An explicit `--config <path>` is always
+    /// used exactly as given, with no migration or redirection.
     pub fn load(path: Option<&Path>) -> anyhow::Result<Config> {
         // Best-effort: a missing .env file is fine.
         let _ = dotenvy::dotenv();
 
         let resolved = Self::resolve_path(path);
+        if path.is_none() {
+            // The legacy default was "./config.json", relative to the launch
+            // directory. A failure here (e.g. permissions) shouldn't crash
+            // startup — it just falls through to "no config found" (defaults).
+            let _ = migrate_legacy_config(&resolved, Path::new("config.json"));
+        }
         let mut config = if resolved.exists() {
             let data = std::fs::read_to_string(&resolved).map_err(|e| {
                 anyhow::anyhow!("failed to read config file {}: {e}", resolved.display())
@@ -1403,6 +1506,23 @@ impl Config {
         redact_api_keys(&mut value);
         Ok(value)
     }
+}
+
+/// One-time migration for users upgrading from the pre-`~/.tc-npc/config.json`
+/// default: if nothing exists yet at `target` but a config file exists at
+/// `legacy`, copy it to `target` so existing settings survive the new
+/// default location. No-op if `target` already exists (never overwrites) or
+/// `legacy` doesn't exist.
+fn migrate_legacy_config(target: &Path, legacy: &Path) -> anyhow::Result<()> {
+    if target.exists() || !legacy.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::copy(legacy, target)?;
+    tracing::info!(from = %legacy.display(), to = %target.display(), "migrated legacy config.json to the new default location");
+    Ok(())
 }
 
 /// Restore `"***"`-masked `providers[].api_key` entries in an incoming
@@ -1878,5 +1998,53 @@ mod tests {
         });
         unmask_provider_keys(&mut incoming, &current);
         assert_eq!(incoming["providers"][0]["api_key"], "freshly-typed-key");
+    }
+
+    #[test]
+    fn migrate_legacy_config_copies_when_target_missing() {
+        let dir = std::env::temp_dir().join(format!("npc-core-migrate-{}", uuid::Uuid::new_v4()));
+        let legacy = dir.join("legacy").join("config.json");
+        let target = dir.join("target").join("config.json");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, r#"{"api":{"model":"legacy-model"}}"#).unwrap();
+
+        migrate_legacy_config(&target, &legacy).unwrap();
+
+        assert!(target.exists());
+        let copied = std::fs::read_to_string(&target).unwrap();
+        assert_eq!(copied, r#"{"api":{"model":"legacy-model"}}"#);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn migrate_legacy_config_never_overwrites_an_existing_target() {
+        let dir = std::env::temp_dir().join(format!("npc-core-migrate-{}", uuid::Uuid::new_v4()));
+        let legacy = dir.join("legacy").join("config.json");
+        let target = dir.join("target").join("config.json");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, r#"{"api":{"model":"legacy-model"}}"#).unwrap();
+        std::fs::write(&target, r#"{"api":{"model":"already-here"}}"#).unwrap();
+
+        migrate_legacy_config(&target, &legacy).unwrap();
+
+        let untouched = std::fs::read_to_string(&target).unwrap();
+        assert_eq!(untouched, r#"{"api":{"model":"already-here"}}"#);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn migrate_legacy_config_is_a_noop_when_neither_file_exists() {
+        let dir = std::env::temp_dir().join(format!("npc-core-migrate-{}", uuid::Uuid::new_v4()));
+        let legacy = dir.join("legacy").join("config.json");
+        let target = dir.join("target").join("config.json");
+
+        migrate_legacy_config(&target, &legacy).unwrap();
+
+        assert!(!target.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

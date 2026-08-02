@@ -2,13 +2,40 @@
 // announcements, each optionally carrying actions (move the avatar, run a
 // command, …). The server hot-reloads on save, so there's no "apply" step;
 // edits just autosave via useConfigDoc.
-import { useEffect, useRef, useState } from "preact/hooks";
-import { AlertTriangle, Bell, Clock, Play, Plus, Trash2, Volume2, Zap } from "lucide-preact";
+import { useCallback, useEffect, useRef, useState } from "preact/hooks";
+import {
+  AlertTriangle,
+  Bell,
+  Clock,
+  Download,
+  FolderOpen,
+  Loader2,
+  Music,
+  Play,
+  Plus,
+  RefreshCw,
+  Save,
+  SlidersHorizontal,
+  Square,
+  Trash2,
+  Upload,
+  Volume2,
+  Zap,
+} from "lucide-preact";
 import { useConfigDoc } from "../hooks/useConfigDoc";
 import { useI18n } from "../hooks/useI18n";
 import type { Lang, MessageKey, Translate } from "../lib/i18n";
 import { SaveChip } from "../components/SaveChip";
-import { testAnnouncement } from "../lib/api";
+import {
+  activateScheduleProfile,
+  deleteScheduleProfile,
+  exportScheduler,
+  importScheduler,
+  listScheduleProfiles,
+  saveScheduleProfile,
+  testAnnouncement,
+  type ScheduleProfileSummary,
+} from "../lib/api";
 import type {
   AnnouncementEntry,
   ScheduledActionEntry,
@@ -17,6 +44,7 @@ import type {
 } from "../lib/config-types";
 import { formatCountdown, formatNextRunLabel, nextRunAt, urgencyOf } from "../lib/schedule-time";
 import type { ConfigDocument } from "../lib/types";
+import { Toast, type ToastState } from "../components/Toast";
 import "../styles/components.css";
 import "../styles/schedule.css";
 
@@ -206,8 +234,25 @@ interface AnnouncementRowProps {
     text: string;
     chime_file: string;
     actions: ScheduledActionEntry[];
+    bgm_file: string;
+    bgm_volume: number;
+    bgm_play_full: boolean;
+    bgm_end_time: string;
   }) => Promise<{ fired: boolean; spoke: boolean; actions: number }>;
   onDelete: () => void;
+  /** Whether this is the row the parent currently considers "playing" — see
+   *  `ScheduleView`'s `activeTestIndex`. Drives the button between
+   *  テスト実行/Play and 停止/Stop; only one row is active at a time. */
+  isActive: boolean;
+  /** Tell the parent this row just fired a test that may produce audio. */
+  onActivate: () => void;
+  /** Tell the parent this row is no longer the one to show as playing
+   *  (test turned out to be a no-op, errored, or the user hit stop). */
+  onDeactivate: () => void;
+  /** Cut the currently playing audio right now (same `{type:"interrupt"}`
+   *  the チャット tab's 割り込み button sends — it stops whatever is
+   *  playing through npc-speech, scheduler tests included). */
+  onInterrupt: () => void;
 }
 
 /**
@@ -265,12 +310,20 @@ function AnnouncementRow({
   onCommitVolume,
   onTest,
   onDelete,
+  isActive,
+  onActivate,
+  onDeactivate,
+  onInterrupt,
 }: AnnouncementRowProps) {
   const [time, setTime] = useState(entry.time);
   const [text, setText] = useState(entry.text);
   const [chimeFile, setChimeFile] = useState(entry.chime_file ?? "");
+  const [bgmFile, setBgmFile] = useState(entry.bgm_file ?? "");
+  const [bgmEndTime, setBgmEndTime] = useState(entry.bgm_end_time ?? "");
   const [test, setTest] = useState<TestState>({ kind: "idle" });
   const volume = entry.volume ?? 1;
+  // 0/omitted means "use scheduler.defaults.bgm_volume" (see config-types.ts).
+  const bgmVolume = entry.bgm_volume ?? 0;
   const actions = entry.actions ?? [];
 
   function updateActions(fn: (list: ScheduledActionEntry[]) => void) {
@@ -288,7 +341,9 @@ function AnnouncementRow({
     setTime(entry.time);
     setText(entry.text);
     setChimeFile(entry.chime_file ?? "");
-  }, [entry.time, entry.text, entry.chime_file]);
+    setBgmFile(entry.bgm_file ?? "");
+    setBgmEndTime(entry.bgm_end_time ?? "");
+  }, [entry.time, entry.text, entry.chime_file, entry.bgm_file, entry.bgm_end_time]);
 
   // The result chip clears itself; the timer lives in a ref so a second test
   // started before the first chip expires resets the countdown rather than
@@ -304,18 +359,42 @@ function AnnouncementRow({
     resultTimer.current = setTimeout(() => setTest({ kind: "idle" }), TEST_RESULT_MS);
   }
 
-  async function runTest() {
+  /** Click while idle: fire the test and (optimistically) mark this row as
+   *  the one playing. Click while `isActive`: this *is* the stop button —
+   *  cut the audio right now instead of firing another test on top of it. */
+  async function handleTestClick() {
+    if (isActive) {
+      onInterrupt();
+      onDeactivate();
+      return;
+    }
+
     setTest({ kind: "running" });
+    onActivate();
     try {
-      const result = await onTest({ text, chime_file: chimeFile, actions });
+      const result = await onTest({
+        text,
+        chime_file: chimeFile,
+        actions,
+        bgm_file: bgmFile,
+        bgm_volume: bgmVolume,
+        bgm_play_full: entry.bgm_play_full ?? false,
+        bgm_end_time: bgmEndTime,
+      });
       if (!result.fired) {
+        onDeactivate();
         finishTest("warn", t("schedule.test.empty"));
+      } else if (!result.spoke) {
+        // Actions fired but nothing audible — there's nothing to "stop".
+        onDeactivate();
+        finishTest("ok", t("schedule.test.okWithActions", { n: String(result.actions) }));
       } else if (result.actions > 0) {
         finishTest("ok", t("schedule.test.okWithActions", { n: String(result.actions) }));
       } else {
         finishTest("ok", t("schedule.test.ok"));
       }
     } catch (err) {
+      onDeactivate();
       finishTest("error", err instanceof Error ? err.message : String(err));
     }
   }
@@ -353,13 +432,13 @@ function AnnouncementRow({
 
         <button
           type="button"
-          class="btn btn-ghost btn-small schedule-test-btn"
-          onClick={() => void runTest()}
-          disabled={test.kind === "running"}
-          title={t("schedule.test.tooltip")}
+          class={`btn btn-ghost btn-small schedule-test-btn${isActive ? " schedule-test-btn--active" : ""}`}
+          onClick={() => void handleTestClick()}
+          disabled={test.kind === "running" && !isActive}
+          title={isActive ? t("schedule.test.stop.tooltip") : t("schedule.test.tooltip")}
         >
-          <Play size={13} />
-          {test.kind === "running" ? t("schedule.test.running") : t("schedule.test")}
+          {isActive ? <Square size={13} /> : <Play size={13} />}
+          {isActive ? t("schedule.test.stop") : test.kind === "running" ? t("schedule.test.running") : t("schedule.test")}
         </button>
 
         <button
@@ -401,6 +480,63 @@ function AnnouncementRow({
             <span class="schedule-volume-value">{Math.round(volume * 100)}%</span>
           </div>
         </label>
+      </div>
+
+      <div class="schedule-row-bgm">
+        <div class="schedule-bgm-header">
+          <Music size={13} />
+          <span class="schedule-field-label">BGM</span>
+        </div>
+        <div class="schedule-bgm-fields">
+          <label class="schedule-chime-field">
+            <span class="schedule-field-label">{t("schedule.field.bgmFile")}</span>
+            <input
+              type="text"
+              placeholder={t("schedule.bgm.placeholder")}
+              value={bgmFile}
+              onInput={(e) => setBgmFile((e.target as HTMLInputElement).value)}
+              onBlur={() => onCommit({ bgm_file: bgmFile || undefined })}
+            />
+          </label>
+
+          <label class="schedule-volume-field">
+            <span class="schedule-field-label">
+              <Volume2 size={13} />
+              {t("schedule.field.bgmVolume")}
+            </span>
+            <div class="schedule-volume-row">
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.05}
+                value={bgmVolume}
+                onChange={(e) => onCommit({ bgm_volume: Number((e.target as HTMLInputElement).value) })}
+              />
+              <span class="schedule-volume-value">{Math.round(bgmVolume * 100)}%</span>
+            </div>
+          </label>
+
+          <label class="schedule-bgm-checkbox">
+            <input
+              type="checkbox"
+              checked={entry.bgm_play_full ?? false}
+              onChange={(e) => onCommit({ bgm_play_full: (e.target as HTMLInputElement).checked })}
+            />
+            <span>{t("schedule.field.bgmPlayFull")}</span>
+          </label>
+
+          <label class="schedule-bgm-endtime-field">
+            <span class="schedule-field-label">{t("schedule.field.bgmEndTime")}</span>
+            <input
+              type="text"
+              placeholder={t("schedule.bgmEndTime.placeholder")}
+              value={bgmEndTime}
+              onInput={(e) => setBgmEndTime((e.target as HTMLInputElement).value)}
+              onBlur={() => onCommit({ bgm_end_time: bgmEndTime || undefined })}
+            />
+          </label>
+        </div>
       </div>
 
       <div class="schedule-row-actions">
@@ -475,10 +611,296 @@ function NextUpSummary({
   );
 }
 
-export function ScheduleView() {
+type SchedulerDefaults = NonNullable<SchedulerSection["defaults"]>;
+
+/**
+ * config.scheduler.defaults — fallbacks used when a per-entry chime/volume/
+ * BGM-volume field is left blank or 0. Its own small form, separate from the
+ * announcement list, since it applies scheduler-wide rather than to one row.
+ */
+function SchedulerDefaultsSection({
+  t,
+  defaults,
+  onCommit,
+}: {
+  t: Translate;
+  defaults: SchedulerDefaults | undefined;
+  onCommit: (patch: Partial<SchedulerDefaults>) => void;
+}) {
+  const [chimeFile, setChimeFile] = useState(defaults?.chime_file ?? "");
+  const volume = defaults?.volume ?? 1;
+  const bgmVolume = defaults?.bgm_volume ?? 1;
+
+  useEffect(() => {
+    setChimeFile(defaults?.chime_file ?? "");
+  }, [defaults?.chime_file]);
+
+  return (
+    <section class="schedule-defaults">
+      <div class="schedule-defaults-header">
+        <SlidersHorizontal size={15} />
+        <span>{t("schedule.defaults.title")}</span>
+      </div>
+      <p class="schedule-defaults-hint">{t("schedule.defaults.hint")}</p>
+      <div class="schedule-defaults-fields">
+        <label class="schedule-chime-field">
+          <span class="schedule-field-label">{t("schedule.defaults.chime")}</span>
+          <input
+            type="text"
+            placeholder={t("schedule.chime.placeholder")}
+            value={chimeFile}
+            onInput={(e) => setChimeFile((e.target as HTMLInputElement).value)}
+            onBlur={() => onCommit({ chime_file: chimeFile || undefined })}
+          />
+        </label>
+
+        <label class="schedule-volume-field">
+          <span class="schedule-field-label">
+            <Volume2 size={13} />
+            {t("schedule.defaults.volume")}
+          </span>
+          <div class="schedule-volume-row">
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.05}
+              value={volume}
+              onChange={(e) => onCommit({ volume: Number((e.target as HTMLInputElement).value) })}
+            />
+            <span class="schedule-volume-value">{Math.round(volume * 100)}%</span>
+          </div>
+        </label>
+
+        <label class="schedule-volume-field">
+          <span class="schedule-field-label">
+            <Music size={13} />
+            {t("schedule.defaults.bgmVolume")}
+          </span>
+          <div class="schedule-volume-row">
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.05}
+              value={bgmVolume}
+              onChange={(e) => onCommit({ bgm_volume: Number((e.target as HTMLInputElement).value) })}
+            />
+            <span class="schedule-volume-value">{Math.round(bgmVolume * 100)}%</span>
+          </div>
+        </label>
+      </div>
+    </section>
+  );
+}
+
+/**
+ * config.scheduler profiles: named, server-saved snapshots of the whole
+ * scheduler section — a persistent counterpart to the Export/Import
+ * buttons' one-off JSON file above. "Save current as profile" snapshots the
+ * *live* config server-side; "Switch" replaces the live config with a saved
+ * snapshot, so on success it reloads the shared config doc via `onChanged`
+ * rather than hand-reconstructing state locally (same reasoning as the
+ * Import flow uses).
+ */
+function ScheduleProfilesSection({
+  t,
+  onChanged,
+  setToast,
+}: {
+  t: Translate;
+  onChanged: () => Promise<void>;
+  setToast: (toast: ToastState | null) => void;
+}) {
+  const [profiles, setProfiles] = useState<ScheduleProfileSummary[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  const reload = useCallback(() => {
+    setLoadError(null);
+    listScheduleProfiles()
+      .then(setProfiles)
+      .catch((err) => setLoadError(err instanceof Error ? err.message : String(err)));
+  }, []);
+
+  useEffect(() => {
+    reload();
+  }, [reload]);
+
+  async function handleSaveAs() {
+    const label = window.prompt(t("schedule.profiles.saveAs.prompt"));
+    if (label === null || label.trim() === "") return;
+    setSaving(true);
+    try {
+      await saveScheduleProfile({ id: crypto.randomUUID(), label: label.trim() });
+      reload();
+      setToast({ kind: "success", message: t("schedule.profiles.saveAs.ok") });
+    } catch (err) {
+      setToast({
+        kind: "error",
+        message: `${t("schedule.profiles.saveAs.error")}: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleActivate(profile: ScheduleProfileSummary) {
+    if (!window.confirm(t("schedule.profiles.activate.confirm", { label: profile.label }))) return;
+    setBusyId(profile.id);
+    try {
+      await activateScheduleProfile(profile.id);
+      // The activation already persisted server-side and replaced the live
+      // scheduler; pull the shared config doc rather than splicing the
+      // response in locally, then refresh which profile shows as active.
+      await onChanged();
+      reload();
+      setToast({ kind: "success", message: t("schedule.profiles.activate.ok") });
+    } catch (err) {
+      setToast({
+        kind: "error",
+        message: `${t("schedule.profiles.activate.error")}: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function handleDelete(profile: ScheduleProfileSummary) {
+    if (!window.confirm(t("schedule.profiles.delete.confirm", { label: profile.label }))) return;
+    setBusyId(profile.id);
+    try {
+      await deleteScheduleProfile(profile.id);
+      reload();
+    } catch (err) {
+      setToast({
+        kind: "error",
+        message: `${t("schedule.profiles.delete.error")}: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  return (
+    <section class="schedule-profiles">
+      <div class="schedule-profiles-header">
+        <FolderOpen size={15} />
+        <span>{t("schedule.profiles.title")}</span>
+        <button
+          type="button"
+          class="icon-btn schedule-profiles-refresh"
+          onClick={reload}
+          title={t("common.reload")}
+        >
+          <RefreshCw size={13} />
+        </button>
+        <button
+          type="button"
+          class="btn btn-ghost btn-small schedule-profiles-save"
+          disabled={saving}
+          onClick={() => void handleSaveAs()}
+        >
+          {saving ? <Loader2 size={14} class="spin" /> : <Save size={14} />}
+          {t("schedule.profiles.saveAs")}
+        </button>
+      </div>
+      <p class="schedule-profiles-hint">{t("schedule.profiles.hint")}</p>
+
+      {loadError && (
+        <p class="schedule-profiles-error">
+          {t("schedule.profiles.loadError")}: {loadError}
+        </p>
+      )}
+
+      {!profiles && !loadError && <p class="schedule-profiles-loading">{t("common.loading")}</p>}
+
+      {profiles && profiles.length === 0 && (
+        <p class="schedule-profiles-empty">{t("schedule.profiles.empty")}</p>
+      )}
+
+      {profiles && profiles.length > 0 && (
+        <ul class="schedule-profiles-list">
+          {profiles.map((profile) => (
+            <li key={profile.id} class="schedule-profile-row">
+              <span class="schedule-profile-label">{profile.label}</span>
+              {profile.active ? (
+                <span class="badge badge--success">{t("schedule.profiles.active.badge")}</span>
+              ) : (
+                <button
+                  type="button"
+                  class="btn btn-ghost btn-small"
+                  disabled={busyId === profile.id}
+                  onClick={() => void handleActivate(profile)}
+                  title={t("schedule.profiles.activate.tooltip")}
+                >
+                  {busyId === profile.id ? <Loader2 size={13} class="spin" /> : null}
+                  {t("schedule.profiles.activate")}
+                </button>
+              )}
+              <button
+                type="button"
+                class="icon-btn"
+                disabled={busyId === profile.id}
+                onClick={() => void handleDelete(profile)}
+                title={t("schedule.profiles.delete.tooltip")}
+              >
+                <Trash2 size={14} />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+/** Save `data` as a downloaded JSON file — there is no shared "download a
+ *  blob" helper in this codebase yet, so this is written from scratch. */
+function downloadJson(data: unknown, filename: string) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  try {
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.click();
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+export function ScheduleView({ speaking, onInterrupt }: { speaking: boolean; onInterrupt: () => void }) {
   const { t, lang } = useI18n();
-  const { config, loadError, saveState, saveError, mutate } = useConfigDoc();
+  const { config, loadError, saveState, saveError, mutate, reload } = useConfigDoc();
   const now = useNow();
+  const [toast, setToast] = useState<ToastState | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const importInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Which row's テスト実行 button is showing 停止 right now — at most one,
+  // since a scheduler test is a single global playback queue (see
+  // AnnouncementRow's onTest/onInterrupt). Cleared automatically once
+  // `speaking` drops from true to false (audio actually finished), not just
+  // whenever it's currently false — `speaking` is false at mount/between
+  // clicks too, and clearing on a plain "is false" read would race the
+  // optimistic activation below.
+  const [activeTestIndex, setActiveTestIndex] = useState<number | null>(null);
+  const prevSpeakingRef = useRef(speaking);
+  useEffect(() => {
+    if (prevSpeakingRef.current && !speaking) {
+      setActiveTestIndex(null);
+    }
+    prevSpeakingRef.current = speaking;
+  }, [speaking]);
+
+  useEffect(() => {
+    if (!toast) return;
+    const id = window.setTimeout(() => setToast(null), 4000);
+    return () => window.clearTimeout(id);
+  }, [toast]);
 
   function updateScheduler(fn: (section: SchedulerSection) => void) {
     mutate((draft) => {
@@ -494,6 +916,49 @@ export function ScheduleView() {
       fn(list);
       section.announcements = list;
     });
+  }
+
+  function updateDefaults(fn: (defaults: SchedulerDefaults) => void) {
+    updateScheduler((section) => {
+      const current = section.defaults ?? {};
+      fn(current);
+      section.defaults = current;
+    });
+  }
+
+  async function handleExport() {
+    setExporting(true);
+    try {
+      const data = await exportScheduler();
+      const iso = new Date().toISOString().slice(0, 10);
+      downloadJson(data, `tc-npc-scheduler-${iso}.json`);
+    } catch (err) {
+      setToast({
+        kind: "error",
+        message: `${t("schedule.export.error")}: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    } finally {
+      setExporting(false);
+    }
+  }
+
+  async function handleImportFile(file: File) {
+    if (!window.confirm(t("schedule.import.confirm"))) return;
+    setImporting(true);
+    try {
+      const text = await file.text();
+      const data = JSON.parse(text) as SchedulerSection;
+      await importScheduler(data);
+      await reload();
+      setToast({ kind: "success", message: t("schedule.import.ok") });
+    } catch (err) {
+      setToast({
+        kind: "error",
+        message: `${t("schedule.import.error")}: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    } finally {
+      setImporting(false);
+    }
   }
 
   if (loadError) {
@@ -523,21 +988,60 @@ export function ScheduleView() {
           <h2>{t("schedule.title")}</h2>
           <SaveChip state={saveState} error={saveError} />
         </div>
-        <label class="schedule-enabled-toggle">
+        <div class="schedule-header-actions">
+          <label class="schedule-enabled-toggle">
+            <input
+              type="checkbox"
+              checked={scheduler.enabled ?? false}
+              onChange={(e) =>
+                updateScheduler((section) => {
+                  section.enabled = (e.target as HTMLInputElement).checked;
+                })
+              }
+            />
+            <span>{t("schedule.enable")}</span>
+          </label>
+
+          <button
+            type="button"
+            class="btn btn-ghost btn-small"
+            disabled={exporting}
+            onClick={() => void handleExport()}
+            title={t("schedule.export.tooltip")}
+          >
+            {exporting ? <Loader2 size={14} class="spin" /> : <Download size={14} />}
+            {t("schedule.export")}
+          </button>
+
+          <button
+            type="button"
+            class="btn btn-ghost btn-small"
+            disabled={importing}
+            onClick={() => importInputRef.current?.click()}
+            title={t("schedule.import.tooltip")}
+          >
+            {importing ? <Loader2 size={14} class="spin" /> : <Upload size={14} />}
+            {t("schedule.import")}
+          </button>
           <input
-            type="checkbox"
-            checked={scheduler.enabled ?? false}
-            onChange={(e) =>
-              updateScheduler((section) => {
-                section.enabled = (e.target as HTMLInputElement).checked;
-              })
-            }
+            ref={importInputRef}
+            type="file"
+            accept="application/json,.json"
+            class="visually-hidden"
+            onChange={(e) => {
+              const file = (e.target as HTMLInputElement).files?.[0];
+              if (file) void handleImportFile(file);
+              (e.target as HTMLInputElement).value = "";
+            }}
           />
-          <span>{t("schedule.enable")}</span>
-        </label>
+        </div>
       </div>
 
       <p class="schedule-hint">{t("schedule.hint")}</p>
+
+      <ScheduleProfilesSection t={t} onChanged={reload} setToast={setToast} />
+
+      <SchedulerDefaultsSection t={t} defaults={scheduler.defaults} onCommit={(patch) => updateDefaults((d) => Object.assign(d, patch))} />
 
       <NextUpSummary
         t={t}
@@ -566,6 +1070,10 @@ export function ScheduleView() {
               now={now}
               schedulerEnabled={scheduler.enabled ?? false}
               onTest={(patch) => testAnnouncement({ index, ...patch })}
+              isActive={activeTestIndex === index}
+              onActivate={() => setActiveTestIndex(index)}
+              onDeactivate={() => setActiveTestIndex((current) => (current === index ? null : current))}
+              onInterrupt={onInterrupt}
               onCommit={(patch) =>
                 updateAnnouncements((list) => {
                   list[index] = { ...list[index], ...patch };
@@ -598,6 +1106,8 @@ export function ScheduleView() {
         <Plus size={14} />
         {t("schedule.add")}
       </button>
+
+      {toast && <Toast toast={toast} />}
     </div>
   );
 }

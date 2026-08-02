@@ -26,7 +26,9 @@ mod desktop;
 #[derive(Parser)]
 #[command(name = "tc-npc", version, about = "Unified AI mascot agent suite")]
 struct Cli {
-    /// Path to config.json (defaults to ./config.json).
+    /// Path to config.json (defaults to `~/.tc-npc/config.json`; an old
+    /// `./config.json` from before that default is auto-migrated there on
+    /// first run).
     #[arg(long, global = true)]
     config: Option<PathBuf>,
 
@@ -172,7 +174,7 @@ pub(crate) async fn start_modules(
     if no_open {
         config.server.auto_open = false;
     }
-    let config_path = config_path.unwrap_or_else(|| PathBuf::from("config.json"));
+    let config_path = Config::resolve_path(config_path.as_deref());
     init_tracing();
 
     let data_dir = npc_core::data_dir();
