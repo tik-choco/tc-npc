@@ -183,6 +183,17 @@ struct SchedulerTestRequest {
     /// saved"; an empty array means "this row has no actions" — hence
     /// `Option<Vec<_>>` rather than a defaulted `Vec`.
     actions: Option<Vec<npc_core::config::ScheduledAction>>,
+    /// BGM overrides, same "unsaved edit on screen" idea as `text`/
+    /// `chime_file`/`actions` above — lets the web UI's test button preview a
+    /// BGM change before it's saved.
+    #[serde(default)]
+    bgm_file: Option<String>,
+    #[serde(default)]
+    bgm_volume: Option<f32>,
+    #[serde(default)]
+    bgm_play_full: Option<bool>,
+    #[serde(default)]
+    bgm_end_time: Option<String>,
 }
 
 /// Resolve a test request against the saved config: start from the indexed
@@ -198,13 +209,7 @@ fn resolve_test_announcement(
             .get(index)
             .cloned()
             .ok_or_else(|| format!("announcement index {index} out of range"))?,
-        None if req.text.is_some() || req.actions.is_some() => npc_core::config::AnnouncementConfig {
-            time: String::new(),
-            text: String::new(),
-            chime_file: String::new(),
-            volume: 1.0,
-            actions: Vec::new(),
-        },
+        None if req.text.is_some() || req.actions.is_some() => npc_core::config::AnnouncementConfig::default(),
         None => return Err("either `index`, `text` or `actions` is required".to_string()),
     };
 
@@ -216,6 +221,18 @@ fn resolve_test_announcement(
     }
     if let Some(actions) = &req.actions {
         ann.actions = actions.clone();
+    }
+    if let Some(bgm_file) = &req.bgm_file {
+        ann.bgm_file = bgm_file.clone();
+    }
+    if let Some(bgm_volume) = req.bgm_volume {
+        ann.bgm_volume = bgm_volume;
+    }
+    if let Some(bgm_play_full) = req.bgm_play_full {
+        ann.bgm_play_full = bgm_play_full;
+    }
+    if let Some(bgm_end_time) = &req.bgm_end_time {
+        ann.bgm_end_time = bgm_end_time.clone();
     }
     Ok(ann)
 }
@@ -231,12 +248,13 @@ pub async fn api_scheduler_test(State(state): State<AppState>, body: String) -> 
         Err(err) => return error_response(StatusCode::BAD_REQUEST, format!("invalid JSON: {err}")),
     };
 
-    let ann = match resolve_test_announcement(&req, &state.current_config()) {
+    let config = state.current_config();
+    let ann = match resolve_test_announcement(&req, &config) {
         Ok(a) => a,
         Err(err) => return error_response(StatusCode::BAD_REQUEST, err),
     };
 
-    let outcome = npc_scheduler::fire_announcement(&state.ctx.bus, &ann);
+    let outcome = npc_scheduler::fire_announcement(&state.ctx.bus, &ann, &config.scheduler.defaults);
     Json(json!({
         "ok": true,
         "fired": outcome.fired(),
@@ -244,6 +262,228 @@ pub async fn api_scheduler_test(State(state): State<AppState>, body: String) -> 
         "actions": outcome.actions,
     }))
     .into_response()
+}
+
+/// `GET /api/scheduler/export`: the whole `scheduler` config section
+/// (`enabled`, `announcements`, `defaults`) as pretty JSON, for backup,
+/// sharing, or round-tripping through `POST /api/scheduler/import`. No
+/// secrets live in this section, so unlike `api_get_config` there's nothing
+/// to redact.
+pub async fn api_scheduler_export(State(state): State<AppState>) -> Response {
+    match serde_json::to_string_pretty(&state.current_config().scheduler) {
+        Ok(body) => (
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            body,
+        )
+            .into_response(),
+        Err(err) => error_response(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+    }
+}
+
+/// `POST /api/scheduler/import`: replace the whole `scheduler` section from a
+/// JSON body shaped exactly like `api_scheduler_export`'s output. Validated
+/// by deserializing into `SchedulerConfig` (rejects a malformed body with
+/// `400` before touching anything on disk), then applies the same
+/// read-current-config -> replace-the-scheduler-field -> write-to-disk ->
+/// publish `CONFIG_UPDATED` -> update in-memory state sequence
+/// `api_put_config` uses for the whole document, scoped to just this one
+/// field.
+pub async fn api_scheduler_import(State(state): State<AppState>, body: String) -> Response {
+    let incoming: npc_core::config::SchedulerConfig = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(err) => return error_response(StatusCode::BAD_REQUEST, format!("invalid scheduler config: {err}")),
+    };
+
+    let mut new_config = (*state.current_config()).clone();
+    new_config.scheduler = incoming;
+
+    let pretty = match serde_json::to_string_pretty(&new_config) {
+        Ok(s) => s,
+        Err(err) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+    };
+    if let Err(err) = std::fs::write(&state.ctx.config_path, pretty) {
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to write {}: {err}", state.ctx.config_path.display()),
+        );
+    }
+
+    // Same bus publish as `api_put_config`, so npc-scheduler's hot-reload
+    // picks up the new announcements/defaults immediately.
+    state
+        .ctx
+        .bus
+        .publish(npc_core::topic::CONFIG, npc_core::msg::CONFIG_UPDATED, &new_config);
+    let scheduler = new_config.scheduler.clone();
+    state.set_current_config(new_config);
+
+    Json(json!({ "ok": true, "scheduler": scheduler })).into_response()
+}
+
+// ---------------------------------------------------------------------
+// /api/schedule-profiles — named, switchable `scheduler` snapshots (see
+// `npc_core::schedule_profile`)
+// ---------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct ScheduleProfileSummary {
+    id: String,
+    label: String,
+    active: bool,
+    created_at: String,
+    updated_at: String,
+}
+
+/// `GET /api/schedule-profiles`: every saved profile, with `active` set for
+/// whichever one matches `config.schedule_profile.active_id`. Mirrors
+/// `api_list_characters`.
+pub async fn api_list_schedule_profiles(State(state): State<AppState>) -> Response {
+    match npc_core::list_schedule_profiles(&state.ctx.data_dir) {
+        Ok(profiles) => {
+            let current = state.current_config();
+            let active_id = &current.schedule_profile.active_id;
+            let out: Vec<ScheduleProfileSummary> = profiles
+                .into_iter()
+                .map(|p| ScheduleProfileSummary {
+                    active: &p.id == active_id,
+                    id: p.id,
+                    label: p.label,
+                    created_at: p.created_at,
+                    updated_at: p.updated_at,
+                })
+                .collect();
+            Json(out).into_response()
+        }
+        Err(err) => error_response(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+    }
+}
+
+/// Body for `POST /api/schedule-profiles`.
+#[derive(serde::Deserialize)]
+struct SaveScheduleProfileRequest {
+    id: String,
+    label: String,
+}
+
+/// `POST /api/schedule-profiles`: snapshot the CURRENT live `scheduler`
+/// config into a new (or overwritten, if `id` already exists on disk) saved
+/// profile. `created_at` is preserved across an overwrite; `updated_at` is
+/// always refreshed.
+pub async fn api_save_schedule_profile(State(state): State<AppState>, body: String) -> Response {
+    let req: SaveScheduleProfileRequest = match serde_json::from_str(&body) {
+        Ok(r) => r,
+        Err(err) => return error_response(StatusCode::BAD_REQUEST, format!("invalid JSON: {err}")),
+    };
+    if req.id.trim().is_empty() || req.label.trim().is_empty() {
+        return error_response(StatusCode::BAD_REQUEST, "id and label are required".to_string());
+    }
+
+    let config = state.current_config();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    // Preserve created_at across an overwrite of an existing profile with the
+    // same id; a genuinely new id (or an unreadable/corrupt existing file)
+    // just starts its clock now.
+    let created_at = npc_core::load_schedule_profile(&state.ctx.data_dir, &req.id)
+        .map(|existing| existing.created_at)
+        .unwrap_or_else(|_| now.clone());
+
+    let profile = npc_core::ScheduleProfile {
+        id: req.id.clone(),
+        label: req.label.clone(),
+        created_at,
+        updated_at: now,
+        scheduler: config.scheduler.clone(),
+    };
+
+    if let Err(err) = npc_core::save_schedule_profile(&state.ctx.data_dir, &profile) {
+        return error_response(StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
+    }
+
+    let active = profile.id == config.schedule_profile.active_id;
+    Json(json!({
+        "ok": true,
+        "profile": {
+            "id": profile.id, "label": profile.label, "active": active,
+            "created_at": profile.created_at, "updated_at": profile.updated_at,
+        }
+    }))
+    .into_response()
+}
+
+/// Read-modify-write config.json for "activate schedule profile": replaces
+/// the whole `scheduler` section and sets `schedule_profile.active_id` in
+/// one write, preserving every other field — same read-modify-write shape
+/// as `write_character_config_field`, but touches two keys at once since
+/// activation both switches *and* loads the schedule.
+fn write_schedule_profile_activation(
+    state: &AppState,
+    id: &str,
+    scheduler: &npc_core::config::SchedulerConfig,
+) -> Result<(), String> {
+    let path = &state.ctx.config_path;
+
+    let mut doc: Value = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|data| serde_json::from_str(&data).ok())
+        .unwrap_or_else(|| serde_json::to_value(&*state.current_config()).unwrap_or_else(|_| json!({})));
+
+    if !doc.is_object() {
+        doc = json!({});
+    }
+    let obj = doc.as_object_mut().unwrap();
+
+    obj.insert("scheduler".to_string(), serde_json::to_value(scheduler).map_err(|e| e.to_string())?);
+
+    let profile_section = obj.entry("schedule_profile").or_insert_with(|| json!({}));
+    if !profile_section.is_object() {
+        *profile_section = json!({});
+    }
+    profile_section.as_object_mut().unwrap().insert("active_id".to_string(), json!(id));
+
+    let pretty = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
+    std::fs::write(path, pretty).map_err(|e| format!("failed to write {}: {e}", path.display()))
+}
+
+/// `POST /api/schedule-profiles/:id/activate`: load the named profile,
+/// replace the ENTIRE live `scheduler` config with its saved content, record
+/// `schedule_profile.active_id`, persist both atomically to `config.json`,
+/// publish `CONFIG_UPDATED` (same mechanism `api_scheduler_import` relies on,
+/// so npc-scheduler's hot-reload picks up the new schedule immediately), and
+/// update in-memory state.
+pub async fn api_activate_schedule_profile(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    let profile = match npc_core::load_schedule_profile(&state.ctx.data_dir, &id) {
+        Ok(p) => p,
+        Err(err) => return error_response(StatusCode::NOT_FOUND, err.to_string()),
+    };
+
+    if let Err(err) = write_schedule_profile_activation(&state, &id, &profile.scheduler) {
+        return error_response(StatusCode::INTERNAL_SERVER_ERROR, err);
+    }
+
+    let mut updated = (*state.current_config()).clone();
+    updated.scheduler = profile.scheduler.clone();
+    updated.schedule_profile.active_id = id;
+
+    // Same bus publish as `api_scheduler_import`, so npc-scheduler's
+    // hot-reload picks up the new announcements/defaults immediately.
+    state
+        .ctx
+        .bus
+        .publish(npc_core::topic::CONFIG, npc_core::msg::CONFIG_UPDATED, &updated);
+    let scheduler_value = serde_json::to_value(&updated.scheduler).unwrap_or_default();
+    state.set_current_config(updated);
+
+    Json(json!({ "ok": true, "scheduler": scheduler_value })).into_response()
+}
+
+/// `DELETE /api/schedule-profiles/:id`. Not an error if it didn't exist
+/// (matches `npc_core::delete_schedule_profile`'s own contract).
+pub async fn api_delete_schedule_profile(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    match npc_core::delete_schedule_profile(&state.ctx.data_dir, &id) {
+        Ok(()) => Json(json!({ "ok": true })).into_response(),
+        Err(err) => error_response(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+    }
 }
 
 /// Body shared by `POST /api/llm/models` and `POST /api/llm/voices`.
@@ -1410,6 +1650,7 @@ mod tests {
             chime_file: "saved.wav".to_string(),
             volume: 1.0,
             actions: vec![npc_core::config::ScheduledAction::Resume],
+            ..Default::default()
         }];
         config
     }
@@ -1420,6 +1661,10 @@ mod tests {
             text: text.map(str::to_string),
             chime_file: None,
             actions: None,
+            bgm_file: None,
+            bgm_volume: None,
+            bgm_play_full: None,
+            bgm_end_time: None,
         }
     }
 
@@ -1440,6 +1685,10 @@ mod tests {
             actions: Some(vec![npc_core::config::ScheduledAction::Command {
                 text: "go home".to_string(),
             }]),
+            bgm_file: None,
+            bgm_volume: None,
+            bgm_play_full: None,
+            bgm_end_time: None,
         };
         let ann = resolve_test_announcement(&req, &config_with_announcement()).unwrap();
         assert_eq!(ann.text, "just typed");
@@ -1452,6 +1701,28 @@ mod tests {
         );
     }
 
+    /// Mirrors `resolve_test_announcement_applies_unsaved_overrides`, but for
+    /// the BGM override fields — the web UI's test button previewing a BGM
+    /// change before it's saved.
+    #[test]
+    fn resolve_test_announcement_applies_unsaved_bgm_overrides() {
+        let req = SchedulerTestRequest {
+            index: Some(0),
+            text: None,
+            chime_file: None,
+            actions: None,
+            bgm_file: Some("bgm/new-track.wav".to_string()),
+            bgm_volume: Some(0.4),
+            bgm_play_full: Some(true),
+            bgm_end_time: Some("10:30".to_string()),
+        };
+        let ann = resolve_test_announcement(&req, &config_with_announcement()).unwrap();
+        assert_eq!(ann.bgm_file, "bgm/new-track.wav");
+        assert_eq!(ann.bgm_volume, 0.4);
+        assert!(ann.bgm_play_full);
+        assert_eq!(ann.bgm_end_time, "10:30");
+    }
+
     /// An empty `actions` array is an override to "no actions", not "use the
     /// saved ones" — otherwise deleting the last action row couldn't be
     /// tested before the autosave lands.
@@ -1462,6 +1733,10 @@ mod tests {
             text: None,
             chime_file: None,
             actions: Some(Vec::new()),
+            bgm_file: None,
+            bgm_volume: None,
+            bgm_play_full: None,
+            bgm_end_time: None,
         };
         let ann = resolve_test_announcement(&req, &config_with_announcement()).unwrap();
         assert!(ann.actions.is_empty());
@@ -1486,6 +1761,10 @@ mod tests {
             text: None,
             chime_file: None,
             actions: Some(vec![npc_core::config::ScheduledAction::Suspend]),
+            bgm_file: None,
+            bgm_volume: None,
+            bgm_play_full: None,
+            bgm_end_time: None,
         };
         let ann = resolve_test_announcement(&req, &npc_core::Config::default()).unwrap();
         assert!(ann.text.is_empty());
@@ -1734,5 +2013,163 @@ mod tests {
         let history: std::collections::VecDeque<crate::bus_forward::AffectHistoryEntry> =
             std::collections::VecDeque::new();
         assert!(recent_affect_entries(&history, 60).is_empty());
+    }
+
+    // -------------------------------------------------------------
+    // /api/schedule-profiles
+    // -------------------------------------------------------------
+
+    fn temp_schedule_profile_data_dir(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("npc-server-schedule-profile-{name}-{}", uuid::Uuid::new_v4()))
+    }
+
+    /// A minimal but fully-wired `AppState` for exercising the handlers
+    /// directly (no HTTP layer involved). `data_dir` should be a fresh temp
+    /// directory per test — callers are responsible for cleaning it up.
+    fn test_app_state(data_dir: std::path::PathBuf) -> AppState {
+        let config_path = data_dir.join("config.json");
+        let ctx = npc_core::ModuleCtx {
+            bus: npc_core::Bus::new(),
+            config: std::sync::Arc::new(npc_core::Config::default()),
+            config_path,
+            shutdown: tokio_util::sync::CancellationToken::new(),
+            data_dir,
+        };
+        AppState {
+            current_config: std::sync::Arc::new(std::sync::RwLock::new(ctx.config.clone())),
+            ctx,
+            hub: crate::hub::Hub::default(),
+            echo: std::sync::Arc::new(crate::hub::EchoGuard::default()),
+            addr: "127.0.0.1:0".to_string(),
+            short_term_memory: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
+            affect_history: std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
+            voice_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            suspend_gate: std::sync::Arc::new(std::sync::Mutex::new(crate::ws::SuspendGate::default())),
+        }
+    }
+
+    async fn response_json(response: Response) -> Value {
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn save_then_list_shows_the_new_profile() {
+        let dir = temp_schedule_profile_data_dir("save-list");
+        let state = test_app_state(dir.clone());
+
+        let body = json!({"id": "weekday", "label": "Weekday"}).to_string();
+        let save_resp = api_save_schedule_profile(State(state.clone()), body).await;
+        assert_eq!(save_resp.status(), StatusCode::OK);
+
+        let list = response_json(api_list_schedule_profiles(State(state.clone())).await).await;
+        let arr = list.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["id"], "weekday");
+        assert_eq!(arr[0]["label"], "Weekday");
+        assert_eq!(arr[0]["active"], false);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn save_with_existing_id_overwrites_preserving_created_at() {
+        let dir = temp_schedule_profile_data_dir("overwrite");
+        let state = test_app_state(dir.clone());
+
+        let body1 = json!({"id": "weekday", "label": "Weekday"}).to_string();
+        let resp1 = response_json(api_save_schedule_profile(State(state.clone()), body1).await).await;
+        let created_at_1 = resp1["profile"]["created_at"].as_str().unwrap().to_string();
+        let updated_at_1 = resp1["profile"]["updated_at"].as_str().unwrap().to_string();
+
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+        let body2 = json!({"id": "weekday", "label": "Weekday v2"}).to_string();
+        let resp2 = response_json(api_save_schedule_profile(State(state.clone()), body2).await).await;
+
+        assert_eq!(resp2["profile"]["created_at"], created_at_1);
+        assert_ne!(resp2["profile"]["updated_at"].as_str().unwrap(), updated_at_1);
+        assert_eq!(resp2["profile"]["label"], "Weekday v2");
+
+        // Still exactly one profile on disk — an overwrite, not a second entry.
+        let list = response_json(api_list_schedule_profiles(State(state.clone())).await).await;
+        assert_eq!(list.as_array().unwrap().len(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn activate_replaces_scheduler_and_updates_active_flag_in_list() {
+        let dir = temp_schedule_profile_data_dir("activate");
+        let state = test_app_state(dir.clone());
+
+        let profile = npc_core::ScheduleProfile {
+            id: "event".to_string(),
+            label: "Event".to_string(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            scheduler: npc_core::config::SchedulerConfig {
+                enabled: true,
+                announcements: vec![npc_core::config::AnnouncementConfig {
+                    time: "12:00".to_string(),
+                    text: "event time".to_string(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        };
+        npc_core::save_schedule_profile(&dir, &profile).unwrap();
+
+        let activate_resp = api_activate_schedule_profile(State(state.clone()), Path("event".to_string())).await;
+        assert_eq!(activate_resp.status(), StatusCode::OK);
+
+        // In-memory config picked up the profile's scheduler + active_id.
+        let updated_config = state.current_config();
+        assert!(updated_config.scheduler.enabled);
+        assert_eq!(updated_config.scheduler.announcements.len(), 1);
+        assert_eq!(updated_config.scheduler.announcements[0].text, "event time");
+        assert_eq!(updated_config.schedule_profile.active_id, "event");
+
+        // Persisted to config.json too.
+        let on_disk = std::fs::read_to_string(&state.ctx.config_path).unwrap();
+        let doc: Value = serde_json::from_str(&on_disk).unwrap();
+        assert_eq!(doc["schedule_profile"]["active_id"], "event");
+        assert_eq!(doc["scheduler"]["enabled"], true);
+
+        // The list's `active` flag reflects the activation afterward.
+        let list = response_json(api_list_schedule_profiles(State(state.clone())).await).await;
+        let arr = list.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["active"], true);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn activate_on_unknown_id_returns_not_found() {
+        let dir = temp_schedule_profile_data_dir("activate-missing");
+        let state = test_app_state(dir.clone());
+
+        let resp = api_activate_schedule_profile(State(state.clone()), Path("nope".to_string())).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn delete_removes_it_from_a_subsequent_list() {
+        let dir = temp_schedule_profile_data_dir("delete");
+        let state = test_app_state(dir.clone());
+
+        let body = json!({"id": "weekday", "label": "Weekday"}).to_string();
+        api_save_schedule_profile(State(state.clone()), body).await;
+
+        let delete_resp = api_delete_schedule_profile(State(state.clone()), Path("weekday".to_string())).await;
+        assert_eq!(delete_resp.status(), StatusCode::OK);
+
+        let list = response_json(api_list_schedule_profiles(State(state.clone())).await).await;
+        assert!(list.as_array().unwrap().is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

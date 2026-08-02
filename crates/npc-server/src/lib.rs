@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use axum::extract::DefaultBodyLimit;
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::Router;
 use npc_core::{Module, ModuleCtx};
 use tokio::net::TcpListener;
@@ -212,6 +212,20 @@ async fn run_server(ctx: ModuleCtx) -> anyhow::Result<()> {
                 .delete(rest::api_delete_sprite),
         )
         .route("/api/scheduler/test", post(rest::api_scheduler_test))
+        .route("/api/scheduler/export", get(rest::api_scheduler_export))
+        .route("/api/scheduler/import", post(rest::api_scheduler_import))
+        .route(
+            "/api/schedule-profiles",
+            get(rest::api_list_schedule_profiles).post(rest::api_save_schedule_profile),
+        )
+        .route(
+            "/api/schedule-profiles/:id/activate",
+            post(rest::api_activate_schedule_profile),
+        )
+        .route(
+            "/api/schedule-profiles/:id",
+            delete(rest::api_delete_schedule_profile),
+        )
         .route("/api/memory", get(rest::api_memory))
         .route("/api/affect/history", get(rest::api_affect_history))
         .route("/api/chat/history", get(rest::api_chat_history))

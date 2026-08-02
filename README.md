@@ -112,9 +112,12 @@ an SSH port-forward (`tc-npc tui --addr 127.0.0.1:47950`).
 cp config.example.json config.json
 ```
 
-`config.json` is read by default (or pass `--config <path>`). Secrets go in
-`.env` (see `.env.example`), loaded before config and used to override a few
-JSON fields via environment variables.
+`~/.tc-npc/config.json` is read by default (or pass `--config <path>` to use
+a different location). If you place the copy above at the repo root, it's
+auto-migrated to `~/.tc-npc/config.json` the first time you run `tc-npc` (a
+one-time copy; it won't overwrite a config that's already at the new
+location). Secrets go in `.env` (see `.env.example`), loaded before config
+and used to override a few JSON fields via environment variables.
 
 **Never commit API keys.** `config.json` and `.env` are already
 `.gitignore`d.

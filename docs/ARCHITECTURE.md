@@ -205,14 +205,17 @@ logs and moves on rather than crashing the whole process).
 
 ## Config schema
 
-Loaded from `--config <path>` or `./config.json` (a missing file just means
-defaults); `.env` is loaded first via `dotenvy`, then a fixed set of
-environment variables override the matching JSON fields. See
-`config.example.json` for a full example and `crates/npc-core/src/config.rs`
-for the authoritative field list/defaults. Top-level sections: `api`, `tts`,
-`stt`, `talk`, `memory`, `vision`, `speech`, `action`, `vrc`, `scheduler`,
-`translation`, `server`, `character`, `mist`. `Config::redacted_json()` masks every
-`api_key` field for safe display in the web UI.
+Loaded from `--config <path>` or `~/.tc-npc/config.json` (a missing file just
+means defaults; an old `./config.json` from before this default is
+auto-migrated to the new location on first run — see
+`Config::resolve_path`/`Config::load` in `crates/npc-core/src/config.rs`);
+`.env` is loaded first via `dotenvy`, then a fixed set of environment
+variables override the matching JSON fields. See `config.example.json` for a
+full example and `crates/npc-core/src/config.rs` for the authoritative field
+list/defaults. Top-level sections: `api`, `tts`, `stt`, `talk`, `memory`,
+`vision`, `speech`, `action`, `vrc`, `scheduler`, `schedule_profile`,
+`translation`, `server`, `character`, `mist`. `Config::redacted_json()` masks
+every `api_key` field for safe display in the web UI.
 
 Prompt templates in `talk.prompts[].content` support placeholders:
 `{{session_meta}}`, `{{short_term_memory}}`, `{{long_term_memory}}`,

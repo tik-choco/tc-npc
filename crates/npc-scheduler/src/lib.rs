@@ -2,13 +2,20 @@
 //! `internal/notifier/scheduler.go` in the original service).
 //!
 //! Reads `config.scheduler.announcements` (`{time, text, chime_file,
-//! volume, actions}`, `time` = `"HH:MM"` or `"HH:MM:SS"`, daily recurrence —
-//! the Go original turned these into 6-field cron expressions via
-//! `robfig/cron`; here we hand-roll the same "next local-time occurrence"
-//! semantics with `chrono` instead of pulling in a cron crate). Unlike the Go
-//! service this module does **not** play audio itself: firing an announcement
-//! just publishes a `tts` message on `agent:interrupt` and `npc-speech` plays
-//! the chime and speaks the text.
+//! volume, actions, bgm_file, bgm_volume, bgm_play_full, bgm_end_time}`,
+//! `time` = `"HH:MM"` or `"HH:MM:SS"`, daily recurrence — the Go original
+//! turned these into 6-field cron expressions via `robfig/cron`; here we
+//! hand-roll the same "next local-time occurrence" semantics with `chrono`
+//! instead of pulling in a cron crate). Unlike the Go service this module
+//! does **not** play audio itself: firing an announcement just publishes a
+//! `tts` message on `agent:interrupt` and `npc-speech` plays the chime,
+//! speaks the text, and (if `bgm_file` is set) plays background music
+//! alongside it. `chime_file`/`volume`/`bgm_volume` fall back to
+//! `config.scheduler.defaults` when an announcement leaves them unset (`<=
+//! 0.0` for the volumes, empty string for the chime) — see
+//! [`npc_core::config::AnnouncementConfig`]'s `effective_*` methods, which
+//! `fire_announcement` resolves before publishing so `npc-speech` never has
+//! to know about the defaults itself.
 //!
 //! Beyond speaking, an announcement can carry `actions` — the port of Go
 //! `agent-scheduler`'s `redis_actions`, which published arbitrary
@@ -32,7 +39,7 @@ use chrono::{DateTime, Local, NaiveDateTime, NaiveTime, TimeZone};
 use serde_json::json;
 use tokio::sync::broadcast::error::RecvError;
 
-use npc_core::config::{AnnouncementConfig, ScheduledAction};
+use npc_core::config::{AnnouncementConfig, ScheduledAction, SchedulerDefaults};
 use npc_core::{msg, topic, Config, Module, ModuleCtx};
 
 pub fn module(_ctx: &ModuleCtx) -> anyhow::Result<Box<dyn Module>> {
@@ -49,6 +56,7 @@ impl Module for SchedulerModule {
 
     async fn run(self: Box<Self>, ctx: ModuleCtx) -> anyhow::Result<()> {
         let mut entries = compute_schedule(&ctx.config);
+        let mut defaults = ctx.config.scheduler.defaults.clone();
         log_schedule(&entries);
 
         let mut rx = ctx.bus.subscribe();
@@ -77,7 +85,7 @@ impl Module for SchedulerModule {
                     // fire together.
                     for entry in entries.iter_mut() {
                         if entry.next <= wake_at {
-                            fire_announcement(&ctx.bus, &entry.config);
+                            fire_announcement(&ctx.bus, &entry.config, &defaults);
                             entry.next += chrono::Duration::hours(24);
                         }
                     }
@@ -89,6 +97,7 @@ impl Module for SchedulerModule {
                                 match serde_json::from_value::<Config>(bus_msg.env.payload) {
                                     Ok(new_config) => {
                                         entries = compute_schedule(&new_config);
+                                        defaults = new_config.scheduler.defaults.clone();
                                         tracing::info!("npc-scheduler: config updated, schedule recomputed");
                                         log_schedule(&entries);
                                     }
@@ -238,7 +247,11 @@ impl FireOutcome {
 /// actions-only entry (empty `text`) just acts, and an entry with both does
 /// both — matching the Go original, whose `redis_actions` fired regardless of
 /// whether `text` was set.
-pub fn fire_announcement(bus: &npc_core::bus::Bus, ann: &AnnouncementConfig) -> FireOutcome {
+pub fn fire_announcement(
+    bus: &npc_core::bus::Bus,
+    ann: &AnnouncementConfig,
+    defaults: &SchedulerDefaults,
+) -> FireOutcome {
     let mut outcome = FireOutcome::default();
 
     if ann.text.is_empty() {
@@ -250,7 +263,12 @@ pub fn fire_announcement(bus: &npc_core::bus::Bus, ann: &AnnouncementConfig) -> 
             msg::TTS,
             json!({
                 "content": ann.text,
-                "chime_file": ann.chime_file,
+                "chime_file": ann.effective_chime_file(defaults),
+                "volume": ann.effective_volume(defaults),
+                "bgm_file": ann.bgm_file,
+                "bgm_volume": ann.effective_bgm_volume(defaults),
+                "bgm_play_full": ann.bgm_play_full,
+                "bgm_end_time": ann.bgm_end_time,
             }),
         );
         outcome.spoke = true;
@@ -387,10 +405,13 @@ mod tests {
         AnnouncementConfig {
             time: time.to_string(),
             text: "hello".to_string(),
-            chime_file: String::new(),
             volume: 1.0,
-            actions: Vec::new(),
+            ..Default::default()
         }
+    }
+
+    fn defaults() -> SchedulerDefaults {
+        SchedulerDefaults::default()
     }
 
     #[test]
@@ -425,7 +446,7 @@ mod tests {
 
         let mut ann = announcement("09:00");
         ann.chime_file = "assets/chime.wav".to_string();
-        let outcome = fire_announcement(&bus, &ann);
+        let outcome = fire_announcement(&bus, &ann, &defaults());
         assert!(outcome.spoke);
         assert_eq!(outcome.actions, 0);
 
@@ -436,6 +457,63 @@ mod tests {
         assert_eq!(received.env.payload["chime_file"], "assets/chime.wav");
     }
 
+    /// The new BGM fields round-trip into the published payload unchanged
+    /// (aside from `chime_file`/`volume`/`bgm_volume` going through the
+    /// `effective_*` resolvers), so `npc-speech` can play background music
+    /// alongside the chime and speech.
+    #[tokio::test]
+    async fn fire_announcement_publishes_bgm_fields() {
+        let bus = npc_core::bus::Bus::new();
+        let mut rx = bus.subscribe();
+
+        let mut ann = announcement("09:00");
+        ann.bgm_file = "assets/bgm.mp3".to_string();
+        ann.bgm_volume = 0.5;
+        ann.bgm_play_full = true;
+        ann.bgm_end_time = "1:30".to_string();
+
+        let outcome = fire_announcement(&bus, &ann, &defaults());
+        assert!(outcome.spoke);
+
+        let received = rx.recv().await.unwrap();
+        assert_eq!(received.env.payload["bgm_file"], "assets/bgm.mp3");
+        assert_eq!(received.env.payload["bgm_volume"], 0.5);
+        assert_eq!(received.env.payload["bgm_play_full"], true);
+        assert_eq!(received.env.payload["bgm_end_time"], "1:30");
+    }
+
+    /// Fields left at their "unset" sentinel (empty chime/`<= 0.0` volumes)
+    /// fall back to `scheduler.defaults` in the published payload — mirrors
+    /// how `compute_schedule`/`run` source `defaults` from the same config
+    /// snapshot as `entries`.
+    #[tokio::test]
+    async fn fire_announcement_falls_back_to_scheduler_defaults() {
+        let bus = npc_core::bus::Bus::new();
+        let mut rx = bus.subscribe();
+
+        let mut ann = announcement("09:00");
+        ann.chime_file = String::new();
+        ann.volume = 0.0;
+        ann.bgm_volume = 0.0;
+
+        let scheduler_defaults = SchedulerDefaults {
+            chime_file: "assets/default_chime.wav".to_string(),
+            volume: 0.8,
+            bgm_volume: 0.3,
+        };
+
+        fire_announcement(&bus, &ann, &scheduler_defaults);
+
+        // `volume`/`bgm_volume` are `f32` in `AnnouncementConfig`/
+        // `SchedulerDefaults`; `serde_json` widens them to `f64` on the way
+        // into the payload, so compare against the same widened value
+        // rather than the `f64` literal (which differs in its low bits).
+        let received = rx.recv().await.unwrap();
+        assert_eq!(received.env.payload["chime_file"], "assets/default_chime.wav");
+        assert_eq!(received.env.payload["volume"], 0.8_f32 as f64);
+        assert_eq!(received.env.payload["bgm_volume"], 0.3_f32 as f64);
+    }
+
     #[tokio::test]
     async fn fire_announcement_skips_empty_text() {
         let bus = npc_core::bus::Bus::new();
@@ -443,7 +521,7 @@ mod tests {
 
         let mut ann = announcement("09:00");
         ann.text = String::new();
-        assert!(!fire_announcement(&bus, &ann).fired());
+        assert!(!fire_announcement(&bus, &ann, &defaults()).fired());
         assert!(rx.try_recv().is_err());
     }
 
@@ -460,7 +538,7 @@ mod tests {
             content: "原点に移動して".to_string(),
         }];
 
-        let outcome = fire_announcement(&bus, &ann);
+        let outcome = fire_announcement(&bus, &ann, &defaults());
         assert!(!outcome.spoke);
         assert_eq!(outcome.actions, 1);
         assert!(outcome.fired());
@@ -483,7 +561,7 @@ mod tests {
             },
             ScheduledAction::Resume,
         ];
-        assert_eq!(fire_announcement(&bus, &ann).actions, 2);
+        assert_eq!(fire_announcement(&bus, &ann, &defaults()).actions, 2);
 
         let first = rx.recv().await.unwrap();
         assert_eq!(first.env.r#type, msg::TTS);
