@@ -1,5 +1,6 @@
 /target/
 node_modules/
+eval/emotion/trace.json
 .env
 config.json
 .mistlib-src/

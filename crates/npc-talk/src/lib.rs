@@ -5,7 +5,7 @@
 //! OpenAI-compatible LLM via `npc-llm`; publishes responses back on
 //! `agent:chat`.
 
-mod affect;
+pub mod affect;
 mod engine;
 mod module;
 mod style;
