@@ -142,5 +142,4 @@ All subcommands accept `--config <path>`.
 
 ## License
 
-This repository is [MPL-2.0 licensed](LICENSE), matching mistlib, the
-external dependency the optional `mist` feature builds on.
+This repository is [MPL-2.0 licensed](LICENSE).
