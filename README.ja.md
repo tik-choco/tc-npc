@@ -138,5 +138,4 @@ PEMバンドルのパスを指定するか、最終手段として `TC_NPC_INSEC
 
 ## ライセンス
 
-このリポジトリ自体は [MPL-2.0 License](LICENSE) です。mist機能が依存する外部
-ライブラリ mistlib も同じく MPL-2.0 ライセンスです。
+このリポジトリ自体は [MPL-2.0 License](LICENSE) です。
