@@ -5,6 +5,8 @@
 // serde defaults — always spread the existing section when writing back so
 // unknown/unedited fields survive the round-trip.
 
+export interface ModelRef { provider_id: string; model: string }
+
 /**
  * config.scheduler.announcements[].actions[] — extra bus messages an
  * announcement publishes when it fires (the port of the Go scheduler's
@@ -68,7 +70,10 @@ export interface TranslationSection {
   chatbox?: boolean;
   /** Model override; empty falls back to api.model. */
   model?: string;
-  /** "" follows default_preset_id (lib/llm-config.ts's resolvePreset). */
+  /** Unset follows default_ref. */
+  model_ref?: ModelRef;
+  reasoning_effort?: string;
+  /** Legacy migration input only. */
   preset_id?: string;
 }
 
@@ -99,7 +104,10 @@ export interface ActionSection {
   osc_address?: string;
   locations?: LocationEntry[];
   routes?: RouteEntry[];
-  /** "" follows default_preset_id (lib/llm-config.ts's resolvePreset). */
+  /** Unset follows default_ref. */
+  model_ref?: ModelRef;
+  reasoning_effort?: string;
+  /** Legacy migration input only. */
   preset_id?: string;
 }
 
@@ -114,7 +122,9 @@ export interface ApiSection {
    * requests ("none" is an explicit value, not "omit"); empty/missing is
    * treated as "none" by the server. */
   reasoning_effort?: string;
-  /** "" follows default_preset_id (lib/llm-config.ts's resolvePreset). */
+  /** Unset follows default_ref. */
+  model_ref?: ModelRef;
+  /** Legacy migration input only. */
   preset_id?: string;
 }
 
@@ -138,14 +148,22 @@ export interface SpeechEndpointSection {
   api_key?: string;
   model?: string;
   voice?: string;
-  /** "" follows default_preset_id (lib/llm-config.ts's resolvePreset). */
+  /** Unset follows default_ref. */
+  model_ref?: ModelRef;
+  reasoning_effort?: string;
+  /** Legacy migration input only. */
   preset_id?: string;
   [key: string]: unknown;
 }
 
-/** config.providers[] — "where to connect" (lib/llm-config.ts's shared
- * provider/preset model, tc-docs/drafts/llm-settings-common-v1.md §2). */
+/** HTTP or Room connection, including model cache and per-room sharing. */
 export interface ProviderEntry {
+  enabled?: boolean;
+  models?: string[];
+  models_fetched_at?: string;
+  provide?: boolean;
+  shared?: ModelRef[];
+  [key: string]: unknown;
   id: string;
   label?: string;
   base_url?: string;
@@ -153,9 +171,7 @@ export interface ProviderEntry {
   api_key?: string;
 }
 
-/** config.presets[] — "how to call it": a model + reasoning effort bound to
- * a provider. `reasoning_effort: ""` inherits config.api's reasoning_effort
- * (lib/llm-config.ts). */
+/** Deserialize-only migration source; the UI never edits presets. */
 export interface PresetEntry {
   id: string;
   label?: string;
@@ -166,16 +182,23 @@ export interface PresetEntry {
 
 /** config.talk — chat/conversation task assignment. */
 export interface TalkSection {
-  /** "" follows default_preset_id (lib/llm-config.ts's resolvePreset). */
+  /** Unset follows default_ref. */
+  model_ref?: ModelRef;
+  reasoning_effort?: string;
+  /** Legacy migration input only. */
   preset_id?: string;
 }
 
 /** config.memory — memory task + its embedding task, assigned independently. */
 export interface MemorySection {
   enabled?: boolean;
-  /** "" follows default_preset_id (lib/llm-config.ts's resolvePreset). */
+  /** Unset follows default_ref. */
+  model_ref?: ModelRef;
+  reasoning_effort?: string;
+  /** Legacy migration input only. */
   preset_id?: string;
-  /** "" follows default_preset_id, same as preset_id. */
+  /** Unset follows default_ref. */
+  embedding_ref?: ModelRef;
   embedding_preset_id?: string;
   [key: string]: unknown;
 }
@@ -188,7 +211,10 @@ export interface VisionSection {
   base_url?: string;
   api_key?: string;
   model?: string;
-  /** "" follows default_preset_id (lib/llm-config.ts's resolvePreset). */
+  /** Unset follows default_ref. */
+  model_ref?: ModelRef;
+  reasoning_effort?: string;
+  /** Legacy migration input only. */
   preset_id?: string;
   [key: string]: unknown;
 }

@@ -1,3 +1,4 @@
+import { migrateConfigDocument } from "./llm-config";
 // Thin REST client for the tc-npc server (same origin as the WS endpoint —
 // see vite.config.ts's dev proxy for the local-dev equivalent).
 import type { ScheduledActionEntry, SchedulerSection } from "./config-types";
@@ -26,8 +27,10 @@ export function getState(): Promise<unknown> {
   return request("/api/state");
 }
 
-export function getConfig(): Promise<ConfigDocument> {
-  return request("/api/config");
+export async function getConfig(): Promise<ConfigDocument> {
+  const config = await request<ConfigDocument>("/api/config");
+  if (migrateConfigDocument(config)) await putConfig(config);
+  return config;
 }
 
 export function putConfig(config: ConfigDocument): Promise<void> {
@@ -401,6 +404,7 @@ export interface LlmProbeRequest {
 
 export function listModels(body: LlmProbeRequest): Promise<{ models: string[] }> {
   return request("/api/llm/models", {
+    signal: AbortSignal.timeout(15_000),
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),

@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@pixiv/three-vrm": "^3.5.5",
+    "@tik-choco/mistai": "github:tik-choco-lab/mistai",
     "lucide-preact": "^0.577.0",
     "pdfjs-dist": "^6.0.227",
     "preact": "^10.29.3",

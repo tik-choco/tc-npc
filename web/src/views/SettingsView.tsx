@@ -1,45 +1,6 @@
-// 設定 tab: structured forms over the server config document (GET/PUT
-// /api/config), following the tik-choco suite's shared LLM-settings
-// convention (tc-docs/drafts/llm-settings-common-v1.md §3): 接続先
-// (provider) と モデル (preset) はそれぞれ独立したカード一覧で管理し、各タスク
-// (会話/記憶/埋め込み/視覚/行動/通訳/音声合成/音声認識) は自分の preset を選ぶ
-// だけ — api.base_url / api.model を直接編集する平坦なフォームはもう無い。旧
-// 「音声」タブは廃止し、TTS/STT の有効トグルは モジュール・連携 タブへ、モデル
-// 選択は タスク タブの行へ、それぞれ移した。
-//
-// Tabs, in this order: 一般 (display language / NPC reply language) → AI接続
-// (ProviderCards + PresetCards, from lib/llm-config.ts's provider/preset
-// model) → タスク (TaskRows: per-task preset assignment) → AI Network
-// (NetworkSettings: room-based LLM sharing) → 通訳 (mode + languages/context
-// size/auto_reverse/chatbox — model selection lives in the タスク tab now) →
-// モジュール・連携 (feature on/off incl. 音声合成/音声認識 + VRC + server) →
-// 詳細 (raw JSON, outside autosave).
-//
-// Field primitives (TextField/ToggleField/SelectField/ReasoningEffortField/
-// RestartBadge/ModelPicker) live in components/SettingsFields.tsx and are
-// shared with the provider/preset card UI — this view no longer keeps its
-// own copies. Persistence is silent autosave via useConfigDoc — there is no
-// save button except on the raw-JSON tab, which is intentionally outside
-// the autosave path (see its section below).
-//
-// Reflection timing differs by field: schedule/location/route edits (owned
-// by the 予定/行動 tabs, not this view) apply live; everything edited here
-// (AI接続, module on/off, VRC/server settings) only takes effect after the
-// app restarts. That's noted with a small badge per section rather than a
-// paragraph, per the shared convention's "説明は最小限、詳細はツールチップへ"
-// principle. The one exception is the 一般 tab's display language, which is
-// browser-local and switches instantly — it carries no restart badge for
-// exactly that reason.
-//
-// Config sections are typed via lib/config-types.ts where a shared type
-// exists (tts/stt/vrc/enabled-only sections, plus providers[]/presets[] via
-// lib/llm-config.ts); `server` has no shared type (only the
-// schedule/action-map/settings views touch config, and none of the others
-// need `server`), so a small local interface covers it here. Every write
-// spreads the existing section object before applying a patch, so fields
-// this view doesn't know about survive the round-trip.
+import { AiSettings } from "../components/AiSettings";
 import { useEffect, useState } from "preact/hooks";
-import { Blocks, Braces, Cpu, Globe, Languages, ListChecks, Loader2, Network, RotateCcw, Save } from "lucide-preact";
+import { Blocks, Braces, Cpu, Globe, Languages, Loader2, RotateCcw, Save } from "lucide-preact";
 import { getConfig, putConfig } from "../lib/api";
 import { useConfigDoc } from "../hooks/useConfigDoc";
 import { useI18n } from "../hooks/useI18n";
@@ -53,10 +14,6 @@ import {
   translationUpdater,
 } from "../components/InterpretSettings";
 import { RestartBadge, SelectField, TextField, ToggleField } from "../components/SettingsFields";
-import { ProviderCards } from "../components/ProviderCards";
-import { PresetCards } from "../components/PresetCards";
-import { TaskRows } from "../components/TaskRows";
-import { NetworkSettings } from "../components/NetworkSettings";
 import type { EnabledSection, SpeechEndpointSection, VrcSection } from "../lib/config-types";
 import type { ConfigDocument } from "../lib/types";
 import "../styles/components.css";
@@ -158,13 +115,11 @@ function JsonEditor({ t }: { t: Translate }) {
 
 // --- Main view ---------------------------------------------------------
 
-type SettingsTabId = "general" | "connection" | "tasks" | "network" | "interpret" | "modules" | "json";
+type SettingsTabId = "general" | "connection" | "interpret" | "modules" | "json";
 
 const SETTINGS_TABS: Array<{ id: SettingsTabId; labelKey: MessageKey; icon: typeof Cpu }> = [
   { id: "general", labelKey: "settings.tab.general", icon: Globe },
   { id: "connection", labelKey: "settings.tab.connection", icon: Cpu },
-  { id: "tasks", labelKey: "settings.tab.tasks", icon: ListChecks },
-  { id: "network", labelKey: "settings.tab.network", icon: Network },
   { id: "interpret", labelKey: "settings.tab.interpret", icon: Languages },
   { id: "modules", labelKey: "settings.tab.modules", icon: Blocks },
   { id: "json", labelKey: "settings.tab.json", icon: Braces },
@@ -173,7 +128,7 @@ const SETTINGS_TABS: Array<{ id: SettingsTabId; labelKey: MessageKey; icon: type
 /** `config.language` — what the NPC answers in, mirroring the Rust side's
  * `npc_core::config::language_instruction`. Distinct from the display
  * language above it, which never leaves the browser. */
-const NPC_LANGUAGE_VALUES = ["auto", ...LANGS.map((l) => l.id)] as const;
+const NPC_LANGUAGE_VALUES = ["auto", "ja", "en", "zh"] as const;
 
 export function SettingsView() {
   const { t, lang, setLang } = useI18n();
@@ -210,7 +165,7 @@ export function SettingsView() {
 
   const npcLanguageOptions = [
     { value: "auto", label: t("settings.general.npcLanguage.auto") },
-    ...LANGS.map((l) => ({ value: l.id, label: l.label })),
+    ...LANGS.filter(l => ["ja", "en", "zh"].includes(l.id)).map((l) => ({ value: l.id, label: l.label })),
   ];
 
   return (
@@ -280,40 +235,7 @@ export function SettingsView() {
             </section>
           )}
 
-          {activeTab === "connection" && config && (
-            <section class="settings-section">
-              <div class="settings-section-head">
-                <h3>{t("settings.connection.title")}</h3>
-                <RestartBadge t={t} />
-              </div>
-              <ProviderCards t={t} config={config} mutate={mutate} />
-              <PresetCards t={t} config={config} mutate={mutate} />
-            </section>
-          )}
-
-          {activeTab === "tasks" && config && (
-            <section class="settings-section">
-              <div class="settings-section-head">
-                <h3>{t("settings.tasks.title")}</h3>
-                <RestartBadge t={t} />
-              </div>
-              <div class="settings-card">
-                <TaskRows t={t} config={config} mutate={mutate} />
-              </div>
-            </section>
-          )}
-
-          {activeTab === "network" && config && (
-            <section class="settings-section">
-              <div class="settings-section-head">
-                <h3>{t("settings.network.title")}</h3>
-                <RestartBadge t={t} />
-              </div>
-              <div class="settings-card">
-                <NetworkSettings t={t} config={config} mutate={mutate} />
-              </div>
-            </section>
-          )}
+          {activeTab === "connection" && config && <AiSettings config={config} mutate={mutate} />}
 
           {activeTab === "interpret" && (
             <section class="settings-section">
