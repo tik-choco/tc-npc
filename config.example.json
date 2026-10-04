@@ -3,8 +3,8 @@
   "api": {
     "base_url": "http://localhost:11434/v1",
     "api_key": "",
-    "model": "gpt-4o-mini",
-    "embedding_model": "text-embedding-3-small",
+    "model": "",
+    "embedding_model": "",
     "reasoning_effort": "none"
   },
   "providers": [
@@ -12,59 +12,58 @@
       "id": "default",
       "label": "既定",
       "base_url": "http://localhost:11434/v1",
-      "api_key": ""
+      "api_key": "",
+      "enabled": true,
+      "models": [
+        "chat-model",
+        "embedding-model"
+      ]
     },
     {
       "id": "vision",
       "label": "Vision",
-      "base_url": "https://api.openai.com/v1",
-      "api_key": ""
-    }
-  ],
-  "presets": [
-    {
-      "id": "default",
-      "label": "gpt-4o-mini",
-      "provider_id": "default",
-      "model": "gpt-4o-mini",
-      "reasoning_effort": "none"
+      "base_url": "http://localhost:8000/v1",
+      "api_key": "",
+      "enabled": true,
+      "models": [
+        "vision-model"
+      ]
     },
     {
-      "id": "embedding",
-      "label": "text-embedding-3-small",
-      "provider_id": "default",
-      "model": "text-embedding-3-small",
-      "reasoning_effort": ""
-    },
-    {
-      "id": "vision",
-      "label": "gpt-4o-mini (Vision)",
-      "provider_id": "vision",
-      "model": "gpt-4o-mini",
-      "reasoning_effort": ""
+      "id": "room",
+      "label": "Team",
+      "base_url": "mist-network://team-room",
+      "api_key": "",
+      "enabled": false,
+      "models": []
     }
   ],
-  "default_preset_id": "default",
   "tts": {
     "enabled": false,
     "base_url": "",
     "api_key": "",
     "model": "",
     "voice": "alloy",
-    "speed": 1.0,
+    "speed": 1,
     "max_len": 200,
-    "preset_id": ""
+    "model_ref": {
+      "provider_id": "default",
+      "model": "speech-model"
+    }
   },
   "stt": {
     "enabled": false,
     "base_url": "",
     "api_key": "",
-    "model": "whisper-1",
+    "model": "",
     "silence_duration": 1.5,
     "input_threshold": 0.01,
     "barge_in": true,
     "barge_in_factor": 2.5,
-    "preset_id": ""
+    "model_ref": {
+      "provider_id": "default",
+      "model": "transcription-model"
+    }
   },
   "talk": {
     "enabled": true,
@@ -83,7 +82,7 @@
       "forced_closure": true,
       "absence_timeout_secs": 300
     },
-    "preset_id": ""
+    "reasoning_effort": "none"
   },
   "memory": {
     "enabled": true,
@@ -100,21 +99,28 @@
       "max_facts": 20,
       "link_vision": true
     },
-    "preset_id": "",
-    "embedding_preset_id": "embedding"
+    "embedding_ref": {
+      "provider_id": "default",
+      "model": "embedding-model"
+    },
+    "reasoning_effort": "none"
   },
   "vision": {
     "enabled": false,
     "base_url": "",
     "api_key": "",
     "model": "",
-    "interval_seconds": 5.0,
+    "interval_seconds": 5,
     "capture_mode": "entire",
     "target_window_title": "",
     "system_prompt": "画面のスクリーンショットを簡潔に日本語で説明してください。",
     "debug_save": false,
     "person_detection": false,
-    "preset_id": "vision"
+    "model_ref": {
+      "provider_id": "vision",
+      "model": "vision-model"
+    },
+    "reasoning_effort": "none"
   },
   "speech": {
     "input_device": "",
@@ -126,18 +132,27 @@
     "enabled": false,
     "osc_address": "127.0.0.1:9000",
     "locations": [
-      { "name": "home", "x": 0.0, "y": 0.0, "heading": 0.0 }
+      {
+        "name": "home",
+        "x": 0,
+        "y": 0,
+        "heading": 0
+      }
     ],
     "routes": [
       {
         "name": "patrol",
         "loop": true,
         "waypoints": [
-          { "location": "home", "seconds": 3.0, "wait": true }
+          {
+            "location": "home",
+            "seconds": 3,
+            "wait": true
+          }
         ]
       }
     ],
-    "preset_id": ""
+    "reasoning_effort": "none"
   },
   "vrc": {
     "chatbox": false,
@@ -146,13 +161,24 @@
   "scheduler": {
     "enabled": false,
     "announcements": [
-      { "time": "09:00", "text": "おはようございます。", "chime_file": "", "volume": 1.0 },
+      {
+        "time": "09:00",
+        "text": "おはようございます。",
+        "chime_file": "",
+        "volume": 1
+      },
       {
         "time": "17:00",
         "text": "",
         "actions": [
-          { "kind": "action", "content": "原点に移動して" },
-          { "kind": "command", "text": "route patrol" }
+          {
+            "kind": "action",
+            "content": "原点に移動して"
+          },
+          {
+            "kind": "command",
+            "text": "route patrol"
+          }
         ]
       }
     ]
@@ -166,7 +192,7 @@
     "auto_reverse": true,
     "chatbox": false,
     "model": "",
-    "preset_id": ""
+    "reasoning_effort": "none"
   },
   "server": {
     "addr": "127.0.0.1:47950",
@@ -179,6 +205,11 @@
   "mist": {
     "enabled": false,
     "signaling_url": "",
-    "room_id": ""
+    "room_id": "",
+    "ai_base_url": "http://127.0.0.1:6478/v1"
+  },
+  "default_ref": {
+    "provider_id": "default",
+    "model": "chat-model"
   }
 }

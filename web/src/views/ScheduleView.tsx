@@ -26,15 +26,19 @@ import { useConfigDoc } from "../hooks/useConfigDoc";
 import { useI18n } from "../hooks/useI18n";
 import type { Lang, MessageKey, Translate } from "../lib/i18n";
 import { SaveChip } from "../components/SaveChip";
+import { SoundField } from "../components/SoundField";
 import {
   activateScheduleProfile,
   deleteScheduleProfile,
   exportScheduler,
+  getSounds,
   importScheduler,
   listScheduleProfiles,
+  revealSoundFolder,
   saveScheduleProfile,
   testAnnouncement,
   type ScheduleProfileSummary,
+  type SoundFile,
 } from "../lib/api";
 import type {
   AnnouncementEntry,
@@ -112,11 +116,14 @@ function defaultAction(kind: ScheduledActionKind): ScheduledActionEntry {
 function ActionRow({
   t,
   action,
+  sounds,
   onCommit,
   onDelete,
 }: {
   t: Translate;
   action: ScheduledActionEntry;
+  /** The sound library, for a `speak` action's chime picker. */
+  sounds: SoundFile[];
   onCommit: (next: ScheduledActionEntry) => void;
   onDelete: () => void;
 }) {
@@ -192,7 +199,19 @@ function ActionRow({
         {draft.kind === "speak" && (
           <>
             {textInput(draft.content ?? "", "content", t("schedule.text.placeholder"))}
-            {textInput(draft.chime_file ?? "", "chime_file", t("schedule.chime.placeholder"), "schedule-action-narrow")}
+            {/* Committed straight from the picker rather than through
+                `draft`: a select has no blur to wait for, and routing it via
+                the draft would leave the chime uncommitted until some other
+                field in the row happened to blur. */}
+            <SoundField
+              t={t}
+              label={t("schedule.field.chime")}
+              value={draft.chime_file ?? ""}
+              sounds={sounds}
+              onCommit={(chime_file) => onCommit({ ...draft, chime_file })}
+              class="schedule-action-narrow"
+              showLabel={false}
+            />
           </>
         )}
         {draft.kind === "raw" && (
@@ -228,6 +247,9 @@ interface AnnouncementRowProps {
   now: Date;
   /** Grey out the countdown when the whole scheduler is switched off. */
   schedulerEnabled: boolean;
+  /** `{data_dir}/sound/`'s contents, for the chime and BGM pickers. Loaded
+   *  once by the view and handed down rather than fetched per row. */
+  sounds: SoundFile[];
   onCommit: (patch: Partial<AnnouncementEntry>) => void;
   onCommitVolume: (volume: number) => void;
   onTest: (patch: {
@@ -306,6 +328,7 @@ function AnnouncementRow({
   entry,
   now,
   schedulerEnabled,
+  sounds,
   onCommit,
   onCommitVolume,
   onTest,
@@ -317,9 +340,11 @@ function AnnouncementRow({
 }: AnnouncementRowProps) {
   const [time, setTime] = useState(entry.time);
   const [text, setText] = useState(entry.text);
-  const [chimeFile, setChimeFile] = useState(entry.chime_file ?? "");
-  const [bgmFile, setBgmFile] = useState(entry.bgm_file ?? "");
   const [bgmEndTime, setBgmEndTime] = useState(entry.bgm_end_time ?? "");
+  // The chime/BGM pickers commit on change, so unlike the text fields above
+  // they read the saved entry directly instead of keeping a draft.
+  const chimeFile = entry.chime_file ?? "";
+  const bgmFile = entry.bgm_file ?? "";
   const [test, setTest] = useState<TestState>({ kind: "idle" });
   const volume = entry.volume ?? 1;
   // 0/omitted means "use scheduler.defaults.bgm_volume" (see config-types.ts).
@@ -340,10 +365,8 @@ function AnnouncementRow({
   useEffect(() => {
     setTime(entry.time);
     setText(entry.text);
-    setChimeFile(entry.chime_file ?? "");
-    setBgmFile(entry.bgm_file ?? "");
     setBgmEndTime(entry.bgm_end_time ?? "");
-  }, [entry.time, entry.text, entry.chime_file, entry.bgm_file, entry.bgm_end_time]);
+  }, [entry.time, entry.text, entry.bgm_end_time]);
 
   // The result chip clears itself; the timer lives in a ref so a second test
   // started before the first chip expires resets the countdown rather than
@@ -452,16 +475,13 @@ function AnnouncementRow({
       </div>
 
       <div class="schedule-row-sub">
-        <label class="schedule-chime-field">
-          <span class="schedule-field-label">{t("schedule.field.chime")}</span>
-          <input
-            type="text"
-            placeholder={t("schedule.chime.placeholder")}
-            value={chimeFile}
-            onInput={(e) => setChimeFile((e.target as HTMLInputElement).value)}
-            onBlur={() => onCommit({ chime_file: chimeFile || undefined })}
-          />
-        </label>
+        <SoundField
+          t={t}
+          label={t("schedule.field.chime")}
+          value={chimeFile}
+          sounds={sounds}
+          onCommit={(file) => onCommit({ chime_file: file || undefined })}
+        />
 
         <label class="schedule-volume-field">
           <span class="schedule-field-label">
@@ -488,16 +508,13 @@ function AnnouncementRow({
           <span class="schedule-field-label">BGM</span>
         </div>
         <div class="schedule-bgm-fields">
-          <label class="schedule-chime-field">
-            <span class="schedule-field-label">{t("schedule.field.bgmFile")}</span>
-            <input
-              type="text"
-              placeholder={t("schedule.bgm.placeholder")}
-              value={bgmFile}
-              onInput={(e) => setBgmFile((e.target as HTMLInputElement).value)}
-              onBlur={() => onCommit({ bgm_file: bgmFile || undefined })}
-            />
-          </label>
+          <SoundField
+            t={t}
+            label={t("schedule.field.bgmFile")}
+            value={bgmFile}
+            sounds={sounds}
+            onCommit={(file) => onCommit({ bgm_file: file || undefined })}
+          />
 
           <label class="schedule-volume-field">
             <span class="schedule-field-label">
@@ -552,6 +569,7 @@ function AnnouncementRow({
               key={index}
               t={t}
               action={action}
+              sounds={sounds}
               onCommit={(next) => updateActions((list) => void (list[index] = next))}
               onDelete={() => updateActions((list) => void list.splice(index, 1))}
             />
@@ -621,19 +639,16 @@ type SchedulerDefaults = NonNullable<SchedulerSection["defaults"]>;
 function SchedulerDefaultsSection({
   t,
   defaults,
+  sounds,
   onCommit,
 }: {
   t: Translate;
   defaults: SchedulerDefaults | undefined;
+  sounds: SoundFile[];
   onCommit: (patch: Partial<SchedulerDefaults>) => void;
 }) {
-  const [chimeFile, setChimeFile] = useState(defaults?.chime_file ?? "");
   const volume = defaults?.volume ?? 1;
   const bgmVolume = defaults?.bgm_volume ?? 1;
-
-  useEffect(() => {
-    setChimeFile(defaults?.chime_file ?? "");
-  }, [defaults?.chime_file]);
 
   return (
     <section class="schedule-defaults">
@@ -643,16 +658,13 @@ function SchedulerDefaultsSection({
       </div>
       <p class="schedule-defaults-hint">{t("schedule.defaults.hint")}</p>
       <div class="schedule-defaults-fields">
-        <label class="schedule-chime-field">
-          <span class="schedule-field-label">{t("schedule.defaults.chime")}</span>
-          <input
-            type="text"
-            placeholder={t("schedule.chime.placeholder")}
-            value={chimeFile}
-            onInput={(e) => setChimeFile((e.target as HTMLInputElement).value)}
-            onBlur={() => onCommit({ chime_file: chimeFile || undefined })}
-          />
-        </label>
+        <SoundField
+          t={t}
+          label={t("schedule.defaults.chime")}
+          value={defaults?.chime_file ?? ""}
+          sounds={sounds}
+          onCommit={(file) => onCommit({ chime_file: file || undefined })}
+        />
 
         <label class="schedule-volume-field">
           <span class="schedule-field-label">
@@ -856,6 +868,43 @@ function ScheduleProfilesSection({
   );
 }
 
+/**
+ * `{data_dir}/sound/`: what's in it, where it is, and a way to re-read it.
+ *
+ * Loaded once for the whole view and handed down, rather than fetched by each
+ * picker — every row offers the same library, and a page with a dozen
+ * announcements would otherwise issue a dozen identical requests.
+ *
+ * The re-read on window focus is what makes the 音声フォルダ button feel like
+ * part of the app: the operator clicks it, drops files in the file manager,
+ * and comes back — at which point the new files are already in the pickers,
+ * with no reload and no "refresh" step to remember. A directory listing is
+ * cheap enough that doing it on every focus costs nothing worth saving.
+ */
+function useSoundLibrary() {
+  const [sounds, setSounds] = useState<SoundFile[]>([]);
+  const [dir, setDir] = useState("");
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  const reload = useCallback(() => {
+    getSounds()
+      .then((res) => {
+        setSounds(res.sounds);
+        setDir(res.dir);
+        setLoadError(null);
+      })
+      .catch((err) => setLoadError(err instanceof Error ? err.message : String(err)));
+  }, []);
+
+  useEffect(() => {
+    reload();
+    window.addEventListener("focus", reload);
+    return () => window.removeEventListener("focus", reload);
+  }, [reload]);
+
+  return { sounds, dir, loadError, reload };
+}
+
 /** Save `data` as a downloaded JSON file — there is no shared "download a
  *  blob" helper in this codebase yet, so this is written from scratch. */
 function downloadJson(data: unknown, filename: string) {
@@ -879,6 +928,7 @@ export function ScheduleView({ speaking, onInterrupt }: { speaking: boolean; onI
   const [exporting, setExporting] = useState(false);
   const [importing, setImporting] = useState(false);
   const importInputRef = useRef<HTMLInputElement | null>(null);
+  const { sounds, dir: soundDir, loadError: soundLoadError, reload: reloadSounds } = useSoundLibrary();
 
   // Which row's テスト実行 button is showing 停止 right now — at most one,
   // since a scheduler test is a single global playback queue (see
@@ -924,6 +974,23 @@ export function ScheduleView({ speaking, onInterrupt }: { speaking: boolean; onI
       fn(current);
       section.defaults = current;
     });
+  }
+
+  /** Hand the sound folder to the OS file manager — the browser can't, so
+   *  the server does it (POST /api/sound/reveal). */
+  async function handleRevealSoundFolder() {
+    try {
+      await revealSoundFolder();
+      // Anything dropped in from here lands via the focus listener in
+      // useSoundLibrary; this covers the case where the folder was already
+      // open and focus never left the page.
+      reloadSounds();
+    } catch (err) {
+      setToast({
+        kind: "error",
+        message: `${t("sound.folder.error")}: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
   }
 
   async function handleExport() {
@@ -1005,6 +1072,16 @@ export function ScheduleView({ speaking, onInterrupt }: { speaking: boolean; onI
           <button
             type="button"
             class="btn btn-ghost btn-small"
+            onClick={() => void handleRevealSoundFolder()}
+            title={t("sound.folder.tooltip")}
+          >
+            <FolderOpen size={14} />
+            {t("sound.folder")}
+          </button>
+
+          <button
+            type="button"
+            class="btn btn-ghost btn-small"
             disabled={exporting}
             onClick={() => void handleExport()}
             title={t("schedule.export.tooltip")}
@@ -1039,9 +1116,28 @@ export function ScheduleView({ speaking, onInterrupt }: { speaking: boolean; onI
 
       <p class="schedule-hint">{t("schedule.hint")}</p>
 
+      {/* Where audio goes. Spelled out rather than left to the tooltip on the
+          button above: "which folder do chimes live in" is the first question
+          this tab raises, and the answer is a path only the server knows. */}
+      {/* Held back until the listing resolves: the sentence is about a path,
+          and rendering it with an empty one reads as "put your files in ". */}
+      {(soundLoadError !== null || soundDir !== "") && (
+        <p class="schedule-hint schedule-sound-hint">
+          {soundLoadError !== null
+            ? `${t("sound.loadError")}: ${soundLoadError}`
+            : t("sound.folder.hint", { dir: soundDir })}
+          {soundLoadError === null && sounds.length === 0 && ` — ${t("sound.empty")}`}
+        </p>
+      )}
+
       <ScheduleProfilesSection t={t} onChanged={reload} setToast={setToast} />
 
-      <SchedulerDefaultsSection t={t} defaults={scheduler.defaults} onCommit={(patch) => updateDefaults((d) => Object.assign(d, patch))} />
+      <SchedulerDefaultsSection
+        t={t}
+        defaults={scheduler.defaults}
+        sounds={sounds}
+        onCommit={(patch) => updateDefaults((d) => Object.assign(d, patch))}
+      />
 
       <NextUpSummary
         t={t}
@@ -1069,6 +1165,7 @@ export function ScheduleView({ speaking, onInterrupt }: { speaking: boolean; onI
               entry={entry}
               now={now}
               schedulerEnabled={scheduler.enabled ?? false}
+              sounds={sounds}
               onTest={(patch) => testAnnouncement({ index, ...patch })}
               isActive={activeTestIndex === index}
               onActivate={() => setActiveTestIndex(index)}

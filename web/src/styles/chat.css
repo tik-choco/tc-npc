@@ -356,6 +356,13 @@
   max-width: 100%;
 }
 
+/* `overflow: hidden` is for the 通訳 grow animation (ChatView's
+   `useGrowOnChange`): while a bubble is animating from its old size to the
+   one its new 通訳 block needs, the box is briefly smaller than its own
+   content, and without clipping that content would spill out of the
+   rounded corners for the length of the animation. Nothing else in a
+   bubble is meant to escape it — the hover copy button is a sibling, not a
+   child, precisely so it can hang outside the edge. */
 .chat-bubble {
   display: flex;
   flex-direction: column;
@@ -364,6 +371,7 @@
   border-radius: var(--radius-l);
   font-size: 0.9rem;
   line-height: 1.55;
+  overflow: hidden;
 }
 
 .chat-bubble-text {
@@ -433,18 +441,17 @@
 
 /* --- 通訳 ---------------------------------------------------------------- */
 
-/* 通訳 results normally render *attached* under the row whose original
-   text they translate (.chat-translation-attached, below) — the source
-   text already shows once in the bubble or system line above it, so the
-   attached block only needs to show the languages, not repeat it. This
-   dashed "orphan" bubble is the fallback for a translation that can't be
-   matched back to a source row: it still needs to show the original text
-   itself (.chat-translation-original) and is styled as a standalone
-   system surface rather than a speech bubble, so it reads as an
-   annotation next to the turn, not another speaker. Mirrors agent-speech's
-   transcript.css `.bubble--translation` treatment, using this app's own
-   tokens. The row/pill/text/pending rules further below are shared with
-   the attached case. */
+/* 通訳 results normally render *inside* the bubble whose text they
+   translate (.chat-translation-inline, below) — that bubble already shows
+   the original once, so the block under the rule only needs to carry the
+   languages, not repeat it. This dashed "orphan" bubble is the fallback
+   for a translation that can't be matched back to a source row: it still
+   needs to show the original text itself (.chat-translation-original) and
+   is styled as a standalone system surface rather than a speech bubble, so
+   it reads as an annotation next to the turn, not another speaker. Mirrors
+   agent-speech's transcript.css `.bubble--translation` treatment, using
+   this app's own tokens. The row/pill/text/pending rules further below are
+   shared with the in-bubble case. */
 .chat-bubble--translation {
   gap: var(--space-1);
   background: var(--surface-2);
@@ -489,10 +496,28 @@
   font-style: italic;
 }
 
+/* Each language arrives on its own frame, so a row is a new DOM node in an
+   otherwise unchanged list (they are keyed by language) — the mount
+   animation therefore plays once per language as it lands, and never
+   replays on the rows already there. It rides on top of the bubble's own
+   grow animation: the box opens to make room while the text fades up into
+   it. */
 .chat-translation-row {
   display: flex;
   align-items: baseline;
   gap: var(--space-2);
+  animation: chat-translation-row-in var(--dur) var(--ease-out) both;
+}
+
+@keyframes chat-translation-row-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 
 .chat-translation-lang-pill {
@@ -516,31 +541,46 @@
   font-size: 0.88rem;
 }
 
-/* 通訳 attached under the row that already shows the original (see
-   ChatView) — a sibling of .chat-turn-bubble inside .chat-turn-body. No
-   bubble surface here on
-   purpose: a fill or shadow would read as a second message, and the
-   original above already carries that weight. A single accent border
-   is enough to mark it as hanging off that row; it sits on whichever
-   edge the turn is aligned to (left for assistant/system, right for
-   user). */
-.chat-translation-attached {
+/* 通訳 inside the bubble that already shows the original (see ChatView's
+   ChatTurn) — the last child of .chat-bubble, under the message text. This
+   used to be a separate block hanging below the bubble with an accent
+   border down its outer edge; folding it in follows agent-speech, which
+   keeps an original and its translations on one surface. There is no
+   second surface here on purpose: a fill or shadow inside the bubble would
+   read as a message within a message, so a hairline rule is all that
+   separates the two. It is drawn from `currentColor` so the one rule works
+   on both bubble kinds — the assistant's text on --surface-2 and the
+   user's --on-primary on --primary. Rows stay left-aligned even in a
+   right-aligned user bubble, so each one starts where the original above
+   it starts. */
+.chat-translation-inline {
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
   max-width: 100%;
-  padding: 2px var(--space-3);
-  border-left: 2px solid var(--border-strong);
+  margin-top: var(--space-2);
+  padding-top: var(--space-2);
+  border-top: 1px solid color-mix(in srgb, currentColor 22%, transparent);
 }
 
-.chat-turn--user .chat-translation-attached {
-  border-left: none;
-  border-right: 2px solid var(--border-strong);
-  text-align: right;
+/* The pill's resting colors (--primary-soft on --primary) are all but
+   invisible against a user bubble, which is that same --primary. Inside
+   one, it is drawn from the bubble's own text color instead; the reversed
+   variant, which normally leans on --success, separates by weight of fill
+   rather than hue, with the ⇄ glyph and its tooltip carrying the meaning
+   as they already do everywhere else. */
+.chat-bubble--user .chat-translation-lang-pill {
+  background: color-mix(in srgb, var(--on-primary) 20%, transparent);
+  color: var(--on-primary);
 }
 
-.chat-turn--user .chat-translation-row {
-  flex-direction: row-reverse;
+.chat-bubble--user .chat-translation-lang-pill--reversed {
+  background: color-mix(in srgb, var(--on-primary) 38%, transparent);
+  color: var(--on-primary);
+}
+
+.chat-bubble--user .chat-translation-pending {
+  color: color-mix(in srgb, var(--on-primary) 75%, transparent);
 }
 
 /* --- System lines -------------------------------------------------------- */
@@ -572,6 +612,16 @@
    grows downward once expanded. */
 .chat-system-line--memory {
   align-items: flex-start;
+}
+
+/* An expanded memory renders as a real document (components/Markdown.tsx)
+   rather than one run of text. It follows the kind tag inside the same flex
+   child, and since the tag is inline and this is a block, the tag ends up on
+   a line of its own — which reads correctly here: it labels the document
+   under it. Collapsed entries never reach this rule; they render inline so
+   the clamp below still has inline content to clamp. */
+.chat-memory-md {
+  margin-top: var(--space-1);
 }
 
 .chat-system-clamp {

@@ -37,6 +37,17 @@
   color: var(--danger-text);
 }
 
+/* Replaces the 翻訳対象 hint line when the chosen mode/scope pair translates
+   nothing at all (通訳のみ + 出力 — see InterpretScopeField). Same red as the
+   panel's load error above, since it means the same thing to the reader:
+   this is not going to do what it looks like it does. */
+.field-hint.interpret-scope-warning {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--danger-text);
+}
+
 /* The three-option mode switch has to survive a 320px column: .segmented
    already scrolls horizontally if it overflows (see components.css), but
    wrapping to two rows reads better than a scroll hint in a strip this

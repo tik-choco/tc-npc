@@ -18,3 +18,9 @@ tracing = { workspace = true }
 async-trait = { workspace = true }
 cpal = "0.15"
 hound = "3.5"
+# mp3 chimes/BGM only (`wavio::decode_audio` keeps handling WAV with `hound`,
+# which is smaller and already here). `default-features = false` is what keeps
+# the rest of symphonia's codec/container matrix out of the build — enable a
+# format here and in `npc_core::sound::SOUND_EXTENSIONS` together, or the
+# picker offers files that fail at play time.
+symphonia = { version = "0.5", default-features = false, features = ["mp3"] }

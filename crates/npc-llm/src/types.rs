@@ -186,12 +186,6 @@ pub struct ChatRequest {
     pub reasoning_effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
-    /// Sampling temperature. Left unset by every conversational caller —
-    /// the endpoint's own default is the right one for dialogue — and set
-    /// only where sampling is actively unwanted, such as reading text off a
-    /// page (`api_llm_ocr`), where any creativity is text that wasn't there.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub temperature: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
 }
@@ -245,5 +239,20 @@ impl ChatResponse {
             .first()
             .and_then(|c| c.message.tool_calls.as_deref())
             .unwrap_or(&[])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chat_requests_never_serialize_temperature() {
+        let mut request = ChatRequest::new("raw-model", vec![]);
+        request.reasoning_effort = Some("none".into());
+        let wire = serde_json::to_value(request).unwrap();
+        assert!(wire.get("temperature").is_none());
+        assert_eq!(wire["model"], "raw-model");
+        assert_eq!(wire["reasoning_effort"], "none");
     }
 }

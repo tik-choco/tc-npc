@@ -81,7 +81,7 @@ async fn run_vision(ctx: ModuleCtx) -> anyhow::Result<()> {
 
     // 接続先・モデルの解決は npc-core の resolve_llm に一本化した(旧: vision.*
     // が空なら api.* にフォールバックする自前ロジック)。
-    let resolved = config.resolve_llm(LlmTask::Vision);
+    let resolved = config.resolve_llm(LlmTask::Vision)?;
     let model = resolved.model;
 
     let client = LlmClient::new(resolved.base_url, resolved.api_key)

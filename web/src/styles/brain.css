@@ -407,12 +407,17 @@
   color: var(--text);
 }
 
+/* Both memory panels render their document through <Markdown> now, so the
+   blank-line/list structure comes from the parse rather than from preserving
+   the source's own whitespace — `white-space: pre-wrap` here used to be what
+   kept a raw summary readable and would now just re-introduce the source
+   line breaks inside every rendered paragraph. Fenced code still keeps its
+   newlines; .md-pre sets its own `white-space`. */
 .brain-memory-short-text {
   margin: 0;
   font-size: 0.85rem;
   line-height: 1.6;
   color: var(--text);
-  white-space: pre-wrap;
   word-break: break-word;
 }
 

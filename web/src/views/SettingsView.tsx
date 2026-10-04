@@ -47,6 +47,7 @@ import { LANGS, type Lang, type MessageKey, type Translate } from "../lib/i18n";
 import { SaveChip } from "../components/SaveChip";
 import {
   InterpretModeField,
+  InterpretScopeField,
   InterpretSettings,
   readTranslation,
   translationUpdater,
@@ -333,6 +334,7 @@ export function SettingsView() {
                     NOT part of this form anymore — it moved to the タスク
                     tab's 通訳 row, alongside every other task's model. */}
                 <InterpretModeField translation={translation} update={update} />
+                <InterpretScopeField translation={translation} update={update} />
                 <InterpretSettings translation={translation} update={update} />
               </div>
             </section>

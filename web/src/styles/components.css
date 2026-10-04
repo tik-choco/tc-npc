@@ -380,6 +380,24 @@ select:disabled {
   outline-offset: 1px;
 }
 
+/* A control whose choice is currently inert — 通訳's 翻訳対象 while the mode
+   is off, say. The radios inside carry `disabled` themselves, so this only
+   has to say so visually: dim the whole track (keeping the active option
+   readable, since it is still what the config holds) and drop the hover
+   affordance that would otherwise promise a click that does nothing. */
+.segmented.is-disabled {
+  opacity: 0.5;
+}
+
+.segmented.is-disabled .segmented-option {
+  cursor: not-allowed;
+}
+
+.segmented.is-disabled .segmented-option:not(.is-active):hover {
+  background: none;
+  color: var(--text-muted);
+}
+
 /* --- Empty state ----------------------------------------------------------- */
 
 .empty-state {
@@ -455,4 +473,80 @@ select:disabled {
     opacity: 1;
     transform: translate(-50%, 0);
   }
+}
+
+/* --- Markdown -------------------------------------------------------------- */
+/* Rendered model-written text (components/Markdown.tsx). Everything is sized
+   in `em` and colored from `currentColor`, because this is always embedded in
+   something that has already set the type — a transcript system line, say —
+   and must read as that line's own text with formatting, not as a document
+   pasted into it. */
+
+.md {
+  min-width: 0;
+}
+
+.md > * {
+  margin: 0;
+}
+
+.md > * + * {
+  margin-top: var(--space-2);
+}
+
+/* Headings inside embedded text are structure within one row, not page
+   structure, so they are a styled paragraph carrying the level as data (see
+   Markdown.tsx). Deeper levels stop growing rather than shrinking below the
+   body text, which at this scale would just look like a mistake. */
+.md-heading {
+  font-weight: 700;
+}
+
+.md-heading[data-level="1"],
+.md-heading[data-level="2"] {
+  font-size: 1.08em;
+}
+
+.md-heading[data-level="3"] {
+  font-size: 1.02em;
+}
+
+.md ul,
+.md ol {
+  padding-left: 1.4em;
+}
+
+.md li + li {
+  margin-top: 2px;
+}
+
+.md a {
+  color: var(--primary);
+}
+
+.md-code,
+.md-pre {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.92em;
+}
+
+.md-code {
+  padding: 0.1em 0.35em;
+  border-radius: var(--radius-xs);
+  /* From currentColor so the same rule works on a muted system line and on
+     the primary fill of a user bubble, where a fixed surface token would
+     either vanish or punch a hole. */
+  background: color-mix(in srgb, currentColor 12%, transparent);
+}
+
+.md-pre {
+  padding: var(--space-2) var(--space-3);
+  overflow-x: auto;
+  border-radius: var(--radius-s);
+  background: color-mix(in srgb, currentColor 8%, transparent);
+  white-space: pre;
+}
+
+.md-pre code {
+  font: inherit;
 }

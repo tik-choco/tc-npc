@@ -18,6 +18,15 @@
 //!   conversation partner.
 //! * `assist` — normal conversation, with both sides subtitled.
 //!
+//! `config.translation.scope` then picks which halves of that actually get
+//! translated — `input` (heard speech only), `output` (the NPC's replies
+//! only) or `both`, the default and the only behaviour this module had before
+//! the setting existed. It is a separate axis from the mode on purpose: the
+//! mode decides whether the NPC answers, the scope decides what gets
+//! subtitled. Not every pairing does something — `interpret` + `output` asks
+//! for subtitles on replies that mode has already suppressed, and translates
+//! nothing — which the web UI warns about at the point of choosing.
+//!
 //! Like npc-scheduler this module is always spawned and re-reads its settings
 //! from [`npc_core::bus::msg::CONFIG_UPDATED`] on
 //! [`npc_core::bus::topic::CONFIG`], so the mode and target languages can be
@@ -31,7 +40,7 @@ mod langdetect;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use npc_core::config::TranslationMode;
+use npc_core::config::{TranslationMode, TranslationScope};
 use npc_core::{msg, topic, BusMessage, Config, Module, ModuleCtx};
 use tokio::sync::broadcast::error::RecvError;
 
@@ -50,8 +59,8 @@ impl Module for TranslateModule {
     }
 
     async fn run(self: Box<Self>, ctx: ModuleCtx) -> anyhow::Result<()> {
-        let engine = Arc::new(TranslationEngine::new(ctx.bus.clone(), &ctx.config));
-        log_mode(engine.mode(), &ctx.config);
+        let engine = Arc::new(TranslationEngine::new(ctx.bus.clone(), &ctx.config)?);
+        log_settings(&engine, &ctx.config);
 
         let mut rx = ctx.bus.subscribe();
 
@@ -78,11 +87,19 @@ impl Module for TranslateModule {
     }
 }
 
-fn log_mode(mode: TranslationMode, config: &Config) {
-    match mode {
+fn log_settings(engine: &TranslationEngine, config: &Config) {
+    let scope = engine.scope();
+    match engine.mode() {
         TranslationMode::Off => tracing::info!("npc-translate: mode=off, idling until config update"),
+        // Worth its own line rather than a footnote on the active log: this
+        // pairing is configured, valid, and translates nothing, so the log
+        // has to say so or it looks like a bug at the first utterance.
+        TranslationMode::Interpret if scope == TranslationScope::Output => tracing::warn!(
+            "npc-translate: scope=output with mode=interpret — the NPC does not reply in this mode, so nothing will be translated"
+        ),
         mode => tracing::info!(
             mode = ?mode,
+            scope = ?scope,
             source = %config.translation.source_language,
             targets = ?config.translation.target_languages(),
             "npc-translate: interpretation active"
@@ -98,7 +115,7 @@ fn handle_bus_message(engine: &Arc<TranslationEngine>, bus_msg: BusMessage) {
                     Ok(new_config) => {
                         engine.update_settings(&new_config);
                         tracing::info!("npc-translate: config updated");
-                        log_mode(engine.mode(), &new_config);
+                        log_settings(engine, &new_config);
                     }
                     Err(err) => {
                         tracing::warn!(error = %err, "npc-translate: failed to deserialize updated config, keeping current settings");
@@ -107,14 +124,24 @@ fn handle_bus_message(engine: &Arc<TranslationEngine>, bus_msg: BusMessage) {
             }
         }
         t if t == topic::SENSE => {
-            if bus_msg.env.r#type == msg::SPEECH && !engine.mode().is_off() {
+            // The input half. `scope` is the second gate: `output` means the
+            // user only wants the NPC's replies subtitled, so heard speech
+            // is left alone even though the mode is on.
+            if bus_msg.env.r#type == msg::SPEECH
+                && !engine.mode().is_off()
+                && engine.scope().translates_input()
+            {
                 spawn_translation(engine, Source::User, &bus_msg.env.payload);
             }
         }
         t if t == topic::CHAT => {
-            // Only `assist` subtitles the NPC's own replies; in `interpret`
-            // mode npc-talk isn't answering in the first place.
-            if bus_msg.env.r#type == msg::CHAT_RESPONSE && engine.mode() == TranslationMode::Assist {
+            // The output half. Only `assist` subtitles the NPC's own replies
+            // — in `interpret` mode npc-talk isn't answering in the first
+            // place — and only when `scope` asks for that half.
+            if bus_msg.env.r#type == msg::CHAT_RESPONSE
+                && engine.mode() == TranslationMode::Assist
+                && engine.scope().translates_output()
+            {
                 spawn_translation(engine, Source::Agent, &bus_msg.env.payload);
             }
         }

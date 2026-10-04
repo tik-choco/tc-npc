@@ -95,12 +95,13 @@ pub async fn api_put_config(State(state): State<AppState>, body: String) -> Resp
 
     // Validate the merged document actually deserializes as a Config before
     // persisting it, so a malformed PUT can't brick the next startup.
-    let new_config: npc_core::Config = match serde_json::from_value(incoming.clone()) {
+    let mut new_config: npc_core::Config = match serde_json::from_value(incoming.clone()) {
         Ok(c) => c,
         Err(err) => return error_response(StatusCode::BAD_REQUEST, format!("invalid config: {err}")),
     };
 
-    let pretty = match serde_json::to_string_pretty(&incoming) {
+    new_config.migrate_llm_config();
+    let pretty = match serde_json::to_string_pretty(&new_config) {
         Ok(s) => s,
         Err(err) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
     };
@@ -945,7 +946,10 @@ pub async fn api_llm_ocr(State(state): State<AppState>, body: String) -> Respons
         return error_response(StatusCode::BAD_REQUEST, "imageDataUrl is empty".to_string());
     }
 
-    let resolved = state.current_config().resolve_llm(npc_core::LlmTask::Vision);
+    let resolved = match state.current_config().resolve_llm(npc_core::LlmTask::Vision) {
+        Ok(resolved) => resolved,
+        Err(err) => return error_response(StatusCode::PRECONDITION_FAILED, err.to_string()),
+    };
     if resolved.base_url.trim().is_empty() {
         // Not a failure of this request: the 画像認識 task simply has no
         // connection configured, and the UI gates on the same condition.
@@ -968,10 +972,7 @@ pub async fn api_llm_ocr(State(state): State<AppState>, body: String) -> Respons
         npc_llm::ContentPart::text(instruction),
         npc_llm::ContentPart::image_data_url(req.image_data_url),
     ])];
-    let mut chat = npc_llm::ChatRequest::new(&resolved.model, messages);
-    // Transcription, not composition — sampling here only invents text that
-    // isn't on the page.
-    chat.temperature = Some(0.0);
+    let chat = npc_llm::ChatRequest::new(&resolved.model, messages);
 
     match client.chat(chat).await {
         Ok(resp) => {
@@ -1006,7 +1007,10 @@ pub async fn api_llm_transcribe(
         return error_response(StatusCode::BAD_REQUEST, "empty request body".to_string());
     }
 
-    let resolved = state.current_config().resolve_llm(npc_core::LlmTask::Stt);
+    let resolved = match state.current_config().resolve_llm(npc_core::LlmTask::Stt) {
+        Ok(resolved) => resolved,
+        Err(err) => return error_response(StatusCode::PRECONDITION_FAILED, err.to_string()),
+    };
     if resolved.base_url.trim().is_empty() {
         return error_response(
             StatusCode::PRECONDITION_FAILED,
@@ -1110,6 +1114,65 @@ pub async fn api_delete_sprite(
         }
         Ok(false) => error_response(StatusCode::NOT_FOUND, format!("sprite not found: {file}")),
         Err(err) => error_response(sprite_error_status(&err), err.to_string()),
+    }
+}
+
+// ---------------------------------------------------------------------
+// /api/sound — the local chime/BGM folder
+// ---------------------------------------------------------------------
+
+/// `GET /api/sound`: every playable file in `{data_dir}/sound/`, plus the
+/// folder's absolute path.
+///
+/// The third folder-is-the-library listing, after VRM and sprites, and the
+/// one with no upload counterpart: a chime is picked far more often than it
+/// is added, and [`api_reveal_sound_folder`] covers adding one by putting the
+/// folder itself in front of the operator. `dir` is what that button needs to
+/// label itself, and what the 予定 tab shows so a hand-placed file has a
+/// documented destination.
+pub async fn api_list_sound(State(state): State<AppState>) -> Response {
+    match npc_core::list_sounds(&state.ctx.data_dir) {
+        Ok(sounds) => Json(json!({
+            "sounds": sounds,
+            "dir": npc_core::sound_dir(&state.ctx.data_dir),
+        }))
+        .into_response(),
+        Err(err) => error_response(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+    }
+}
+
+/// `POST /api/sound/reveal`: open `{data_dir}/sound/` in the OS file manager.
+///
+/// The browser can't open a local folder, and the server is on the operator's
+/// own machine — so "押したらフォルダが開く" has to be done here. There is no
+/// path parameter on purpose: the one folder this can ever open is a
+/// constant, so no request can steer it somewhere else.
+///
+/// The folder is created first, so the button works on an install that has
+/// never had a sound in it rather than failing with "no such directory".
+pub async fn api_reveal_sound_folder(State(state): State<AppState>) -> Response {
+    let dir = npc_core::sound_dir(&state.ctx.data_dir);
+    if let Err(err) = std::fs::create_dir_all(&dir) {
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to create {}: {err}", dir.display()),
+        );
+    }
+
+    // `open::that` spawns a file manager and waits for the handoff, which is
+    // not something to do on a runtime worker.
+    let target = dir.clone();
+    let opened = tokio::task::spawn_blocking(move || open::that(&target)).await;
+    match opened {
+        Ok(Ok(())) => Json(json!({ "ok": true, "dir": dir })).into_response(),
+        Ok(Err(err)) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to open {}: {err}", dir.display()),
+        ),
+        Err(err) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to run the open task: {err}"),
+        ),
     }
 }
 
@@ -1576,6 +1639,69 @@ pub async fn api_chat_history(State(state): State<AppState>, Query(params): Quer
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn room_model_reaches_the_local_serve_api_without_temperature_or_secrets() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = Vec::new();
+            let (head, body) = loop {
+                let mut buffer = [0u8; 4096];
+                let read = socket.read(&mut buffer).await.unwrap();
+                assert!(read > 0);
+                bytes.extend_from_slice(&buffer[..read]);
+                if let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let head = String::from_utf8(bytes[..end].to_vec()).unwrap();
+                    let length: usize = head
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse().unwrap())
+                        })
+                        .unwrap();
+                    if bytes.len() >= end + 4 + length {
+                        let body: Value =
+                            serde_json::from_slice(&bytes[end + 4..end + 4 + length]).unwrap();
+                        break (head, body);
+                    }
+                }
+            };
+            let reply = r#"{"choices":[{"message":{"role":"assistant","content":"ok"}}]}"#;
+            socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", reply.len(), reply).as_bytes()).await.unwrap();
+            (head, body)
+        });
+        let mut config = npc_core::Config {
+            providers: vec![npc_core::ProviderConfig {
+                id: "room".into(),
+                base_url: "mist-network://team".into(),
+                api_key: "must-not-leak".into(),
+                ..Default::default()
+            }],
+            default_ref: Some(npc_core::ModelRef {
+                provider_id: "room".into(),
+                model: "raw-model".into(),
+            }),
+            ..Default::default()
+        };
+        config.mist.ai_base_url = format!("http://{address}/v1");
+        let resolved = config.resolve_llm(npc_core::LlmTask::Talk).unwrap();
+        let client = npc_llm::LlmClient::new(resolved.base_url, resolved.api_key)
+            .with_reasoning_effort(resolved.reasoning_effort);
+        client
+            .chat(npc_llm::ChatRequest::new(resolved.model, vec![]))
+            .await
+            .unwrap();
+        let (head, body) = server.await.unwrap();
+        assert!(head.starts_with("POST /v1/chat/completions HTTP/1.1"));
+        assert!(!head.to_ascii_lowercase().contains("authorization:"));
+        assert_eq!(body["model"], "raw-model");
+        assert_eq!(body["reasoning_effort"], "none");
+        assert!(body.get("temperature").is_none());
+    }
+
     #[test]
     fn restore_masked_secrets_replaces_placeholder_only() {
         let mut incoming = json!({"api": {"api_key": "***", "model": "gpt-4o-mini"}});
@@ -1622,6 +1748,7 @@ mod tests {
             label: "P1".to_string(),
             base_url: "http://p1".to_string(),
             api_key: "sk-provider".to_string(),
+            ..Default::default()
         });
         assert_eq!(resolve_probe_api_key(Some("p1"), Some("api"), "***", &config), "sk-provider");
     }

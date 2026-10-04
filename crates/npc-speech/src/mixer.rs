@@ -9,12 +9,12 @@
 //! `playback.rs` never has to know BGM mixing happened at all.
 
 use crate::resample::{downmix_to_mono, resample_linear};
-use crate::wavio::{decode_wav, encode_wav_i16};
+use crate::wavio::{decode_audio, encode_wav_i16};
 
 /// Background-music parameters for [`mix_announcement`], already read from
 /// disk.
 pub struct BgmMix {
-    /// Raw wav file bytes.
+    /// Raw audio file bytes, in any format [`decode_audio`] handles.
     pub bytes: Vec<u8>,
     /// Resolved linear gain (already defaulted upstream — no further "0
     /// means use a default" logic applies here).
@@ -40,6 +40,11 @@ const FADE_SECONDS: f32 = 2.0;
 /// with ducking + fade-out, and re-encode to WAV bytes ready to hand to the
 /// playback queue as one clip.
 ///
+/// `tts_wav` is WAV whenever it really is synthesized speech, but the chime
+/// path reuses this function purely for its volume-scaling — and a chime is
+/// an operator-supplied file — so both inputs go through
+/// [`decode_audio`] rather than assuming WAV.
+///
 /// Behavior (see the module doc for the full spec this ports):
 /// - No BGM: the TTS is simply scaled by `volume`.
 /// - With BGM: the BGM plays under the TTS at `bgm.volume`, ducked to half
@@ -55,14 +60,14 @@ const FADE_SECONDS: f32 = 2.0;
 /// - The TTS itself is always played at full presence, scaled only by
 ///   `volume` — it is never ducked or faded.
 pub fn mix_announcement(tts_wav: &[u8], volume: f32, bgm: Option<BgmMix>) -> anyhow::Result<Vec<u8>> {
-    let (tts_raw, tts_rate, tts_channels) = decode_wav(tts_wav)?;
+    let (tts_raw, tts_rate, tts_channels) = decode_audio(tts_wav)?;
     let tts_mono = if tts_channels > 1 { downmix_to_mono(&tts_raw, tts_channels) } else { tts_raw };
     let tts_len = tts_mono.len();
 
     let output: Vec<f32> = match bgm {
         None => tts_mono.iter().map(|s| (s * volume).clamp(-1.0, 1.0)).collect(),
         Some(bgm) => {
-            let (bgm_raw, bgm_rate, bgm_channels) = decode_wav(&bgm.bytes)?;
+            let (bgm_raw, bgm_rate, bgm_channels) = decode_audio(&bgm.bytes)?;
             let bgm_mono_src = if bgm_channels > 1 { downmix_to_mono(&bgm_raw, bgm_channels) } else { bgm_raw };
             // Resampled onto the TTS's sample clock so both buffers can be
             // indexed by the same `i` for the rest of this function.
@@ -156,6 +161,9 @@ fn parse_mmss(s: &str) -> Option<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Assertions read the mixer's own WAV output, so they decode it as the
+    // WAV it is rather than through `decode_audio`'s sniffing.
+    use crate::wavio::decode_wav;
 
     // -------------------------------------------------------------
     // mix_announcement

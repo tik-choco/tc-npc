@@ -81,7 +81,7 @@ impl Module for ActionModule {
         let autopilot = Autopilot::new(navigator.clone());
         // Resolved once at startup, mirroring the pre-preset behavior (no
         // hot-reload for the action LLM connection itself).
-        let resolved_llm = config.resolve_llm(npc_core::LlmTask::Action);
+        let resolved_llm = config.resolve_llm(npc_core::LlmTask::Action)?;
         let llm = LlmClient::new(resolved_llm.base_url.clone(), resolved_llm.api_key.clone())
             .with_reasoning_effort(resolved_llm.reasoning_effort.clone());
         let static_system_prompt = llm_action::build_static_system_prompt(&config.language);

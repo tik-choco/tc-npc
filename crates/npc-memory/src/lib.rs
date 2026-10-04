@@ -107,8 +107,8 @@ impl Module for MemoryModule {
         // resolved independently; a second `LlmClient` is only built when
         // they actually differ, so the common case (same provider, as with
         // every pre-preset config) still shares one client/connection pool.
-        let resolved_chat = cfg.resolve_llm(npc_core::LlmTask::Memory);
-        let resolved_embedding = cfg.resolve_llm(npc_core::LlmTask::Embedding);
+        let resolved_chat = cfg.resolve_llm(npc_core::LlmTask::Memory)?;
+        let resolved_embedding = cfg.resolve_llm(npc_core::LlmTask::Embedding)?;
         let llm = Arc::new(
             LlmClient::new(resolved_chat.base_url.clone(), resolved_chat.api_key.clone())
                 .with_reasoning_effort(resolved_chat.reasoning_effort.clone()),

@@ -15,7 +15,11 @@
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import type { RefObject } from "preact";
 
-const NEAR_BOTTOM_PX = 120;
+/** How close to the bottom edge still counts as "following the live edge".
+ *  Exported because anything else that scrolls one of these containers has to
+ *  agree on where the follow stops — see ChatView's `followGrowth`, which
+ *  keeps the transcript pinned while a bubble animates taller. */
+export const NEAR_BOTTOM_PX = 120;
 
 export interface AutoScroll {
   /** Attach to the scrolling container. */
