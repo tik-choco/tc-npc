@@ -198,7 +198,7 @@ export function InterpretScopeField({ translation, update, compact }: InterpretF
 
 /** Everything except mode: source/target/target2 languages, context size,
  *  auto_reverse, chatbox. Model selection is not part of this form — it
- *  moved to 設定 › タスク's 通訳 row (lib/llm-config.ts's per-task preset
+ *  moved to 設定 › タスク's 通訳 row (lib/llm-config.ts's per-task ModelRef
  *  assignment), which both call sites (this tab and the チャット sidebar's
  *  通訳 panel) already point users at implicitly since neither ever showed a
  *  タスク-tab shortcut here — see SettingsView.tsx's 通訳 tab comment. */

@@ -11,12 +11,14 @@
 // are typed as Record<MessageKey, string> and the build fails on a key that
 // is added to one language but forgotten in another.
 
-export type Lang = "ja" | "en" | "zh";
+export type Lang = "ja" | "en" | "zh" | "zh-CN" | "zh-TW";
 
 export const LANGS: Array<{ id: Lang; label: string }> = [
   { id: "ja", label: "日本語" },
   { id: "en", label: "English" },
   { id: "zh", label: "中文" },
+  { id: "zh-CN", label: "简体中文" },
+  { id: "zh-TW", label: "繁體中文" },
 ];
 
 const LANG_KEY = "tc-npc:lang";
@@ -1924,7 +1926,7 @@ const zh: Record<MessageKey, string> = {
   "picker.count": "已获取 {count} 条",
 };
 
-const DICTS: Record<Lang, Record<MessageKey, string>> = { ja, en, zh };
+const DICTS: Record<Lang, Record<MessageKey, string>> = { ja, en, zh, "zh-CN": zh, "zh-TW": zh };
 
 export type MessageParams = Record<string, string | number>;
 export type Translate = (key: MessageKey, params?: MessageParams) => string;
@@ -1939,7 +1941,7 @@ export function translate(lang: Lang, key: MessageKey, params?: MessageParams): 
 }
 
 function isLang(value: unknown): value is Lang {
-  return value === "ja" || value === "en" || value === "zh";
+  return value === "ja" || value === "en" || value === "zh" || value === "zh-CN" || value === "zh-TW";
 }
 
 /**

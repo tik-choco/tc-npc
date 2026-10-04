@@ -1,257 +1,114 @@
-// Provider/preset config model shared by the AI settings UI (SettingsView.tsx
-// and friends). Mirrors the shape the Rust side owns (see
-// tc-docs/drafts/llm-settings-common-v1.md §2 for the design this ports):
-// `providers[]` is "where to connect", `presets[]` is "how to call it" (a
-// model + reasoning effort bound to a provider), and each task section
-// (talk/memory/vision/action/translation/tts/stt, plus memory's embedding
-// slot) stores only a `preset_id` — empty means "follow default_preset_id".
-//
-// This module is the single source of truth for reading/resolving/mutating
-// that shape so the settings view and any card-list UI agree on semantics.
-// All mutation helpers go through the `Mutate` callback from useConfigDoc and
-// always spread the existing section/array before patching, so fields this
-// module doesn't know about survive the round-trip.
+// REST owns config and credentials; mistai owns ModelRef semantics.
+import { emptyLlmConfig, isModelRef, migrateSharedLlmConfig, presetIdToRef,
+  resolveModel, providerKind, createRoomProvider,
+  type ModelRefV1, type SharedLlmConfigV1 } from "@tik-choco/mistai/llm-config";
 import type { ConfigDocument } from "./types";
 import type { MessageKey } from "./i18n";
-import type { ProviderEntry, PresetEntry } from "./config-types";
+import type { ModelRef, ProviderEntry, PresetEntry } from "./config-types";
 
 export type Mutate = (updater: (draft: ConfigDocument) => void) => void;
-
-export type LlmTaskId =
-  | "talk"
-  | "memory"
-  | "embedding"
-  | "vision"
-  | "action"
-  | "translation"
-  | "tts"
-  | "stt";
-
-/** One row of the タスク tab: which config section/field it reads its
- * preset assignment from, and the i18n keys for its label/tooltip. */
-export interface LlmTaskDef {
-  id: LlmTaskId;
-  /** config section key. `embedding` also points at "memory" (a second
-   * field on the same section, not a section of its own). */
-  section: string;
-  /** Field name within that section. */
-  field: "preset_id" | "embedding_preset_id";
-  labelKey: MessageKey;
-  tipKey: MessageKey;
-}
-
-/** Single source of truth for the タスク tab's row order. */
-export const LLM_TASKS: LlmTaskDef[] = [
-  { id: "talk", section: "talk", field: "preset_id", labelKey: "task.talk", tipKey: "task.talk.tip" },
-  { id: "memory", section: "memory", field: "preset_id", labelKey: "task.memory", tipKey: "task.memory.tip" },
-  {
-    id: "embedding",
-    section: "memory",
-    field: "embedding_preset_id",
-    labelKey: "task.embedding",
-    tipKey: "task.embedding.tip",
-  },
-  { id: "vision", section: "vision", field: "preset_id", labelKey: "task.vision", tipKey: "task.vision.tip" },
-  { id: "action", section: "action", field: "preset_id", labelKey: "task.action", tipKey: "task.action.tip" },
-  {
-    id: "translation",
-    section: "translation",
-    field: "preset_id",
-    labelKey: "task.translation",
-    tipKey: "task.translation.tip",
-  },
-  { id: "tts", section: "tts", field: "preset_id", labelKey: "task.tts", tipKey: "task.tts.tip" },
-  { id: "stt", section: "stt", field: "preset_id", labelKey: "task.stt", tipKey: "task.stt.tip" },
-];
-
-function taskDef(task: LlmTaskId): LlmTaskDef | undefined {
-  return LLM_TASKS.find((t) => t.id === task);
-}
-
-function section<T>(config: ConfigDocument | null, key: string): T {
-  return (config?.[key] as T | undefined) ?? ({} as T);
-}
-
-// --- Reads -------------------------------------------------------------
-
+export type LlmTaskId = "talk" | "memory" | "embedding" | "vision" | "action" | "translation" | "tts" | "stt";
+export const LLM_TASKS: { id: LlmTaskId; section: string; field: string; labelKey: MessageKey; tipKey: MessageKey }[] =
+  ["talk", "memory", "embedding", "vision", "action", "translation", "tts", "stt"].map(id => ({
+    id: id as LlmTaskId, section: id === "embedding" ? "memory" : id,
+    field: id === "embedding" ? "embedding_ref" : "model_ref",
+    labelKey: `task.${id}` as MessageKey, tipKey: `task.${id}.tip` as MessageKey,
+  }));
 export function readProviders(config: ConfigDocument | null): ProviderEntry[] {
-  const list = config?.providers;
-  return Array.isArray(list) ? (list as ProviderEntry[]) : [];
+  return Array.isArray(config?.providers) ? config.providers as ProviderEntry[] : [];
 }
-
-export function readPresets(config: ConfigDocument | null): PresetEntry[] {
-  const list = config?.presets;
-  return Array.isArray(list) ? (list as PresetEntry[]) : [];
+export function fromRef(value: unknown): ModelRefV1 | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const ref = value as ModelRef;
+  const converted = { providerId: ref.provider_id, model: ref.model };
+  return isModelRef(converted) ? converted : undefined;
 }
-
-export function readDefaultPresetId(config: ConfigDocument | null): string {
-  const id = config?.default_preset_id;
-  return typeof id === "string" ? id : "";
+export function toRef(ref?: ModelRefV1): ModelRef | undefined {
+  return ref ? { provider_id: ref.providerId, model: ref.model } : undefined;
 }
-
-/** Look up a preset by id. `presetId === ""` means "follow the default
- * preset" — this resolves default_preset_id instead. Returns null if the
- * (possibly resolved) id doesn't match any preset, including a dangling
- * default_preset_id. */
-export function resolvePreset(config: ConfigDocument | null, presetId: string): PresetEntry | null {
-  const id = presetId || readDefaultPresetId(config);
-  if (!id) return null;
-  return readPresets(config).find((p) => p.id === id) ?? null;
+export function sharedConfig(config: ConfigDocument | null): SharedLlmConfigV1 {
+  const value = emptyLlmConfig();
+  value.providers = readProviders(config).map(p => ({
+    id: p.id, label: p.label || p.id, baseUrl: p.base_url ?? "", apiKey: p.api_key ?? "",
+    enabled: p.enabled, models: p.models, modelsFetchedAt: p.models_fetched_at,
+  }));
+  value.defaultModel = fromRef(config?.default_ref);
+  const presets = Array.isArray(config?.presets) ? config.presets as PresetEntry[] : [];
+  value.presets = presets.map(p => ({ id: p.id, label: p.label || p.id,
+    providerId: p.provider_id ?? "", model: p.model ?? "", reasoningEffort: p.reasoning_effort }));
+  value.defaultPresetId = typeof config?.default_preset_id === "string" ? config.default_preset_id : "";
+  const mist = config?.mist as Record<string, unknown> | undefined;
+  value.network.roomId = typeof mist?.room_id === "string" ? mist.room_id : "";
+  return value;
 }
-
-export function providerOf(config: ConfigDocument | null, preset: PresetEntry | null): ProviderEntry | null {
-  if (!preset?.provider_id) return null;
-  return readProviders(config).find((p) => p.id === preset.provider_id) ?? null;
+export function writeShared(draft: ConfigDocument, value: SharedLlmConfigV1): void {
+  const old = readProviders(draft);
+  draft.providers = value.providers.map(p => ({ ...old.find(o => o.id === p.id),
+    id: p.id, label: p.label, base_url: p.baseUrl, api_key: p.apiKey,
+    enabled: p.enabled, models: p.models, models_fetched_at: p.modelsFetchedAt,
+  }));
+  draft.default_ref = toRef(value.defaultModel);
 }
-
-/** The raw assignment stored on a task's section. `""` means "follow the
- * default preset" and is returned as-is (not resolved) — callers that need
- * the effective preset should use `resolveTaskPreset`. */
-export function taskPresetId(config: ConfigDocument | null, task: LlmTaskId): string {
-  const def = taskDef(task);
-  if (!def) return "";
-  const sec = section<Record<string, unknown>>(config, def.section);
-  const value = sec[def.field];
-  return typeof value === "string" ? value : "";
+export function taskRef(config: ConfigDocument | null, task: LlmTaskId): ModelRefV1 | undefined {
+  const def = LLM_TASKS.find(t => t.id === task);
+  const section = config?.[def?.section ?? ""] as Record<string, unknown> | undefined;
+  return fromRef(section?.[def?.field ?? ""]);
 }
-
-/** The preset a task actually uses right now: its own assignment, or the
- * default preset if it has none. */
-export function resolveTaskPreset(config: ConfigDocument | null, task: LlmTaskId): PresetEntry | null {
-  return resolvePreset(config, taskPresetId(config, task));
+export function setTaskRef(draft: ConfigDocument, task: LlmTaskId, ref?: ModelRefV1): void {
+  const def = LLM_TASKS.find(t => t.id === task);
+  if (!def) return;
+  const section = (draft[def.section] ?? {}) as Record<string, unknown>;
+  draft[def.section] = { ...section, [def.field]: toRef(ref) };
 }
-
-/** Display label for a preset card: its own label, falling back to the
- * model name, falling back to the id (a preset always has one of the
- * three non-empty). */
-export function presetLabel(preset: PresetEntry): string {
-  return preset.label?.trim() || preset.model?.trim() || preset.id;
+export function resolveTaskModel(config: ConfigDocument | null, task: LlmTaskId) {
+  return config ? resolveModel(sharedConfig(config), taskRef(config, task)) : null;
 }
-
-/** Display label for a provider card: its own label, falling back to the id. */
-export function providerLabel(provider: ProviderEntry): string {
-  return provider.label?.trim() || provider.id;
-}
-
-/** Smallest `${prefix}N` (N starting at 1) not already present in
- * `existing` — deterministic (no Date.now/Math.random) so tests and
- * optimistic UI updates stay predictable. */
-export function newId(prefix: string, existing: string[]): string {
-  const used = new Set(existing);
-  let n = 1;
-  while (used.has(`${prefix}${n}`)) n++;
-  return `${prefix}${n}`;
-}
-
-/** Badges to show on a preset card: "既定" if it IS the default preset
- * (exact id match against default_preset_id — a task following the default
- * via "" does not itself make this preset "the default"), plus one badge
- * per task whose *effective* preset (see resolveTaskPreset) is this one —
- * which also covers tasks that get here by following the default. */
-export function presetBadgeKeys(config: ConfigDocument | null, presetId: string): MessageKey[] {
-  const keys: MessageKey[] = [];
-  if (presetId && presetId === readDefaultPresetId(config)) {
-    keys.push("llm.badge.default");
-  }
+// Consuming legacy IDs once allows clearing an assignment without remigration.
+// Unedited fields and historical preset data survive the REST round trip.
+export function migrateConfigDocument(draft: ConfigDocument): boolean {
+  const before = JSON.stringify(draft);
+  const shared = sharedConfig(draft);
+  const sharedChanged = migrateSharedLlmConfig(shared).changed;
   for (const task of LLM_TASKS) {
-    if (resolveTaskPreset(config, task.id)?.id === presetId) keys.push(task.labelKey);
+    const section = draft[task.section] as Record<string, unknown> | undefined;
+    const legacyKey = task.id === "embedding" ? "embedding_preset_id" : "preset_id";
+    const id = section?.[legacyKey];
+    if (typeof id !== "string") continue;
+    if (!fromRef(section?.[task.field]) && id) {
+      const previous = shared.presets.find(p => p.id === id);
+      const ref = presetIdToRef(shared, id) ?? (previous ? undefined : { providerId: `legacy:${id}`, model: id });
+      setTaskRef(draft, task.id, ref);
+      const next = draft[task.section] as Record<string, unknown>;
+      const preset = shared.presets.find(p => p.id === id);
+      if (task.id !== "embedding" && !next.reasoning_effort && preset?.reasoningEffort)
+        next.reasoning_effort = preset.reasoningEffort;
+    }
+    delete (draft[task.section] as Record<string, unknown>)[legacyKey];
   }
-  return keys;
-}
-
-/** How many presets currently point at this provider — used to warn before
- * deleting a provider that's still in use. */
-export function presetCountForProvider(config: ConfigDocument | null, providerId: string): number {
-  return readPresets(config).filter((p) => p.provider_id === providerId).length;
-}
-
-// --- Writes --------------------------------------------------------------
-// All mutation goes through `mutate` (from useConfigDoc), which hands us a
-// deep-cloned draft to edit in place; the caller doesn't see the result
-// directly, so every helper below is fire-and-forget from its perspective.
-
-/** Clears default_preset_id and any task's preset assignment that points at
- * one of `removedIds`, so deleting a preset/provider never leaves a
- * dangling reference behind (it falls back to "" = follow default). */
-function pruneDanglingPresetRefs(draft: ConfigDocument, removedIds: Set<string>): void {
-  if (typeof draft.default_preset_id === "string" && removedIds.has(draft.default_preset_id)) {
-    draft.default_preset_id = "";
-  }
-  for (const task of LLM_TASKS) {
-    const current = draft[task.section] as Record<string, unknown> | undefined;
-    if (!current) continue;
-    const value = current[task.field];
-    if (typeof value === "string" && removedIds.has(value)) {
-      draft[task.section] = { ...current, [task.field]: "" };
+  if (sharedChanged) writeShared(draft, shared);
+  if (typeof draft.default_preset_id === "string") delete draft.default_preset_id;
+  const mist = draft.mist as Record<string, unknown> | undefined;
+  if (mist?.room_id) {
+    const room = shared.providers.find(p => providerKind(p) === "room" && p.baseUrl === `mist-network://${mist.room_id}`);
+    const provider = room && readProviders(draft).find(p => p.id === room.id);
+    if (provider && provider.provide === undefined) {
+      const ids = Array.isArray(draft.sharedPresetIds) ? draft.sharedPresetIds as string[] : [];
+      provider.provide = draft.networkProviderEnabled === true;
+      provider.shared = ids.map(id => presetIdToRef(shared, id)).filter(ref =>
+        ref && shared.providers.some(p => p.id === ref.providerId && providerKind(p) === "http"))
+        .map(ref => toRef(ref)!);
     }
   }
+  if (mist?.room_id) delete mist.room_id;
+  return before !== JSON.stringify(draft);
 }
-
-export function addProvider(mutate: Mutate, entry: ProviderEntry): void {
-  mutate((draft) => {
-    const providers = Array.isArray(draft.providers) ? (draft.providers as ProviderEntry[]) : [];
-    draft.providers = [...providers, entry];
-  });
-}
-
-export function updateProvider(mutate: Mutate, id: string, patch: Partial<ProviderEntry>): void {
-  mutate((draft) => {
-    const providers = Array.isArray(draft.providers) ? (draft.providers as ProviderEntry[]) : [];
-    draft.providers = providers.map((p) => (p.id === id ? { ...p, ...patch } : p));
-  });
-}
-
-/** Deletes a provider along with any preset that references it, then clears
- * default_preset_id / task assignments left dangling by those preset
- * deletions (a provider's presets can be assigned to tasks too). */
-export function deleteProvider(mutate: Mutate, id: string): void {
-  mutate((draft) => {
-    const providers = Array.isArray(draft.providers) ? (draft.providers as ProviderEntry[]) : [];
-    draft.providers = providers.filter((p) => p.id !== id);
-
-    const presets = Array.isArray(draft.presets) ? (draft.presets as PresetEntry[]) : [];
-    const removedIds = new Set(presets.filter((p) => p.provider_id === id).map((p) => p.id));
-    draft.presets = presets.filter((p) => p.provider_id !== id);
-
-    pruneDanglingPresetRefs(draft, removedIds);
-  });
-}
-
-export function addPreset(mutate: Mutate, entry: PresetEntry): void {
-  mutate((draft) => {
-    const presets = Array.isArray(draft.presets) ? (draft.presets as PresetEntry[]) : [];
-    draft.presets = [...presets, entry];
-  });
-}
-
-export function updatePreset(mutate: Mutate, id: string, patch: Partial<PresetEntry>): void {
-  mutate((draft) => {
-    const presets = Array.isArray(draft.presets) ? (draft.presets as PresetEntry[]) : [];
-    draft.presets = presets.map((p) => (p.id === id ? { ...p, ...patch } : p));
-  });
-}
-
-/** Deletes a preset, then clears default_preset_id / any task's assignment
- * that pointed at it (both fall back to "" = follow default). */
-export function deletePreset(mutate: Mutate, id: string): void {
-  mutate((draft) => {
-    const presets = Array.isArray(draft.presets) ? (draft.presets as PresetEntry[]) : [];
-    draft.presets = presets.filter((p) => p.id !== id);
-    pruneDanglingPresetRefs(draft, new Set([id]));
-  });
-}
-
-export function setDefaultPreset(mutate: Mutate, presetId: string): void {
-  mutate((draft) => {
-    draft.default_preset_id = presetId;
-  });
-}
-
-export function setTaskPreset(mutate: Mutate, task: LlmTaskId, presetId: string): void {
-  const def = taskDef(task);
-  if (!def) return;
-  mutate((draft) => {
-    const current = (draft[def.section] as Record<string, unknown> | undefined) ?? {};
-    draft[def.section] = { ...current, [def.field]: presetId };
-  });
+export function addRoom(draft: ConfigDocument, roomId: string, label: string, provide: boolean): string {
+  const config = sharedConfig(draft);
+  const { id } = createRoomProvider(config, { roomId, label });
+  writeShared(draft, config);
+  const room = readProviders(draft).find(p => p.id === id)!;
+  room.enabled = true;
+  room.provide = provide || room.provide === true;
+  room.shared ??= [];
+  return id;
 }

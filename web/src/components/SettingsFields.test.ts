@@ -1,25 +1,19 @@
-// Unit test for the reasoning-effort option list: the Rust side
-// (crates/npc-core) is gaining an "xhigh" step alongside
-// none/minimal/low/medium/high, and the UI's segmented control needs to
-// offer the same set or a saved "xhigh" value would render as a blank pick.
 import { describe, expect, it } from "vitest";
-import { PRESET_EFFORT_OPTIONS, REASONING_EFFORT_OPTIONS } from "./SettingsFields";
+import { LLM_SETTINGS_MESSAGES, REASONING_EFFORT_OPTIONS } from "@tik-choco/mistai/preact";
+import { AI_MESSAGES } from "../lib/ai-messages";
 
-describe("REASONING_EFFORT_OPTIONS", () => {
-  it("includes xhigh as the step above high", () => {
-    const values = REASONING_EFFORT_OPTIONS.map((o) => o.value);
-    expect(values).toEqual(["none", "minimal", "low", "medium", "high", "xhigh"]);
+function placeholders(value: string) { return [...value.matchAll(/\{(\w+)\}/g)].map(m => m[1]).sort(); }
+describe("AI settings vocabulary", () => {
+  it("offers every supported reasoning effort including explicit none and max", () => {
+    expect(REASONING_EFFORT_OPTIONS).toEqual(["none", "minimal", "low", "medium", "high", "xhigh", "max"]);
   });
-
-  it("gives xhigh its own translated hint key rather than reusing high's", () => {
-    const xhigh = REASONING_EFFORT_OPTIONS.find((o) => o.value === "xhigh");
-    expect(xhigh?.hintKey).toBe("settings.effort.xhigh");
-  });
-});
-
-describe("PRESET_EFFORT_OPTIONS", () => {
-  it("carries xhigh through in addition to the leading inherit option", () => {
-    const values = PRESET_EFFORT_OPTIONS.map((o) => o.value);
-    expect(values).toEqual(["", "none", "minimal", "low", "medium", "high", "xhigh"]);
-  });
+  for (const catalogs of [LLM_SETTINGS_MESSAGES, AI_MESSAGES]) {
+    for (const locale of ["ja", "zh-CN", "zh-TW"] as const) {
+      it(`has complete nonempty ${locale} messages and matching placeholders`, () => {
+        const base = catalogs.en as Record<string, string>, target = catalogs[locale] as Record<string, string>;
+        expect(Object.keys(target).sort()).toEqual(Object.keys(base).sort());
+        for (const key of Object.keys(base)) { expect(target[key]?.trim(), key).toBeTruthy(); expect(placeholders(target[key]!)).toEqual(placeholders(base[key]!)); }
+      });
+    }
+  }
 });
