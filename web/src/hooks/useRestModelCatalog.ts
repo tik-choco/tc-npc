@@ -13,7 +13,7 @@ const connection = (p: ProviderEntry) => JSON.stringify([p.base_url, p.api_key, 
 const notify = () => listeners.forEach(cb => cb());
 
 // A REST catalog is necessary because credentials are masked in the browser.
-// Room caches are owned by mistl; this API has no per-room discovery endpoint.
+// Room advertisements arrive through useMistStatus's external registration status.
 export function useRestModelCatalog(config: ConfigDocument, mutate: Mutate) {
   const current = useRef({ config, mutate });
   current.current = { config, mutate };

@@ -1,4 +1,5 @@
 import { migrateConfigDocument } from "./llm-config";
+import type { MistSyncStatus, MistRooms } from "./mist-status";
 // Thin REST client for the tc-npc server (same origin as the WS endpoint —
 // see vite.config.ts's dev proxy for the local-dev equivalent).
 import type { ScheduledActionEntry, SchedulerSection } from "./config-types";
@@ -26,6 +27,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export function getState(): Promise<unknown> {
   return request("/api/state");
 }
+
+export function getMistSync(): Promise<MistSyncStatus> { return request("/api/mist/sync"); }
+export function getMistRooms(): Promise<MistRooms> { return request("/api/mist/rooms"); }
 
 export async function getConfig(): Promise<ConfigDocument> {
   const config = await request<ConfigDocument>("/api/config");

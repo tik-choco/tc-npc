@@ -11,6 +11,7 @@ import type { ConfigDocument } from "../lib/types";
 import type { AiTranslate } from "../lib/ai-messages";
 import type { CatalogStatus } from "../hooks/useRestModelCatalog";
 import { AiPopover } from "./AiPopover";
+import { liveRoom, roomPhase, sharingApplied, type MistLive } from "../lib/mist-status";
 
 export function CommitField({ label, value, commit, password = false }: {
   label: string; value: string; commit(value: string): string | void; password?: boolean;
@@ -32,13 +33,13 @@ export function AiSwitch({ checked, label, change }: { checked: boolean; label: 
   return <button type="button" class="ai-switch" role="switch" aria-checked={checked} aria-label={label} onClick={change}><span /></button>;
 }
 
-export function ConnectionCards({ config, mutate, t, status }: { config: ConfigDocument; mutate: Mutate; t: AiTranslate; status(p: ProviderEntry): CatalogStatus | undefined }) {
+export function ConnectionCards({ config, mutate, t, status, live }: { config: ConfigDocument; mutate: Mutate; t: AiTranslate; status(p: ProviderEntry): CatalogStatus | undefined; live: MistLive }) {
   return <div class="ai-provider-list">
     <div class="ai-panel-heading"><strong>{t("settings-tab-connection")}</strong><AddConnection config={config} mutate={mutate} t={t} /></div>
-    {sharedConfig(config).providers.map(p => <ConnectionCard key={p.id} provider={p} config={config} mutate={mutate} t={t} status={status(readProviders(config).find(row => row.id === p.id)!)} />)}
+    {sharedConfig(config).providers.map(p => <ConnectionCard key={p.id} provider={p} config={config} mutate={mutate} t={t} status={status(readProviders(config).find(row => row.id === p.id)!)} live={live} />)}
   </div>;
 }
-function ConnectionCard({ provider: p, config, mutate, t, status }: { provider: LlmProviderV1; config: ConfigDocument; mutate: Mutate; t: AiTranslate; status?: CatalogStatus }) {
+function ConnectionCard({ provider: p, config, mutate, t, status, live }: { provider: LlmProviderV1; config: ConfigDocument; mutate: Mutate; t: AiTranslate; status?: CatalogStatus; live: MistLive }) {
   const [expanded, setExpanded] = useState(false), [details, setDetails] = useState(false), [pendingUrl, setPendingUrl] = useState("");
   const anchor = useRef<HTMLButtonElement>(null), card = useRef<HTMLElement>(null);
   const room = providerKind(p) === "room";
@@ -59,7 +60,9 @@ function ConnectionCard({ provider: p, config, mutate, t, status }: { provider: 
       } catch { return t("connection-url-invalid"); }
     }
   }
-  const text = p.enabled === false ? t("models-disabled") : room ? t("models-cache") :
+  const roomStatus = room ? liveRoom(live, { base_url: p.baseUrl }) : undefined;
+  const roomError = live.sync?.error || live.error;
+  const text = p.enabled === false ? t("models-disabled") : room ? t(roomError ? "roomError" : roomStatus?.joined ? "roomConnected" : roomStatus ? "roomSearching" : "roomOffline") :
     status?.phase === "fetching" ? t("models-fetching") : status?.phase === "error" ? t("models-fetch-failed") : t("models-ok", { count: p.models?.length ?? 0 });
   return <article ref={card} class={`ai-provider-card ${p.enabled === false ? "ai-disabled" : ""}`} data-provider-id={p.id}>
     <div class="ai-provider-header">
@@ -69,9 +72,11 @@ function ConnectionCard({ provider: p, config, mutate, t, status }: { provider: 
         <span class="ai-provider-name"><strong title={p.label}>{p.label}</strong><small title={p.baseUrl}>{room ? roomIdFromBaseUrl(p.baseUrl) : p.baseUrl}</small></span>
         <ChevronDown size={14} class={expanded ? "ai-chevron expanded" : "ai-chevron"} />
       </button>
-      <button ref={anchor} type="button" class={`ai-status ${status?.phase ?? "cache"}`} aria-label={text} title={text} onClick={() => setDetails(!details)}><i /><span>{text}</span></button>
+      <button ref={anchor} type="button" class={`ai-status ${p.enabled === false ? "cache" : room ? roomPhase(roomStatus, roomError) : status?.phase ?? "cache"} ${p.enabled !== false && roomStatus?.providing ? "providing" : ""}`} aria-label={text} title={text} onClick={() => setDetails(!details)}><i /><span>{text}</span></button>
       {details && <AiPopover anchor={anchor} close={() => setDetails(false)}><div class="ai-status-detail"><strong>{text}</strong>
-        <p>{status?.error ?? (room ? t("bridge") : "")}</p>{p.modelsFetchedAt && <small>{t("connection-updated", { time: p.modelsFetchedAt })}</small>}
+        <p>{room ? roomError || t("roomPeers", { count: roomStatus?.peers ?? 0 }) : status?.error}</p>
+        {roomStatus && <p>{t(roomStatus.providing ? "roomProviding" : "sharing-stopped")} · {t("models-ok", { count: roomStatus.models.length })}</p>}
+        {(room ? live.registration?.updated_at : p.modelsFetchedAt) && <small>{t("connection-updated", { time: (room ? live.registration?.updated_at : p.modelsFetchedAt)! })}</small>}
       </div></AiPopover>}
     </div>
     <div class={`ai-disclosure ${expanded ? "open" : ""}`} inert={!expanded}><div><div class="ai-provider-body">
@@ -118,26 +123,27 @@ export function AddConnection({ config, mutate, t, roomOnly = false }: { config:
     </form></AiPopover>}
   </>;
 }
-function RoomChip({ room, mutate, t }: { room: ProviderEntry; mutate: Mutate; t: AiTranslate }) {
+function RoomChip({ room, mutate, t, live, providers }: { room: ProviderEntry; mutate: Mutate; t: AiTranslate; live: MistLive; providers: ProviderEntry[] }) {
   const [copied, setCopied] = useState(false), [error, setError] = useState("");
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => () => clearTimeout(timer.current), []);
-  return <span class={`ai-room-chip ${room.provide ? "selected" : ""}`}>
-    <button type="button" aria-pressed={room.provide ?? false} title={t("bridge")} onClick={() => mutate(draft => { const p = readProviders(draft).find(p => p.id === room.id); if (p) p.provide = !p.provide; })}>
-      {room.label || room.id}<small>{t(room.provide ? "models-cache" : "sharing-stopped")}</small>
+  const state = liveRoom(live, room), applied = sharingApplied(live, room, providers);
+  return <span class={`ai-room-chip ${room.provide ? "selected" : ""}`} data-applied={applied}>
+    <button type="button" aria-pressed={room.provide ?? false} title={t("roomPeers", { count: state?.peers ?? 0 })} onClick={() => mutate(draft => { const p = readProviders(draft).find(p => p.id === room.id); if (p) p.provide = !p.provide; })}>
+      {room.label || room.id}<small>{t(!applied ? "sharingPending" : state?.providing ? "roomProviding" : state?.joined ? "sharing-stopped" : "roomOffline")}</small>
     </button>
     <button type="button" class="ai-copy" title={error || t(copied ? "room-copied" : "room-copy-id")} aria-label={t("room-copy-id")} onClick={async () => {
       try { await navigator.clipboard.writeText(roomIdFromBaseUrl(room.base_url ?? "")); setCopied(true); clearTimeout(timer.current); timer.current = setTimeout(() => setCopied(false), 1200); } catch { setError(t("room-copy-failed")); }
     }}>{copied ? <Check size={14} /> : <Copy size={14} />}</button>
   </span>;
 }
-export function SharingSettings({ config, mutate, t }: { config: ConfigDocument; mutate: Mutate; t: AiTranslate }) {
+export function SharingSettings({ config, mutate, t, live }: { config: ConfigDocument; mutate: Mutate; t: AiTranslate; live: MistLive }) {
   const [query, setQuery] = useState("");
   const shared = sharedConfig(config), rooms = readProviders(config).filter(p => p.enabled !== false && (p.base_url ?? "").startsWith("mist-network://"));
   const http = shared.providers.filter(p => p.enabled !== false && providerKind(p) === "http");
   function has(room: ProviderEntry, ref: { providerId: string; model: string }) { return room.shared?.some(r => r.provider_id === ref.providerId && r.model === ref.model) ?? false; }
   return <div class="ai-sharing">
-    <p class="field-hint">{t("bridge")}</p><div class="ai-room-chips">{rooms.map(room => <RoomChip key={room.id} room={room} mutate={mutate} t={t} />)}<AddConnection config={config} mutate={mutate} t={t} roomOnly /></div>
+    <p class="field-hint">{t("bridge")}</p><div class="ai-room-chips">{rooms.map(room => <RoomChip key={room.id} room={room} mutate={mutate} t={t} live={live} providers={readProviders(config)} />)}<AddConnection config={config} mutate={mutate} t={t} roomOnly /></div>
     {!rooms.length && <p class="field-hint">{t("sharing-no-rooms")}</p>}
     {!http.length && <p class="field-hint">{t("sharing-no-http")}</p>}
     <input type="search" aria-label={t("models-search")} placeholder={t("models-search")} value={query} onInput={event => setQuery(event.currentTarget.value)} />
@@ -146,7 +152,7 @@ export function SharingSettings({ config, mutate, t }: { config: ConfigDocument;
         .map(model => ({ providerId: p.id, model })).filter(ref => matchesModelQuery(ref, p, query))
         .sort((a, b) => Number(rooms.some(room => has(room, b))) - Number(rooms.some(room => has(room, a))) || a.model.localeCompare(b.model));
       return <section key={p.id} class="ai-share-group"><h4>{p.label} <small>HTTP</small></h4>{refs.map(ref => <div class="ai-share-row" key={ref.model}><span>{ref.model}</span><div>
-        {rooms.map(room => <button type="button" class={has(room, ref) ? "selected" : ""} aria-pressed={has(room, ref)} onClick={() => mutate(draft => {
+        {rooms.map(room => <button type="button" class={has(room, ref) ? "selected" : ""} aria-pressed={has(room, ref)} title={t(sharingApplied(live, room, readProviders(config)) ? "sharingApplied" : "sharingPending")} onClick={() => mutate(draft => {
           const r = readProviders(draft).find(p => p.id === room.id); if (!r) return;
           r.shared = has(r, ref) ? (r.shared ?? []).filter(item => !sameRef(item, ref)) : [...r.shared ?? [], toRef(ref)!];
         })}>{room.label || room.id}{has(room, ref) && <Check size={12} />}</button>)}

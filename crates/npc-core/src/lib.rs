@@ -7,6 +7,7 @@ pub mod character;
 pub mod chatlog;
 pub mod config;
 pub mod module;
+pub mod mist;
 pub mod osc;
 pub mod person;
 pub mod schedule_profile;

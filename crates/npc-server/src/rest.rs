@@ -60,6 +60,18 @@ pub async fn api_get_config(State(state): State<AppState>) -> Response {
     }
 }
 
+pub async fn api_mist_sync(State(state): State<AppState>) -> impl IntoResponse {
+    Json(state.mist_sync.status())
+}
+
+pub async fn api_mist_rooms(State(state): State<AppState>) -> Response {
+    let config = state.current_config();
+    match npc_core::mist::MistClient::new(&config.mist).get().await {
+        Ok(result) => Json(result).into_response(),
+        Err(error) => error_response(StatusCode::BAD_GATEWAY, format!("{error:#}")),
+    }
+}
+
 pub async fn api_put_config(State(state): State<AppState>, body: String) -> Response {
     let mut incoming: Value = match serde_json::from_str(&body) {
         Ok(v) => v,
@@ -125,6 +137,7 @@ pub async fn api_put_config(State(state): State<AppState>, body: String) -> Resp
         .bus
         .publish(npc_core::topic::CONFIG, npc_core::msg::CONFIG_UPDATED, &new_config);
     state.set_current_config(new_config);
+    state.mist_sync.submit(state.current_config());
 
     Json(json!({
         "ok": true,
@@ -959,7 +972,8 @@ pub async fn api_llm_ocr(State(state): State<AppState>, body: String) -> Respons
         );
     }
 
-    let client = npc_llm::LlmClient::new(resolved.base_url, resolved.api_key);
+    let client = npc_llm::LlmClient::new(resolved.base_url, resolved.api_key)
+        .with_reasoning_effort(resolved.reasoning_effort);
     // Same wording tc-assistant2 used: the point is to get the page back
     // verbatim, so the instruction spends its words forbidding the summary a
     // chat-tuned model would otherwise volunteer.
@@ -1640,6 +1654,129 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn external_registration_start_save_status_remove_and_failure() {
+        let dir = std::env::temp_dir().join(format!("npc sync test {}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let executable = dir.join(if cfg!(windows) { "fake mistl.exe" } else { "fake mistl" });
+        let compiled = std::process::Command::new("rustc").arg("--edition=2021")
+            .arg(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../npc-core/tests/fixtures/mistl.rs"))
+            .arg("-o").arg(&executable).output().unwrap();
+        assert!(compiled.status.success(), "{}", String::from_utf8_lossy(&compiled.stderr));
+        let mut config: npc_core::Config = serde_json::from_value(json!({"providers":[
+            {"id":"h","base_url":"http://localhost/v1","api_key":"test-secret"},
+            {"id":"r","base_url":"mist-network://team","provide":true,
+             "shared":[{"provider_id":"h","model":"old"}]}
+        ]})).unwrap();
+        config.mist.cli_path = executable.to_string_lossy().into_owned();
+        config.mist.instance = Some("delayed".into());
+        config.mist.state_dir = Some(dir.clone());
+        let mut state = test_app_state(dir.clone());
+        state.set_current_config(config.clone());
+        state.mist_sync = crate::mist_sync::MistSync::start(state.current_config(), state.ctx.shutdown.clone());
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !dir.join("args.json").exists() { tokio::time::sleep(std::time::Duration::from_millis(10)).await; }
+        }).await.unwrap();
+        // A save during the startup apply must win, and must restore masked keys.
+        config.mist.instance = Some("normal instance".into());
+        config.providers[1].shared[0].model = "model".into();
+        let saved = tokio::time::timeout(std::time::Duration::from_secs(1),
+            api_put_config(State(state.clone()), config.redacted_json().unwrap().to_string())).await.unwrap();
+        assert_eq!(saved.status(), StatusCode::OK);
+        wait_for_sync(&state).await;
+        let status = response_json(api_mist_sync(State(state.clone())).await.into_response()).await;
+        assert_eq!(status["applied"], true);
+        assert_eq!(status["generation"], 2);
+        assert_eq!(status["warnings"][0], "test warning");
+        let payload: Value = serde_json::from_slice(&std::fs::read(dir.join("registration.json")).unwrap()).unwrap();
+        assert_eq!(payload["rooms"][0]["shared"][0]["model"], "model");
+        assert_eq!(payload["providers"][0]["api_key"], "test-secret");
+        let live = response_json(api_mist_rooms(State(state.clone())).await).await;
+        assert_eq!(live["registrations"][0]["status"]["rooms"][0]["peers"], 2);
+        assert!(!live.to_string().contains("test-secret"));
+        assert!(live["registrations"][0].get("providers").is_none());
+
+        config.providers[1].enabled = false;
+        assert_eq!(api_put_config(State(state.clone()), serde_json::to_string(&config).unwrap()).await.status(), StatusCode::OK);
+        wait_for_sync(&state).await;
+        assert!(!state.mist_sync.status().applied);
+        assert!(!dir.join("registration.json").exists());
+        config.mist.instance = Some("fail".into());
+        assert_eq!(api_put_config(State(state.clone()), serde_json::to_string(&config).unwrap()).await.status(), StatusCode::OK);
+        wait_for_sync(&state).await;
+        assert!(state.mist_sync.status().error.unwrap().contains("daemon unavailable"));
+        assert_eq!(api_mist_rooms(State(state.clone())).await.status(), StatusCode::BAD_GATEWAY);
+        assert!(dir.join("config.json").exists());
+        state.ctx.shutdown.cancel();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    async fn wait_for_sync(state: &AppState) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while state.mist_sync.status().pending { tokio::time::sleep(std::time::Duration::from_millis(10)).await; }
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn room_scoped_models_stream_voice_and_ocr_use_the_selected_room() {
+        use futures_util::StreamExt;
+        use axum::{extract::Request, routing::any, Router};
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, Value)>::new()));
+        let requests = captured.clone();
+        let app = Router::new().fallback(any(move |request: Request| {
+            let requests = requests.clone();
+            async move {
+                assert!(!request.headers().contains_key("authorization"));
+                let path = request.uri().path().to_string();
+                let bytes = axum::body::to_bytes(request.into_body(), 1_000_000).await.unwrap();
+                let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+                requests.lock().unwrap().push((path.clone(), body.clone()));
+                if path.ends_with("/models") { Json(json!({"data":[{"id":"model"}]})).into_response() }
+                else if path.ends_with("/audio/transcriptions") { Json(json!({"text":"heard"})).into_response() }
+                else if path.ends_with("/audio/speech") { ([("content-type", "audio/wav")], "wav").into_response() }
+                else if body["stream"] == true {
+                    ([("content-type", "text/event-stream")], "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n").into_response()
+                } else { Json(json!({"choices":[{"message":{"role":"assistant","content":"ocr"}}]})).into_response() }
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut config: npc_core::Config = serde_json::from_value(json!({
+            "providers":[{"id":"a","base_url":"mist-network://team/a %","api_key":"never-send"},
+                         {"id":"b","base_url":"mist-network://team-b"}],
+            "default_ref":{"provider_id":"a","model":"model"},
+            "talk":{"reasoning_effort":"xhigh"},
+            "vision":{"model_ref":{"provider_id":"b","model":"model"},"reasoning_effort":"custom-effort"}
+        })).unwrap();
+        config.mist.ai_base_url = format!("http://{address}/custom/");
+        let target = config.resolve_llm(npc_core::LlmTask::Talk).unwrap();
+        let client = npc_llm::LlmClient::new(target.base_url, target.api_key).with_reasoning_effort(target.reasoning_effort);
+        assert_eq!(client.list_models().await.unwrap(), ["model"]);
+        let stream = client.chat_stream(npc_llm::ChatRequest::new("model", vec![])).await.unwrap();
+        futures_util::pin_mut!(stream);
+        assert_eq!(stream.next().await.unwrap().unwrap(), "ok");
+        assert!(stream.next().await.is_none());
+        assert_eq!(client.speak("model", "voice", "hello", 1.0).await.unwrap(), b"wav");
+        assert_eq!(client.transcribe("model", vec![0, 1]).await.unwrap(), "heard");
+        let dir = std::env::temp_dir().join(format!("npc route {}", uuid::Uuid::new_v4()));
+        let state = test_app_state(dir);
+        state.set_current_config(config);
+        let ocr = api_llm_ocr(State(state), json!({"imageDataUrl":"data:image/png;base64,AA==","pageNumber":1,"totalPages":1}).to_string()).await;
+        assert_eq!(ocr.status(), StatusCode::OK);
+        let requests = captured.lock().unwrap();
+        assert_eq!(requests.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(), [
+            "/custom/rooms/team%2Fa%20%25/models", "/custom/rooms/team%2Fa%20%25/chat/completions",
+            "/custom/rooms/team%2Fa%20%25/audio/speech", "/custom/rooms/team%2Fa%20%25/audio/transcriptions",
+            "/custom/rooms/team-b/chat/completions"]);
+        assert_eq!(requests[1].1["reasoning_effort"], "xhigh");
+        assert_eq!(requests[4].1["reasoning_effort"], "custom-effort");
+        assert_eq!(requests[4].1["messages"][0]["content"][1]["type"], "image_url");
+        assert!(requests.iter().all(|r| r.1.get("temperature").is_none()));
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn room_model_reaches_the_local_serve_api_without_temperature_or_secrets() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1686,7 +1823,8 @@ mod tests {
             }),
             ..Default::default()
         };
-        config.mist.ai_base_url = format!("http://{address}/v1");
+        config.mist.ai_base_url = format!("http://{address}/v1/");
+        config.talk.reasoning_effort = "high".into();
         let resolved = config.resolve_llm(npc_core::LlmTask::Talk).unwrap();
         let client = npc_llm::LlmClient::new(resolved.base_url, resolved.api_key)
             .with_reasoning_effort(resolved.reasoning_effort);
@@ -1695,10 +1833,10 @@ mod tests {
             .await
             .unwrap();
         let (head, body) = server.await.unwrap();
-        assert!(head.starts_with("POST /v1/chat/completions HTTP/1.1"));
+        assert!(head.starts_with("POST /v1/rooms/team/chat/completions HTTP/1.1"));
         assert!(!head.to_ascii_lowercase().contains("authorization:"));
         assert_eq!(body["model"], "raw-model");
-        assert_eq!(body["reasoning_effort"], "none");
+        assert_eq!(body["reasoning_effort"], "high");
         assert!(body.get("temperature").is_none());
     }
 
@@ -2163,6 +2301,7 @@ mod tests {
             data_dir,
         };
         AppState {
+            mist_sync: crate::mist_sync::MistSync::default(),
             current_config: std::sync::Arc::new(std::sync::RwLock::new(ctx.config.clone())),
             ctx,
             hub: crate::hub::Hub::default(),

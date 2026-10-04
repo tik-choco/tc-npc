@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "preact/hooks";
 import { aiTranslate } from "../lib/ai-messages";
 import { useI18n } from "../hooks/useI18n";
 import { useRestModelCatalog } from "../hooks/useRestModelCatalog";
+import { useMistStatus } from "../hooks/useMistStatus";
+import { liveRoom } from "../lib/mist-status";
 import { LLM_TASKS, setTaskRef, sharedConfig, taskRef, toRef, type Mutate } from "../lib/llm-config";
 import type { ConfigDocument } from "../lib/types";
 import type { ModelRefV1 } from "@tik-choco/mistai/llm-config";
@@ -20,6 +22,7 @@ export function AiSettings({ config, mutate }: { config: ConfigDocument; mutate:
   });
   useEffect(() => { try { sessionStorage.setItem("tc-npc:recent-models", JSON.stringify(recent)); } catch { /* UI history is optional. */ } }, [recent]);
   const catalog = useRestModelCatalog(config, mutate);
+  const live = useMistStatus();
   const panel = useRef<HTMLDivElement>(null), from = useRef<number | null>(null), animation = useRef<Animation | null>(null);
   useEffect(() => {
     if (from.current !== null && panel.current && !matchMedia("(prefers-reduced-motion: reduce)").matches) {
@@ -30,6 +33,10 @@ export function AiSettings({ config, mutate }: { config: ConfigDocument; mutate:
     return () => animation.current?.cancel();
   }, [tab]);
   const shared = sharedConfig(config);
+  shared.providers = shared.providers.map(p => {
+    const room = liveRoom(live, { base_url: p.baseUrl });
+    return room?.joined ? { ...p, models: room.models } : p;
+  });
   function remember(ref?: ModelRefV1) { if (ref) setRecent(current => [ref, ...current.filter(r => r.providerId !== ref.providerId || r.model !== ref.model)].slice(0, 8)); }
   const picker = { providers: shared.providers, recent, refresh: catalog.revalidate, t };
   const taskLabel = (id: string) => t(`task${id[0]!.toUpperCase()}${id.slice(1)}` as "taskTalk");
@@ -39,8 +46,11 @@ export function AiSettings({ config, mutate }: { config: ConfigDocument; mutate:
       {(["connection", "tasks", "sharing"] as const).map(id => <button type="button" role="tab" aria-selected={tab === id} onClick={() => { if (tab !== id) { from.current = panel.current?.getBoundingClientRect().height ?? null; setTab(id); catalog.revalidate(); } }}>{t(`settings-tab-${id}`)}</button>)}
     </div>
     <div ref={panel} role="tabpanel" class="ai-tab-panel">
-      {tab === "connection" && <ConnectionCards config={config} mutate={mutate} t={t} status={catalog.status} />}
-      {tab === "sharing" && <SharingSettings config={config} mutate={mutate} t={t} />}
+      {(live.sync?.error || live.error) && <p class="ai-warning" role="alert">{t("syncError", { error: live.sync?.error || live.error || "" })}</p>}
+      {live.sync?.pending && <p role="status" class="field-hint">{t("syncPending")}</p>}
+      {live.sync?.warnings.map(warning => <p class="ai-warning" role="status">{t("syncWarning", { warning })}</p>)}
+      {tab === "connection" && <ConnectionCards config={config} mutate={mutate} t={t} status={catalog.status} live={live} />}
+      {tab === "sharing" && <SharingSettings config={config} mutate={mutate} t={t} live={live} />}
       {tab === "tasks" && <div class="ai-task-list">
         <div class="ai-task-row"><span>{t("models-default")}</span><RefPicker {...picker} label={t("models-default")} value={shared.defaultModel} clear={false} onChange={ref => { mutate(draft => { draft.default_ref = toRef(ref); }); remember(ref); }} /></div>
         {LLM_TASKS.map(task => {
