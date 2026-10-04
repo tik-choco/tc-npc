@@ -495,7 +495,13 @@ fn handle_barge_in(ctx: &ModuleCtx, shared: &Arc<Shared>) {
 async fn transcribe_and_publish(ctx: &ModuleCtx, shared: &Arc<Shared>, wav_bytes: Vec<u8>) {
     let cfg = shared.config();
     // 接続先・モデルの解決は npc-core の resolve_llm に一本化した。
-    let resolved = cfg.resolve_llm(LlmTask::Stt);
+    let resolved = match cfg.resolve_llm(LlmTask::Stt) {
+        Ok(resolved) => resolved,
+        Err(err) => {
+            tracing::error!(error = %err, "npc-speech: stt model is unavailable");
+            return;
+        }
+    };
     let client = npc_llm::LlmClient::new(resolved.base_url, resolved.api_key);
 
     let text = match client.transcribe(&resolved.model, wav_bytes).await {
@@ -715,11 +721,13 @@ async fn run_interrupt_task(ctx: ModuleCtx, shared: Arc<Shared>, suspend: Arc<Su
                 }
 
                 let shared = shared.clone();
+                let data_dir = ctx.data_dir.clone();
                 tokio::spawn(async move {
                     let cfg = shared.config();
                     let character = shared.active_character.read().unwrap().clone();
                     handle_priority_tts(
                         &cfg,
+                        &data_dir,
                         character,
                         content,
                         chime_file,
@@ -833,6 +841,7 @@ async fn run_voice_gate_task(ctx: ModuleCtx, shared: Arc<Shared>) {
 
 async fn handle_priority_tts(
     cfg: &Config,
+    data_dir: &Path,
     character: Option<Arc<Character>>,
     content: String,
     chime_file: String,
@@ -846,20 +855,25 @@ async fn handle_priority_tts(
     let mut items: Vec<Vec<u8>> = Vec::new();
 
     if !chime_file.is_empty() {
-        match tokio::fs::read(&chime_file).await {
+        // A `chime_file`/`bgm_file` is a reference into the sound library
+        // (`{data_dir}/sound/`) or, for configs written before that folder
+        // existed, a plain path — `resolve_sound_path` accepts both, so the
+        // path logged on failure below is the one actually attempted.
+        let chime_path = npc_core::resolve_sound_path(data_dir, &chime_file);
+        match tokio::fs::read(&chime_path).await {
             Ok(bytes) => {
                 // No BGM on the chime — `mix_announcement` is reused purely
                 // for its volume-scaling path, so the chime also respects
                 // the announcement's overall `volume`.
-                match mixer::mix_announcement(&bytes, volume, None) {
+                match mix_off_thread(bytes, volume, None).await {
                     Ok(mixed) => items.push(mixed),
                     Err(err) => {
-                        tracing::warn!(error = %err, file = %chime_file, "npc-speech: failed to mix chime_file, skipping");
+                        tracing::warn!(error = %err, file = %chime_file, path = %chime_path.display(), "npc-speech: failed to decode chime_file, skipping");
                     }
                 }
             }
             Err(err) => {
-                tracing::warn!(error = %err, file = %chime_file, "npc-speech: chime_file not found, skipping");
+                tracing::warn!(error = %err, file = %chime_file, path = %chime_path.display(), "npc-speech: chime_file not found, skipping");
             }
         }
     }
@@ -876,7 +890,8 @@ async fn handle_priority_tts(
             }
 
             let bgm = if !bgm_file.is_empty() {
-                match tokio::fs::read(&bgm_file).await {
+                let bgm_path = npc_core::resolve_sound_path(data_dir, &bgm_file);
+                match tokio::fs::read(&bgm_path).await {
                     Ok(bytes) => Some(mixer::BgmMix {
                         bytes,
                         volume: bgm_volume,
@@ -886,7 +901,7 @@ async fn handle_priority_tts(
                     Err(err) => {
                         // Log+skip, same as chime_file above: a missing BGM
                         // file must not silence the announcement itself.
-                        tracing::warn!(error = %err, file = %bgm_file, "npc-speech: bgm_file not found, playing tts without bgm");
+                        tracing::warn!(error = %err, file = %bgm_file, path = %bgm_path.display(), "npc-speech: bgm_file not found, playing tts without bgm");
                         None
                     }
                 }
@@ -894,7 +909,7 @@ async fn handle_priority_tts(
                 None
             };
 
-            match mixer::mix_announcement(&wav, volume, bgm) {
+            match mix_off_thread(wav, volume, bgm).await {
                 Ok(mixed) => items.push(mixed),
                 Err(err) => {
                     tracing::warn!(error = %err, "npc-speech: failed to mix tts announcement, skipping");
@@ -906,6 +921,23 @@ async fn handle_priority_tts(
     if !items.is_empty() {
         shared.send_playback(PlaybackCmd::Priority(items));
     }
+}
+
+/// [`mixer::mix_announcement`] on a blocking thread.
+///
+/// It decodes, resamples and mixes whole files in one synchronous pass, and
+/// a BGM track is minutes long where a TTS clip is seconds — a full-length
+/// mp3 is seconds of pure CPU. Running that inline would park a runtime
+/// worker for the duration, stalling every other task sharing it (the bus
+/// readers, the WebSocket hub) for no reason.
+async fn mix_off_thread(
+    bytes: Vec<u8>,
+    volume: f32,
+    bgm: Option<mixer::BgmMix>,
+) -> anyhow::Result<Vec<u8>> {
+    tokio::task::spawn_blocking(move || mixer::mix_announcement(&bytes, volume, bgm))
+        .await
+        .map_err(|err| anyhow::anyhow!("mix task failed to run: {err}"))?
 }
 
 // ---------------------------------------------------------------------
@@ -1005,12 +1037,16 @@ fn load_active_character(data_dir: &Path, cfg: &Config) -> Option<Arc<Character>
 }
 
 async fn synthesize_tts(cfg: &Config, text: &str, character: Option<&Character>) -> Option<Vec<u8>> {
-    // 接続先・モデルの解決は npc-core の resolve_llm に一本化した
-    // (resolve_llm(Tts) は tts.model が空なら api.model にフォールバックする
-    // 従来の挙動をそのまま再現している)。voice/speed は preset の対象外なので
-    // 引き続き tts セクションから直接読む。resolve_voice はその上に、有効な
-    // キャラクターの voice_name/voice_model を優先させる一段を足すだけ。
-    let resolved = cfg.resolve_llm(LlmTask::Tts);
+    // 接続先とモデルは model_ref / default_ref から解決する。
+    // voice/speed は tts セクションから読み、resolve_voice が有効な
+    // キャラクターの voice_name/voice_model を優先させる。
+    let resolved = match cfg.resolve_llm(LlmTask::Tts) {
+        Ok(resolved) => resolved,
+        Err(err) => {
+            tracing::error!(error = %err, "npc-speech: tts model is unavailable");
+            return None;
+        }
+    };
     let (voice, model) = resolve_voice(character, &cfg.tts.voice, &resolved.model);
     let client = npc_llm::LlmClient::new(resolved.base_url, resolved.api_key);
 

@@ -13,7 +13,8 @@ use std::sync::{Mutex, RwLock};
 
 use futures_util::future::join_all;
 use npc_core::config::{
-    ApiConfig, Config, LlmTask, PresetConfig, ProviderConfig, TranslationConfig, TranslationMode,
+    ApiConfig, Config, LlmTask, ModelRef, ProviderConfig, TranslationConfig, TranslationMode,
+    TranslationScope,
 };
 use npc_core::Bus;
 use npc_llm::{ChatMessage, ChatRequest, LlmClient};
@@ -57,19 +58,14 @@ impl Source {
 pub struct TranslationEngine {
     bus: Bus,
     llm: LlmClient,
-    /// Connection-resolution inputs frozen at construction — `providers` /
-    /// `presets` / `default_preset_id` / `api` all require a restart to
-    /// change, same as every other connection setting in this app. Combined
-    /// with the hot-reloaded `translation` section in `settings` (below) to
-    /// resolve `LlmTask::Translation` on each request via `resolve_llm`
-    /// (config resolution is centralized there, one preset/provider lookup
-    /// implementation instead of one per crate).
+    /// Connections and default frozen at construction, combined with the
+    /// hot-reloaded translation assignment on each request.
     api: ApiConfig,
     providers: Vec<ProviderConfig>,
-    presets: Vec<PresetConfig>,
-    default_preset_id: String,
+    default_ref: Option<ModelRef>,
+    mist: npc_core::config::MistConfig,
     /// The model and provider `self.llm` was built for. Frozen alongside the
-    /// endpoint so a live preset re-assignment can't send a new preset's
+    /// endpoint so a live model re-assignment can't send another provider's
     /// model name to the old provider's endpoint (see `resolve_model`).
     model: String,
     provider_id: String,
@@ -85,25 +81,22 @@ pub struct TranslationEngine {
 }
 
 impl TranslationEngine {
-    pub fn new(bus: Bus, config: &Config) -> Self {
+    pub fn new(bus: Bus, config: &Config) -> anyhow::Result<Self> {
         // base_url/api_key/reasoning_effort の解決は npc-core の resolve_llm
-        // に一本化した。preset/provider の割り当ても他の接続設定と同じく
+        // に一本化した。接続先の割り当ても他の接続設定と同じく
         // 再起動要なので、ここで一度だけ解決して固定する。
-        let resolved = config.resolve_llm(LlmTask::Translation);
+        let resolved = config.resolve_llm(LlmTask::Translation)?;
         let model = resolved.model.clone();
-        let provider_id = config
-            .preset(config.task_preset_id(LlmTask::Translation))
-            .map(|preset| preset.provider_id.clone())
-            .unwrap_or_default();
-        let llm =
-            LlmClient::new(resolved.base_url, resolved.api_key).with_reasoning_effort(resolved.reasoning_effort);
-        Self {
+        let provider_id = resolved.provider_id.clone();
+        let llm = LlmClient::new(resolved.base_url, resolved.api_key)
+            .with_reasoning_effort(resolved.reasoning_effort);
+        Ok(Self {
             bus,
             llm,
             api: config.api.clone(),
             providers: config.providers.clone(),
-            presets: config.presets.clone(),
-            default_preset_id: config.default_preset_id.clone(),
+            default_ref: config.default_ref.clone(),
+            mist: config.mist.clone(),
             model,
             provider_id,
             osc_address: config.vrc.osc_address.clone(),
@@ -111,42 +104,33 @@ impl TranslationEngine {
             user_history: Mutex::new(Vec::new()),
             agent_history: Mutex::new(Vec::new()),
             seq: AtomicU64::new(0),
-        }
+        })
     }
 
-    /// The effective model for the current (possibly hot-reloaded)
-    /// `translation` settings, via `resolve_llm` over the frozen
-    /// providers/presets/api snapshot from construction.
-    ///
-    /// `self.llm` is pinned to the endpoint resolved at construction, so the
-    /// hot value is only adopted while it stays on that same provider. A live
-    /// re-assignment to a preset on a *different* provider keeps the frozen
-    /// model until restart — otherwise we'd send the new preset's model name
-    /// to the old provider's endpoint, which just errors. The no-preset case
-    /// (provider id `""` on both sides) is the legacy `translation.model`
-    /// path, which has always hot-reloaded against the fixed `api.*`
-    /// endpoint; that behaviour is preserved exactly.
-    fn resolve_model(&self, settings: &TranslationConfig) -> String {
+    /// Adopt live model changes only on the client provider. Cross-provider
+    /// assignments keep the original model until restart; unusable refs error.
+    fn resolve_model(&self, settings: &TranslationConfig) -> anyhow::Result<String> {
         let cfg = Config {
             api: self.api.clone(),
             providers: self.providers.clone(),
-            presets: self.presets.clone(),
-            default_preset_id: self.default_preset_id.clone(),
+            default_ref: self.default_ref.clone(),
+            mist: self.mist.clone(),
             translation: settings.clone(),
             ..Config::default()
         };
-        let provider_id = cfg
-            .preset(cfg.task_preset_id(LlmTask::Translation))
-            .map(|preset| preset.provider_id.as_str())
-            .unwrap_or("");
-        if provider_id != self.provider_id {
-            return self.model.clone();
+        let resolved = cfg.resolve_llm(LlmTask::Translation)?;
+        if resolved.provider_id != self.provider_id {
+            return Ok(self.model.clone());
         }
-        cfg.resolve_llm(LlmTask::Translation).model
+        Ok(resolved.model)
     }
 
     pub fn mode(&self) -> TranslationMode {
         self.settings.read().unwrap().mode()
+    }
+
+    pub fn scope(&self) -> TranslationScope {
+        self.settings.read().unwrap().scope()
     }
 
     /// Adopt the `translation` section of a freshly saved config. Endpoint
@@ -183,7 +167,13 @@ impl TranslationEngine {
         // waiting on the LLM.
         self.publish(&id, source, &text, "", "", reversed);
 
-        let model = self.resolve_model(&settings);
+        let model = match self.resolve_model(&settings) {
+            Ok(model) => model,
+            Err(err) => {
+                tracing::error!(error = %err, "npc-translate: model is unavailable");
+                return;
+            }
+        };
 
         // Results accumulate as they arrive so each chatbox update is a
         // fuller version of the same text (ports `composeVRCChatbox`).
@@ -336,6 +326,7 @@ mod tests {
     fn settings() -> TranslationConfig {
         TranslationConfig {
             mode: "interpret".to_string(),
+            scope: "both".to_string(),
             source_language: "日本語".to_string(),
             target_language: "英語".to_string(),
             target_language_2: String::new(),
@@ -343,8 +334,69 @@ mod tests {
             auto_reverse: true,
             chatbox: false,
             model: String::new(),
+            model_ref: None,
+            reasoning_effort: String::new(),
             preset_id: String::new(),
         }
+    }
+
+    #[test]
+    fn live_refs_preserve_the_client_provider_and_use_effective_fallback() {
+        let mut config = Config {
+            providers: vec![
+                ProviderConfig {
+                    id: "http".into(),
+                    base_url: "http://endpoint/v1".into(),
+                    ..Default::default()
+                },
+                ProviderConfig {
+                    id: "room".into(),
+                    base_url: "mist-network://team".into(),
+                    enabled: false,
+                    ..Default::default()
+                },
+            ],
+            default_ref: Some(ModelRef {
+                provider_id: "http".into(),
+                model: "default-model".into(),
+            }),
+            ..Default::default()
+        };
+        config.translation.model_ref = Some(ModelRef {
+            provider_id: "room".into(),
+            model: "remote-model".into(),
+        });
+        let engine = TranslationEngine::new(Bus::new(), &config).unwrap();
+        assert_eq!(engine.provider_id, "http");
+        assert_eq!(
+            engine.resolve_model(&config.translation).unwrap(),
+            "default-model"
+        );
+        config.translation.model_ref = Some(ModelRef {
+            provider_id: "http".into(),
+            model: "new-model".into(),
+        });
+        assert_eq!(
+            engine.resolve_model(&config.translation).unwrap(),
+            "new-model"
+        );
+        config.translation.model_ref = Some(ModelRef {
+            provider_id: "missing".into(),
+            model: "new-model".into(),
+        });
+        assert!(engine.resolve_model(&config.translation).is_err());
+
+        config.providers[1].enabled = true;
+        config.translation.model_ref = None;
+        let engine = TranslationEngine::new(Bus::new(), &config).unwrap();
+        config.translation.model_ref = Some(ModelRef {
+            provider_id: "room".into(),
+            model: "remote-model".into(),
+        });
+        assert_eq!(
+            engine.resolve_model(&config.translation).unwrap(),
+            "default-model"
+        );
     }
 
     #[test]

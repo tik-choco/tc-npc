@@ -4,11 +4,15 @@
 // heard through the mic is a user bubble here, identical to a typed one
 // apart from a small ear glyph on the turn's name row — see `speechAsChat`.
 // Since translations were pulled out of the 通訳 sidebar tab, each
-// translation entry attaches its per-language rows directly beneath the row
-// that already shows its original text — the bubble above it already
-// displays the original once, so it isn't repeated. A translation
-// only falls back to its own standalone dashed bubble when no such source
-// row can be found (see `attachTranslations` below). The right column is a
+// translation entry renders its per-language rows *inside* the bubble that
+// already shows its original text, under a hairline rule — the bubble
+// already displays the original once, so it isn't repeated, and the pair
+// reads as one message in two languages rather than as two stacked things,
+// the way agent-speech keeps an original and its translations on a single
+// surface. The rows land seconds after the bubble was posted, so the bubble
+// grows into them rather than snapping (see `useGrowOnChange`). A
+// translation only falls back to its own standalone dashed bubble when no
+// source row can be found (see `attachTranslations` below). The right column is a
 // 320px sidebar (ChatSidebar) that carries 音声 / 状態 / 通訳: it pill-tabs
 // between a 音声 panel (volume meter, suspend/resume, TTS log), a 状態 panel
 // (a condensed 内心 affect readout plus connection/version/character/
@@ -42,7 +46,8 @@
 // about the switch position — while it's on, the user can simply talk to the
 // NPC instead of typing, the same way agent-speech works.
 import { Fragment } from "preact";
-import { useEffect, useMemo, useRef, useState } from "preact/hooks";
+import type { RefObject } from "preact";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import {
   Activity,
   AlertTriangle,
@@ -70,7 +75,7 @@ import type {
   TranslationEntry,
   TtsLineEntry,
 } from "../hooks/useNpcSocket";
-import { useAutoScroll } from "../hooks/useAutoScroll";
+import { NEAR_BOTTOM_PX, useAutoScroll } from "../hooks/useAutoScroll";
 import { getConfig } from "../lib/api";
 import type { ConnectionState } from "../lib/ws";
 import type { ChatLayout, ChatPanel } from "../lib/router";
@@ -78,6 +83,7 @@ import type { AvatarRef, CharacterRef, ConfigDocument } from "../lib/types";
 import type { SpeakingLevelReading } from "../vrm/level";
 import { ConnectionStatus } from "../components/ConnectionStatus";
 import { ChatSidebar } from "../components/ChatSidebar";
+import { Markdown, MarkdownInline } from "../components/Markdown";
 import { VrmStage } from "../components/VrmStage";
 import { useEmotion } from "../hooks/useEmotion";
 import { useI18n } from "../hooks/useI18n";
@@ -154,9 +160,9 @@ const COMPOSER_MAX_HEIGHT = 168;
 
 /**
  * Pairs each translation entry with the transcript row that already shows
- * its original text, so the entry's language rows can render attached
- * beneath that row instead of the transcript showing the original twice
- * (once in the row, once in a standalone translation bubble). Returns the
+ * its original text, so the entry's language rows can render inside that
+ * row's bubble instead of the transcript showing the original twice (once in
+ * the row, once in a standalone translation bubble). Returns the
  * source-row-id -> entry map, plus the entries that found no match (kept as
  * standalone `TranslationRow`s — the pre-merge fallback).
  *
@@ -249,12 +255,14 @@ interface RowMeta {
 
 /**
  * Annotates `rows` with grouping and day boundaries. A run is broken by a
- * different speaker, any non-chat row in between, a day change, a pause
- * longer than `GROUP_GAP_MS`, or an attached translation — an attachment
- * renders *below* its bubble, so letting the run continue past it would
- * bury the translation between two bubbles that read as one block.
+ * different speaker, any non-chat row in between, a day change, or a pause
+ * longer than `GROUP_GAP_MS`. An attached translation used to break a run
+ * too, back when it rendered as its own block below the bubble and
+ * continuing the run would have buried it between two bubbles that read as
+ * one block; now that it renders *inside* the bubble there is nothing to
+ * bury, and the run carries on as it would for any other message.
  */
-function describeRows(rows: Row[], attachments: Map<number, TranslationEntry>, lang: Lang, t: Translate): RowMeta[] {
+function describeRows(rows: Row[], lang: Lang, t: Translate): RowMeta[] {
   const groupable = (row: Row): row is ChatRow => row.kind === "chat";
 
   const continues = (prev: Row | undefined, row: Row | undefined): boolean => {
@@ -264,7 +272,6 @@ function describeRows(rows: Row[], attachments: Map<number, TranslationEntry>, l
     // carries the ear glyph — grouping them would file one under the other's
     // marker. Switching input mid-conversation starts a new run instead.
     if (Boolean(prev.spoken) !== Boolean(row.spoken)) return false;
-    if (attachments.has(prev.id)) return false;
     if (prev.ts && row.ts && !isSameDay(prev.ts, row.ts)) return false;
     return !prev.ts || !row.ts || row.ts - prev.ts <= GROUP_GAP_MS;
   };
@@ -300,7 +307,16 @@ function initialOf(name: string): string {
  *  consolidated long-term memory — so printing one in full buries the
  *  conversation it is supposed to annotate. Clamped to a couple of lines
  *  with a toggle; only long entries get the toggle at all, and expansion is
- *  per-entry state so re-reading one doesn't unfold the rest. */
+ *  per-entry state so re-reading one doesn't unfold the rest.
+ *
+ *  The text itself is Markdown: these documents are written by the model, and
+ *  models write `**強調**` and `- ` bullets whether or not anyone asked, which
+ *  the transcript used to print as literal asterisks. Which renderer applies
+ *  depends on the state — collapsed uses the inline one because
+ *  `-webkit-line-clamp` only clamps inline content (and a two-line preview
+ *  has no use for headings anyway), expanded gets the real block layout. A
+ *  short entry, which can never be expanded, therefore keeps exactly the
+ *  single-line shape it has always had, now with its emphasis showing. */
 function MemoryLine({ entry, t }: { entry: Extract<Row, { kind: "memory" }>; t: Translate }) {
   const [expanded, setExpanded] = useState(false);
   // Cheap proxy for "this will wrap past the clamp": either it is long or it
@@ -313,7 +329,7 @@ function MemoryLine({ entry, t }: { entry: Extract<Row, { kind: "memory" }>; t: 
         <em class="chat-system-tag">
           {entry.memoryKind === "short" ? t("chat.memory.short") : t("chat.memory.long")}
         </em>
-        {entry.text}
+        {expanded ? <Markdown text={entry.text} class="chat-memory-md" /> : <MarkdownInline text={entry.text} />}
       </span>
       {long && (
         <button type="button" class="chat-system-toggle" onClick={() => setExpanded((v) => !v)}>
@@ -375,8 +391,108 @@ function SystemLine({
   );
 }
 
+// How long a bubble takes to grow into a 通訳 block that landed after it was
+// posted, and the curve it travels. Matches the --dur-slow / --ease-out
+// tokens in index.css so it reads as the same motion vocabulary as the rest
+// of the app; it can't simply *use* them because neither end of the
+// animation is expressible in CSS (see `useGrowOnChange`).
+const GROW_MS = 360;
+const GROW_EASE = "cubic-bezier(0.16, 1, 0.3, 1)";
+
+/** Whether the viewer asked for reduced motion. index.css neutralizes CSS
+ *  animations and transitions under that preference, but a Web Animations API
+ *  animation is invisible to that rule, so the JS-driven grow has to ask for
+ *  itself. */
+function prefersReducedMotion(): boolean {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") return false;
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
+/** Keeps the transcript pinned to the live edge while a bubble animates to
+ *  its new size. useAutoScroll pins once, from a `useEffect` that runs while
+ *  the animation still holds the bubble at its *old* height — so on its own
+ *  it would leave the transcript a translation-block short of the bottom,
+ *  with the newly arrived translation as the one thing off screen. Only for a
+ *  reader who is already following: someone who scrolled up to re-read
+ *  something stays where they are, same rule as useAutoScroll's own. */
+function followGrowth(el: HTMLElement, anim: Animation): void {
+  const box = el.closest<HTMLElement>(".chat-transcript");
+  if (!box) return;
+  if (box.scrollHeight - box.scrollTop - box.clientHeight > NEAR_BOTTOM_PX) return;
+  const step = () => {
+    box.scrollTop = box.scrollHeight;
+    if (anim.playState === "running") requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
+
+/**
+ * Grows an element from the size it had before `signature` last changed to
+ * the size it has now.
+ *
+ * A 通訳 entry is created empty and filled in one language at a time as the
+ * translator returns (see useNpcSocket.ts), so a bubble gains a block of text
+ * seconds after it was posted — and since a translation is rarely as long as
+ * the line it translates, it gets wider as well as taller. Snapping between
+ * the two sizes mid-conversation is jarring, so both dimensions animate from
+ * the measured old box to the measured new one. Measured, and therefore
+ * driven from JS rather than a CSS transition: both ends are content-derived,
+ * so neither is a value CSS could have been given up front.
+ *
+ * The first measurement never animates — an element that arrives with its
+ * translation already in place (a reload's history backfill, say) isn't
+ * growing into anything.
+ */
+function useGrowOnChange(signature: string): RefObject<HTMLDivElement> {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const last = useRef<{ w: number; h: number } | null>(null);
+
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    // getBoundingClientRect, not offsetWidth/Height: those round to whole
+    // pixels, and a box pinned to a rounded width re-wraps its text a
+    // fraction differently than the layout it is animating towards.
+    const rect = el.getBoundingClientRect();
+    const next = { w: rect.width, h: rect.height };
+    const prev = last.current;
+    last.current = next;
+    if (!prev || (prev.w === next.w && prev.h === next.h)) return;
+    // A shrink means the baseline is stale, not that the bubble got smaller:
+    // the only thing that ever changes this element's `signature` is a
+    // translation being *added*, which can't reduce either dimension. What
+    // did change it is a reflow between the two measurements (the window
+    // resized, the sidebar opened, a webfont swapped in), and animating from
+    // a size the bubble no longer had would read as a collapse. Snap instead.
+    if (next.w < prev.w || next.h < prev.h) return;
+    if (typeof el.animate !== "function" || prefersReducedMotion()) return;
+    followGrowth(
+      el,
+      el.animate(
+        [
+          { width: `${prev.w}px`, height: `${prev.h}px` },
+          { width: `${next.w}px`, height: `${next.h}px` },
+        ],
+        { duration: GROW_MS, easing: GROW_EASE },
+      ),
+    );
+  }, [signature]);
+
+  return ref;
+}
+
+/** What `useGrowOnChange` watches for a bubble carrying a translation: the
+ *  entry's identity plus the set of languages filled in so far, which is
+ *  exactly what changes when a `translation` frame folds another language
+ *  into the entry. Distinct from "" (no translation at all), so the entry's
+ *  first appearance — the pending line, before any language has landed —
+ *  animates too. */
+function growSignature(entry: TranslationEntry | undefined): string {
+  return entry ? `${entry.id}:${Object.keys(entry.translations).join(",")}` : "";
+}
+
 /** The per-language rows shared by both places a translation can render:
- *  attached beneath its source row, or inside the standalone fallback
+ *  inside its source row's bubble, or inside the standalone fallback
  *  bubble. `entry.translations` fills in one language at a time as
  *  `translation` frames land (see useNpcSocket.ts), so this renders
  *  whatever subset has arrived so far and falls back to a "pending" line
@@ -412,10 +528,13 @@ function TranslationLines({ entry, t }: { entry: TranslationEntry; t: Translate 
  *  branch. This is now the fallback path only: `attachTranslations` couldn't
  *  find the transcript row that shows this entry's original text (source
  *  row scrolled out of the match window, was itself claimed by another
- *  entry, etc.), so — unlike the attached case — the original is worth
+ *  entry, etc.), so — unlike the in-bubble case — the original is worth
  *  showing here, since no other row on screen is showing it. */
 function TranslationBubble({ entry, t }: { entry: TranslationEntry; t: Translate }) {
   const isUser = entry.source === "user";
+  // Orphan or not, the languages still land one at a time, so this bubble
+  // grows the same way an attached one does.
+  const grow = useGrowOnChange(growSignature(entry));
   return (
     <div class={`chat-turn chat-turn--${isUser ? "user" : "assistant"} chat-turn--head chat-turn--tail`}>
       {/* Empty gutter, not an avatar: this bubble is an annotation rather
@@ -423,7 +542,7 @@ function TranslationBubble({ entry, t }: { entry: TranslationEntry; t: Translate
           bubbles it sits among. */}
       {!isUser && <div class="chat-turn-gutter" aria-hidden="true" />}
       <div class="chat-turn-body">
-        <div class="chat-bubble chat-bubble--translation">
+        <div class="chat-bubble chat-bubble--translation" ref={grow}>
           <div class="chat-translation-head">
             <Languages size={13} aria-hidden="true" />
             <span>{t("chat.translation.label")}</span>
@@ -502,6 +621,7 @@ function ChatTurn({
   t: Translate;
 }) {
   const isUser = row.role === "user";
+  const grow = useGrowOnChange(growSignature(attached));
   return (
     <div
       class={`chat-turn chat-turn--${row.role}${head ? " chat-turn--head" : ""}${tail ? " chat-turn--tail" : ""}`}
@@ -521,16 +641,21 @@ function ChatTurn({
           </div>
         )}
         <div class="chat-turn-bubble">
-          <div class={`chat-bubble chat-bubble--${row.role}`}>
+          {/* 通訳 rides inside the bubble, under the line it translates —
+              see the module header. The copy button stays a sibling of the
+              bubble rather than a child, and still copies the original
+              alone: the translation is an annotation on that line, not part
+              of what was said. */}
+          <div class={`chat-bubble chat-bubble--${row.role}`} ref={grow}>
             <div class="chat-bubble-text">{row.text}</div>
+            {attached && (
+              <div class="chat-translation-inline">
+                <TranslationLines entry={attached} t={t} />
+              </div>
+            )}
           </div>
           <CopyButton text={row.text} t={t} />
         </div>
-        {attached && (
-          <div class="chat-translation-attached">
-            <TranslationLines entry={attached} t={t} />
-          </div>
-        )}
         {tail && <time class="chat-turn-time">{formatTime(row.ts)}</time>}
       </div>
     </div>
@@ -851,10 +976,10 @@ export function ChatView({
   // entries (see useNpcSocket.ts — errors use it directly, translations via
   // `seq`), so merging and sorting by id keeps everything in arrival order.
   // Translations are additionally matched to their source row here (see
-  // `attachTranslations`): a matched entry's language rows render attached
-  // to that row instead of appearing as its own `rows` entry, so `rows`
-  // itself only carries the *unmatched* translations (as `TranslationRow`
-  // orphans) alongside the usual timeline/error rows.
+  // `attachTranslations`): a matched entry's language rows render inside
+  // that row's own bubble instead of appearing as its own `rows` entry, so
+  // `rows` itself only carries the *unmatched* translations (as
+  // `TranslationRow` orphans) alongside the usual timeline/error rows.
   const { items, attachments, lastId } = useMemo(() => {
     const errorRows: ErrorRow[] = errors.map((e) => ({ id: e.id, kind: "error", text: e.message, ts: e.ts }));
     const base: Exclude<Row, TranslationRow>[] = [...entries.map(speechAsChat), ...errorRows].sort(
@@ -863,7 +988,7 @@ export function ChatView({
     const { attachments, orphans } = attachTranslations(base, translations);
     const rows: Row[] = [...base, ...orphans].sort((a, b) => a.id - b.id);
     return {
-      items: describeRows(rows, attachments, lang, t),
+      items: describeRows(rows, lang, t),
       attachments,
       lastId: rows.length > 0 ? rows[rows.length - 1].id : undefined,
     };

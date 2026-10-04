@@ -54,6 +54,11 @@ export interface SchedulerSection {
 export interface TranslationSection {
   /** "off" | "interpret" | "assist" — anything else is treated as "off". */
   mode?: string;
+  /** "input" | "output" | "both" — which halves of the conversation get
+   *  subtitled. Anything else (including absent, i.e. every config written
+   *  before this setting existed) is treated as "both". Independent of
+   *  `mode`, which decides whether the NPC replies at all. */
+  scope?: string;
   source_language?: string;
   target_language?: string;
   target_language_2?: string;

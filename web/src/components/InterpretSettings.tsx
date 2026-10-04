@@ -22,6 +22,8 @@
 // input the two are equivalent, and this matches how SettingsView already
 // hand-rolled the source/target/target2/context_size fields before this
 // extraction (see git history), so behavior is unchanged.
+import { AlertTriangle } from "lucide-preact";
+
 import { useI18n } from "../hooks/useI18n";
 import type { ConfigDocHandle } from "../hooks/useConfigDoc";
 import type { MessageKey } from "../lib/i18n";
@@ -38,6 +40,17 @@ export const TRANSLATION_MODES: Array<{ value: string; labelKey: MessageKey; hin
   { value: "off", labelKey: "interpret.mode.off", hintKey: "interpret.mode.off.hint" },
   { value: "interpret", labelKey: "interpret.mode.interpret", hintKey: "interpret.mode.interpret.hint" },
   { value: "assist", labelKey: "interpret.mode.assist", hintKey: "interpret.mode.assist.hint" },
+];
+
+/** config.translation.scope values — which halves of the conversation get a
+ *  translation. A separate axis from the mode above: the mode decides what
+ *  kind of session this is (does the NPC answer at all), the scope decides
+ *  what gets subtitled. `both` is the default and is what every config
+ *  written before this setting existed behaves as. */
+export const TRANSLATION_SCOPES: Array<{ value: string; labelKey: MessageKey; hintKey: MessageKey }> = [
+  { value: "input", labelKey: "interpret.scope.input", hintKey: "interpret.scope.input.hint" },
+  { value: "output", labelKey: "interpret.scope.output", hintKey: "interpret.scope.output.hint" },
+  { value: "both", labelKey: "interpret.scope.both", hintKey: "interpret.scope.both.hint" },
 ];
 
 /** Suggestions for the language fields — free text, so anything else works
@@ -116,6 +129,69 @@ export function InterpretModeField({ translation, update, compact }: InterpretFi
         ))}
       </div>
       <span class="field-hint">{t(activeMode.hintKey)}</span>
+    </div>
+  );
+}
+
+/** 翻訳対象: input / output / both. Sits directly under the mode switch and
+ *  is just as permanently visible in the sidebar — deciding to subtitle only
+ *  your own speech, or only the NPC's answers, is a mid-conversation call in
+ *  the same way switching modes is, so burying it in the settings disclosure
+ *  would cost the detour that folding 通訳 into the sidebar removed.
+ *
+ *  Two combinations need saying out loud rather than silently doing nothing:
+ *  with the mode off there is no translation to scope at all (the control is
+ *  disabled), and `interpret` + `output` asks for subtitles on replies that
+ *  the mode itself has suppressed, so it translates nothing. The latter is
+ *  warned about, not forbidden: the pairing is a legal config (npc-translate
+ *  logs the same warning at startup), and blocking a radio the user just
+ *  clicked is worse than telling them what it does. */
+export function InterpretScopeField({ translation, update, compact }: InterpretFieldsProps) {
+  const { t } = useI18n();
+  const mode = translation.mode ?? "off";
+  const scope = translation.scope ?? "both";
+  const activeScope = TRANSLATION_SCOPES.find((s) => s.value === scope) ?? TRANSLATION_SCOPES[2];
+  const inert = mode === "off";
+  const translatesNothing = mode === "interpret" && scope === "output";
+
+  return (
+    <div class={`field${compact ? " interpret-fields--compact" : ""}`}>
+      <span>{t("interpret.scope")}</span>
+      {/* Same hand-rolled radiogroup as the mode switch above, for the same
+          reasons (per-option tooltip + an active-hint line). `name` is a
+          fixed literal too, and distinct from the mode group's — see the
+          comment there for why one instance at a time is guaranteed. */}
+      <div class={`segmented${inert ? " is-disabled" : ""}`} aria-label={t("interpret.panel.scope.aria")}>
+        {TRANSLATION_SCOPES.map((option) => (
+          <label
+            key={option.value}
+            class={`segmented-option${option.value === scope ? " is-active" : ""}`}
+            title={t(option.hintKey)}
+          >
+            <input
+              type="radio"
+              name="translation-scope"
+              value={option.value}
+              checked={option.value === scope}
+              disabled={inert}
+              onChange={() =>
+                update((section) => {
+                  section.scope = option.value;
+                })
+              }
+            />
+            {t(option.labelKey)}
+          </label>
+        ))}
+      </div>
+      {translatesNothing ? (
+        <span class="field-hint interpret-scope-warning">
+          <AlertTriangle size={12} aria-hidden="true" />
+          {t("interpret.scope.warning.noOutput")}
+        </span>
+      ) : (
+        <span class="field-hint">{inert ? t("interpret.scope.off.hint") : t(activeScope.hintKey)}</span>
+      )}
     </div>
   );
 }

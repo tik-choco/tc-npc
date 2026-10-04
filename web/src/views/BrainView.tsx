@@ -31,6 +31,7 @@ import {
   UserRound,
 } from "lucide-preact";
 
+import { Markdown } from "../components/Markdown";
 import { getAffectHistory, getMemory } from "../lib/api";
 import type { MemoryDocument } from "../lib/types";
 import type { AffectSnapshot } from "../hooks/useNpcSocket";
@@ -467,7 +468,12 @@ export function BrainView({ affect, affectHistory, memoryVersion }: BrainViewPro
             <div class="brain-memory-card">
               <h3 class="brain-memory-card-title">{t("brain.memory.shortTerm.title")}</h3>
               {memory && memory.shortTerm.trim() ? (
-                <p class="brain-memory-short-text">{memory.shortTerm}</p>
+                // Same model-written Markdown the チャット transcript renders
+                // (see ChatView's MemoryLine) — these are literally the same
+                // documents, so they can't show `**` as asterisks in one tab
+                // and as emphasis in the other. Nothing here is clamped, so
+                // both panels get the full block layout.
+                <Markdown text={memory.shortTerm} class="brain-memory-short-text" />
               ) : (
                 <p class="brain-memory-empty">{t("brain.memory.shortTerm.empty")}</p>
               )}
@@ -484,7 +490,7 @@ export function BrainView({ affect, affectHistory, memoryVersion }: BrainViewPro
                 <ul class="brain-memory-long-list">
                   {longTermSorted.map((doc) => (
                     <li key={doc.docId} class="brain-memory-long-item">
-                      <p class="brain-memory-long-text">{doc.text}</p>
+                      <Markdown text={doc.text} class="brain-memory-long-text" />
                       <time class="brain-memory-long-time">{relativeTime(doc.createdAt, t)}</time>
                     </li>
                   ))}

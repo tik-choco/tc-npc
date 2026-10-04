@@ -25,8 +25,9 @@ served on startup.
   management, and natural-language-to-command generation. Disabled by
   default.
 - **Scheduler**: timed announcements (TTS + chime) that can also fire actions
-  (commands, chat input, suspend/resume, raw bus messages). Disabled by
-  default.
+  (commands, chat input, suspend/resume, raw bus messages). Chimes and BGM are
+  picked in the 予定 tab from the `.wav` / `.mp3` files in `~/.tc-npc/sound/`,
+  which the tab's 音声フォルダ button opens. Disabled by default.
 - **Translation**: `interpret` (translate-only) and `assist` (chat +
   translation) modes, up to two target languages. Disabled by default.
 - **Web UI**: a Preact app (chat/character/people/speech/vision/action/
@@ -122,9 +123,13 @@ and used to override a few JSON fields via environment variables.
 **Never commit API keys.** `config.json` and `.env` are already
 `.gitignore`d.
 
-LLM/TTS/STT endpoints are OpenAI-compatible; defaults point at a local
-inference server (e.g. Ollama). See the comments in `config.example.json`
-for the full list of sections and fields.
+LLM configuration uses enabled providers and direct `{provider_id, model}`
+references: `default_ref`, optional task `model_ref`, and
+`memory.embedding_ref`. Presets migrate once on load and are never saved again.
+Temperature is never sent. Replace the example's model placeholders with your
+endpoint's raw model IDs. HTTP endpoints are OpenAI-compatible; Room providers
+use `mist-network://<room>` through `mistl ai serve`.
+See [LLM configuration](docs/LLM-CONFIG.md) for the schema and migration.
 
 If your OpenAI-compatible endpoint uses a private-CA certificate (common on
 institutional networks) and you can't install the root CA into the OS trust

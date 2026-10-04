@@ -22,7 +22,8 @@ English README: [README.md](README.md)
   列生成。既定では無効
 - **スケジューラ (scheduler)**: 時刻指定の定時アナウンス(TTS+チャイム)に加え、
   同じ時刻にアクション(コマンド・会話投入・suspend/resume・raw送信)も実行可能。
-  既定では無効
+  チャイムとBGMは `~/.tc-npc/sound/` に置いた `.wav` / `.mp3` から予定タブで
+  選ぶ(タブの「音声フォルダ」ボタンでそのフォルダを開ける)。既定では無効
 - **同時通訳 (translation)**: `interpret`(通訳のみ)/ `assist`(会話+訳文付き)の
   2モード、翻訳先は最大2言語。既定では無効
 - **Web UI**: Preact製のローカルUI(チャット/キャラ/人物/音声/視覚/行動/予定/通訳/
@@ -119,9 +120,12 @@ JSONフィールドを上書きします。
 **APIキーは絶対にコミットしないでください。** `config.json` と `.env` は
 `.gitignore` 済みです。
 
-LLM/TTS/STTのエンドポイントはすべてOpenAI互換で、既定値はlocalhost(Ollama等)を
-想定しています。設定項目の全リストは `config.example.json` 内のコメントを参照
-してください。
+LLM 設定は有効な接続先と `{provider_id, model}` の直接参照を使います。
+`default_ref`、各タスクの任意の `model_ref`、`memory.embedding_ref` で選択します。
+旧プリセットは読み込み時に一度だけ移行し、保存しません。temperature は送信しません。
+設定例のモデル名は実際のモデル ID に置き換えてください。HTTP は OpenAI 互換、
+ルームは `mist-network://<room>` を指定し、`mistl ai serve` 経由で利用します。
+詳しくは [LLM 設定](docs/LLM-CONFIG.md) を参照してください。
 
 学内・社内のOpenAI互換サーバーがプライベートCA証明書を使っていてOSのトラスト
 ストアにルートCAをインストールできない場合は、環境変数 `TC_NPC_CA_BUNDLE` に

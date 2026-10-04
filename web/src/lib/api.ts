@@ -176,6 +176,41 @@ export function deleteVrmModel(file: string): Promise<void> {
   return request(`/api/vrm/${encodeURIComponent(file)}`, { method: "DELETE" });
 }
 
+// --- sound folder -----------------------------------------------------
+//
+// `{data_dir}/sound/`: the chime and BGM files a scheduler announcement can
+// name. Same folder-is-the-library arrangement as the two above, minus an
+// upload endpoint — `revealSoundFolder` opens the folder itself instead,
+// which is the more direct way to add half a dozen tracks at once.
+
+/** One playable file in the sound folder. */
+export interface SoundFile {
+  /** File name including the extension — what goes in `chime_file`/`bgm_file`. */
+  file: string;
+  /** File name without the extension, for display. */
+  name: string;
+  size: number;
+}
+
+/**
+ * Files in the sound folder, plus its absolute path (shown in the UI so the
+ * operator knows where to drop audio without going through the browser).
+ * Only formats the server can decode are listed — a file it would fail to
+ * play is not offered as a choice.
+ */
+export function getSounds(): Promise<{ sounds: SoundFile[]; dir: string }> {
+  return request("/api/sound");
+}
+
+/**
+ * Open the sound folder in the OS file manager. The browser can't do this
+ * itself, so the server — which runs on the same machine — does it; the
+ * folder is a server-side constant, so there is nothing to pass.
+ */
+export function revealSoundFolder(): Promise<{ ok: boolean; dir: string }> {
+  return request("/api/sound/reveal", { method: "POST" });
+}
+
 /** Snapshot of the memory module: the short-term summary plus the
  *  newest-first-able long-term store, for the 感情 tab's memory panel. */
 export function getMemory(): Promise<MemoryDocument> {

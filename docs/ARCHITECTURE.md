@@ -324,6 +324,34 @@ the mic muted for the whole clip. Priority clips (`agent:interrupt` / `tts`
 — chimes, scheduler announcements) are exempt, matching the Go original's
 `!a.isPriorityPlaying.Load()`.
 
+### Sound library (chime / BGM)
+
+`{data_dir}/sound/` is where an announcement's `chime_file` and `bgm_file`
+come from (`npc_core::sound`) — the same folder-is-the-library arrangement as
+`vrm/` and `sprites/`, listed by `GET /api/sound` and picked from a select in
+the 予定 tab.
+
+A reference is **not** required to be a library file name, because these two
+fields predate the folder. `resolve_sound_path` tries, in order: an absolute
+path as-is, then `{data_dir}/sound/{ref}`, then `{data_dir}/{ref}` (so a
+`"sound/chime.wav"` written when the only way to be found was to start the
+process from the data dir still resolves), and finally the reference
+unchanged — the CWD-relative reading it always had. Nothing that worked
+before stops working; what changes is that a bare `chime.wav` now means
+something, and means it regardless of where the process was started. Note
+this deliberately skips the `validate_sound_file_name` a listing endpoint
+applies: a config is written by the operator locally and may legitimately
+point anywhere, whereas a name arriving in a URL may not.
+
+Decoding is `npc-speech`'s `wavio::decode_audio`, which dispatches on the
+container's own magic rather than the extension: `RIFF` goes to `hound`,
+everything else to symphonia (mp3 only — `default-features = false`).
+`SOUND_EXTENSIONS` and symphonia's enabled features are two halves of one
+decision; widening the listing without widening the decoder puts files in the
+picker that fail at play time with only a log line to say why. Mixing then
+runs on a blocking thread (`mix_off_thread`): a full-length BGM track is
+seconds of CPU, which is not something to do on a runtime worker.
+
 ## Simultaneous interpretation (`npc-translate`)
 
 Ports the translation half of Go `agent-speech` (`handleTranslation` /
@@ -334,8 +362,18 @@ Ports the translation half of Go `agent-speech` (`handleTranslation` /
   and **npc-talk does not answer it**: npc-talk reads the same setting and
   drops speech input while this mode is on, so the NPC acts purely as an
   interpreter.
-- `mode: "assist"` — normal conversation, with both heard speech and the
-  NPC's `chat_response` translated as subtitles.
+- `mode: "assist"` — normal conversation, with heard speech and the NPC's
+  `chat_response` translated as subtitles.
+
+`scope` then picks which halves of that are actually translated —
+`"input"` (heard speech only), `"output"` (the NPC's replies only) or
+`"both"`, the default and the behaviour of every config written before the
+setting existed. It is a separate axis from `mode` on purpose: the mode
+decides whether the NPC answers, the scope decides what gets subtitled. Not
+every pairing does something — `interpret` + `output` asks for subtitles on
+replies the mode has already suppressed and translates nothing, which
+npc-translate warns about at startup and the web UI warns about at the point
+of choosing.
 
 Targets are `target_language` (+ optional `target_language_2`), with
 `auto_reverse` translating a reply *in* a target language back into
@@ -654,6 +692,16 @@ not a broadcast.
   (`MAX_VRM_UPLOAD_BYTES`, 200 MB) — the 2 MB default won't pass a model.
 - `DELETE /api/vrm/{file}`. Characters pointing at the deleted model keep the
   reference: restoring the file restores the avatar.
+- `GET /api/sound` → `{sounds: [{file, name, size}], dir}` — a listing of
+  `{data_dir}/sound/`, the chime/BGM folder, plus its absolute path. Only the
+  formats the playback path can decode (`.wav`, `.mp3`) are listed, so the
+  予定 tab's pickers can't offer a file that would fail at play time. There is
+  no upload counterpart: `POST /api/sound/reveal` opens the folder in the
+  operator's own file manager (the browser can't, the server is on the same
+  machine), which is the shorter route for adding a handful of tracks. The
+  folder is created first, so the button works on an install that has never
+  had a sound in it. It takes no path parameter — the folder it opens is a
+  server-side constant.
 - `POST /api/scheduler/test` → `{index?, text?, chime_file?, actions?}` fires
   one announcement immediately (ignoring the clock and `scheduler.enabled`)
   via `npc_scheduler::fire_announcement`; responds `{ok, fired, spoke,

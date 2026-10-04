@@ -53,6 +53,13 @@
   color: var(--text-subtle);
 }
 
+/* Carries an absolute path, which has no spaces to wrap at on Windows —
+   `break-all` keeps a deep `C:\Users\…` from widening the whole view. */
+.schedule-sound-hint {
+  margin-top: 0;
+  word-break: break-all;
+}
+
 /* Soonest upcoming announcement across the whole list. */
 .schedule-next-up {
   display: flex;
@@ -488,6 +495,15 @@
 .schedule-action-fields input.schedule-action-narrow {
   flex: 0 1 150px;
   min-width: 100px;
+}
+
+/* The `speak` action's chime picker (components/SoundField.tsx): a label
+   wrapping a select, where the sibling fields are bare inputs — so it takes
+   the same narrow track rather than the label's default column layout. */
+.schedule-action-fields label.schedule-action-narrow {
+  display: flex;
+  flex: 0 1 170px;
+  min-width: 110px;
 }
 
 .schedule-action-note {

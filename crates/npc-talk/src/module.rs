@@ -49,7 +49,7 @@ impl Module for TalkModule {
     async fn run(self: Box<Self>, ctx: ModuleCtx) -> anyhow::Result<()> {
         // Resolved once at startup (no hot-reload for the talk connection
         // itself, matching the pre-preset behavior).
-        let resolved = ctx.config.resolve_llm(npc_core::LlmTask::Talk);
+        let resolved = ctx.config.resolve_llm(npc_core::LlmTask::Talk)?;
         let llm = npc_llm::LlmClient::new(resolved.base_url.clone(), resolved.api_key.clone())
             .with_reasoning_effort(resolved.reasoning_effort.clone());
 

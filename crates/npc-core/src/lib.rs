@@ -10,6 +10,7 @@ pub mod module;
 pub mod osc;
 pub mod person;
 pub mod schedule_profile;
+pub mod sound;
 pub mod sprite;
 pub mod vrm;
 
@@ -20,7 +21,7 @@ pub use character::{
 };
 pub use chatlog::ChatLogEntry;
 pub use config::{
-    data_dir, unmask_provider_keys, Config, LlmTask, PresetConfig, ProviderConfig, ResolvedLlm,
+    data_dir, unmask_provider_keys, Config, LlmTask, ModelRef, ProviderConfig, ResolvedLlm,
 };
 pub use module::{Module, ModuleCtx};
 pub use person::{
@@ -31,6 +32,7 @@ pub use schedule_profile::{
     delete_schedule_profile, list_schedule_profiles, load_schedule_profile, save_schedule_profile,
     ScheduleProfile,
 };
+pub use sound::{list_sounds, resolve_sound_path, sound_dir, SoundFile};
 pub use sprite::{
     delete_sprite, list_sprites, read_sprite, save_sprite, sprite_dir, sprite_exists, SpriteSheet,
 };

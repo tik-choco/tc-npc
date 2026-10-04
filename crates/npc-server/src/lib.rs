@@ -211,6 +211,8 @@ async fn run_server(ctx: ModuleCtx) -> anyhow::Result<()> {
                 .layer(DefaultBodyLimit::max(MAX_SPRITE_UPLOAD_BYTES))
                 .delete(rest::api_delete_sprite),
         )
+        .route("/api/sound", get(rest::api_list_sound))
+        .route("/api/sound/reveal", post(rest::api_reveal_sound_folder))
         .route("/api/scheduler/test", post(rest::api_scheduler_test))
         .route("/api/scheduler/export", get(rest::api_scheduler_export))
         .route("/api/scheduler/import", post(rest::api_scheduler_import))

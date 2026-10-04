@@ -27,7 +27,13 @@ import { AlertTriangle, SlidersHorizontal } from "lucide-preact";
 import type { ConfigDocHandle } from "../hooks/useConfigDoc";
 import { useI18n } from "../hooks/useI18n";
 import { SaveChip } from "./SaveChip";
-import { InterpretModeField, InterpretSettings, readTranslation, translationUpdater } from "./InterpretSettings";
+import {
+  InterpretModeField,
+  InterpretScopeField,
+  InterpretSettings,
+  readTranslation,
+  translationUpdater,
+} from "./InterpretSettings";
 import "../styles/components.css";
 import "../styles/interpret.css";
 
@@ -97,7 +103,13 @@ export function InterpretPanel({ config: doc }: InterpretPanelProps) {
       </div>
 
       {config ? (
-        <InterpretModeField translation={translation} update={update} compact />
+        <>
+          <InterpretModeField translation={translation} update={update} compact />
+          {/* Kept out of the disclosure below, next to the mode switch:
+              which side to subtitle is decided mid-conversation as often as
+              the mode itself. */}
+          <InterpretScopeField translation={translation} update={update} compact />
+        </>
       ) : (
         <span class="field-hint">{t("common.loading")}</span>
       )}

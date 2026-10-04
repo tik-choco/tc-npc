@@ -53,52 +53,72 @@ pub struct Config {
     pub character: CharacterConfig,
     #[serde(default)]
     pub mist: MistConfig,
-    /// 接続先(provider)一覧。「どこに繋ぐか」だけを持つ。空の場合は
-    /// `migrate_llm_config` が起動時に `api.*` から1件だけ組み立てる。
+    /// HTTP and Room connections. Room requests use mistl's local AI serve API.
     #[serde(default)]
     pub providers: Vec<ProviderConfig>,
-    /// モデルプリセット一覧。「どう呼ぶか」だけを持つ。
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_ref: Option<ModelRef>,
+    /// Deserialize-only fields consumed by the load migration.
+    #[serde(default, skip_serializing)]
     pub presets: Vec<PresetConfig>,
-    /// 各タスクの `preset_id` が空のときに使う既定 preset の id。
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub default_preset_id: String,
 }
 
-// ---------------------------------------------------------------------
-// providers / presets
-// ---------------------------------------------------------------------
-
-/// 接続先。「どこに繋ぐか」だけを持つ(tc-docs/drafts/llm-settings-common-v1.md
-/// §2.1)。`id` は設定 UI が生成する安定 id(例: `"p1"`)で、`presets[].provider_id`
-/// から参照される。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ProviderConfig {
-    #[serde(default)]
-    pub id: String,
-    #[serde(default)]
-    pub label: String,
-    #[serde(default)]
-    pub base_url: String,
-    /// SECRET: never log or serialize unredacted to the web UI.
-    #[serde(default)]
-    pub api_key: String,
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelRef {
+    pub provider_id: String,
+    pub model: String,
 }
 
-/// モデルプリセット。「どう呼ぶか」だけを持つ(tc-docs/drafts/llm-settings-common-v1.md
-/// §2.1)。各タスクセクションはこの `id` だけを持つ。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct PresetConfig {
-    #[serde(default)]
+/// An HTTP endpoint or Room, with an optional discovery cache.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProviderConfig {
     pub id: String,
-    #[serde(default)]
     pub label: String,
-    #[serde(default)]
+    pub base_url: String,
+    /// SECRET: never log or serialize unredacted to the web UI.
+    pub api_key: String,
+    pub enabled: bool,
+    pub models: Vec<String>,
+    pub models_fetched_at: Option<String>,
+    pub provide: bool,
+    pub shared: Vec<ModelRef>,
+}
+
+impl Default for ProviderConfig {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            label: String::new(),
+            base_url: String::new(),
+            api_key: String::new(),
+            enabled: true,
+            models: Vec::new(),
+            models_fetched_at: None,
+            provide: false,
+            shared: Vec::new(),
+        }
+    }
+}
+
+impl ProviderConfig {
+    pub fn room(&self) -> Option<&str> {
+        self.base_url
+            .strip_prefix("mist-network://")
+            .filter(|r| !r.trim().is_empty())
+    }
+}
+
+/// Legacy presets are read only for migration, never used at runtime.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct PresetConfig {
+    pub id: String,
+    pub label: String,
     pub provider_id: String,
-    #[serde(default)]
     pub model: String,
-    /// `""` = `api.reasoning_effort` を継承。
-    #[serde(default)]
     pub reasoning_effort: String,
 }
 
@@ -222,8 +242,10 @@ pub struct TtsConfig {
     pub speed: f32,
     #[serde(default = "default_tts_max_len")]
     pub max_len: u32,
-    /// 使用する preset の id。空なら `default_preset_id` に追従。
-    #[serde(default)]
+    /// Unset inherits default_ref. Invalid assignments are preserved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_ref: Option<ModelRef>,
+    #[serde(default, skip_serializing)]
     pub preset_id: String,
 }
 
@@ -237,6 +259,7 @@ impl Default for TtsConfig {
             voice: default_tts_voice(),
             speed: default_speed(),
             max_len: default_tts_max_len(),
+            model_ref: None,
             preset_id: String::new(),
         }
     }
@@ -247,7 +270,7 @@ impl Default for TtsConfig {
 // ---------------------------------------------------------------------
 
 fn default_stt_model() -> String {
-    "whisper-1".to_string()
+    String::new()
 }
 fn default_silence_duration() -> f32 {
     1.5
@@ -290,8 +313,10 @@ pub struct SttConfig {
     /// is playing* to trigger barge-in. See [`default_barge_in_factor`].
     #[serde(default = "default_barge_in_factor")]
     pub barge_in_factor: f32,
-    /// 使用する preset の id。空なら `default_preset_id` に追従。
-    #[serde(default)]
+    /// Unset inherits default_ref. Invalid assignments are preserved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_ref: Option<ModelRef>,
+    #[serde(default, skip_serializing)]
     pub preset_id: String,
 }
 
@@ -306,6 +331,7 @@ impl Default for SttConfig {
             input_threshold: default_input_threshold(),
             barge_in: true,
             barge_in_factor: default_barge_in_factor(),
+            model_ref: None,
             preset_id: String::new(),
         }
     }
@@ -364,8 +390,12 @@ pub struct TalkConfig {
     pub allow_silence: bool,
     #[serde(default)]
     pub affect: AffectConfig,
-    /// 使用する preset の id。空なら `default_preset_id` に追従。
+    /// Unset inherits default_ref. Invalid assignments are preserved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_ref: Option<ModelRef>,
     #[serde(default)]
+    pub reasoning_effort: String,
+    #[serde(default, skip_serializing)]
     pub preset_id: String,
 }
 
@@ -379,6 +409,8 @@ impl Default for TalkConfig {
             style_rules: true,
             allow_silence: true,
             affect: AffectConfig::default(),
+            model_ref: None,
+            reasoning_effort: String::new(),
             preset_id: String::new(),
         }
     }
@@ -469,11 +501,16 @@ pub struct MemoryConfig {
     /// 人物ごとの記憶。
     #[serde(default)]
     pub people: PersonMemoryConfig,
-    /// 要約・統合に使う preset の id。空なら `default_preset_id` に追従。
+    /// Unset inherits default_ref. Invalid assignments are preserved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_ref: Option<ModelRef>,
     #[serde(default)]
+    pub reasoning_effort: String,
+    #[serde(default, skip_serializing)]
     pub preset_id: String,
-    /// 埋め込みに使う preset の id。空なら `default_preset_id` に追従。
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_ref: Option<ModelRef>,
+    #[serde(default, skip_serializing)]
     pub embedding_preset_id: String,
 }
 
@@ -489,7 +526,10 @@ impl Default for MemoryConfig {
             summarize_prompt: default_summarize_prompt(),
             consolidate_prompt: default_consolidate_prompt(),
             people: PersonMemoryConfig::default(),
+            model_ref: None,
+            reasoning_effort: String::new(),
             preset_id: String::new(),
+            embedding_ref: None,
             embedding_preset_id: String::new(),
         }
     }
@@ -569,8 +609,12 @@ pub struct VisionConfig {
     /// 画面に映った人物を検出し、`person_seen` として publish するか。既定 false。
     #[serde(default)]
     pub person_detection: bool,
-    /// 使用する preset の id。空なら `default_preset_id` に追従。
+    /// Unset inherits default_ref. Invalid assignments are preserved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_ref: Option<ModelRef>,
     #[serde(default)]
+    pub reasoning_effort: String,
+    #[serde(default, skip_serializing)]
     pub preset_id: String,
 }
 
@@ -587,6 +631,8 @@ impl Default for VisionConfig {
             system_prompt: default_vision_system_prompt(),
             debug_save: false,
             person_detection: false,
+            model_ref: None,
+            reasoning_effort: String::new(),
             preset_id: String::new(),
         }
     }
@@ -673,8 +719,12 @@ pub struct ActionConfig {
     pub locations: Vec<LocationConfig>,
     #[serde(default)]
     pub routes: Vec<RouteConfig>,
-    /// 使用する preset の id。空なら `default_preset_id` に追従。
+    /// Unset inherits default_ref. Invalid assignments are preserved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_ref: Option<ModelRef>,
     #[serde(default)]
+    pub reasoning_effort: String,
+    #[serde(default, skip_serializing)]
     pub preset_id: String,
 }
 
@@ -685,6 +735,8 @@ impl Default for ActionConfig {
             osc_address: default_osc_address(),
             locations: Vec::new(),
             routes: Vec::new(),
+            model_ref: None,
+            reasoning_effort: String::new(),
             preset_id: String::new(),
         }
     }
@@ -901,6 +953,9 @@ pub struct ScheduleProfileState {
 fn default_translation_mode() -> String {
     "off".to_string()
 }
+fn default_translation_scope() -> String {
+    "both".to_string()
+}
 fn default_source_language() -> String {
     "日本語".to_string()
 }
@@ -950,6 +1005,55 @@ impl std::fmt::Display for TranslationMode {
     }
 }
 
+/// Which half of the conversation gets translated.
+///
+/// Orthogonal to [`TranslationMode`], which answers a different question:
+/// `mode` decides what kind of session this is (does the NPC *reply* at all),
+/// `scope` decides which halves of it get subtitled. Splitting them is what
+/// makes "subtitle only my own speech" and "subtitle only the NPC's answers"
+/// expressible — before this setting, `assist` always did both.
+///
+/// Anything unrecognized (an old config, a typo) is [`TranslationScope::Both`]
+/// rather than an error: that is exactly what every config predating this
+/// field behaved as, so an unreadable value can't silently stop translating.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranslationScope {
+    /// Only what the NPC hears (`agent:sense` / `speech`).
+    Input,
+    /// Only what the NPC answers (`agent:chat` / `chat_response`). Nothing is
+    /// translated at all if this is combined with [`TranslationMode::Interpret`],
+    /// where npc-talk never answers — the web UI warns about that pairing
+    /// rather than forbidding it, since the config is the user's to state.
+    Output,
+    /// Both halves — the behaviour of every release before this setting existed.
+    Both,
+}
+
+impl TranslationScope {
+    pub fn translates_input(self) -> bool {
+        matches!(self, TranslationScope::Input | TranslationScope::Both)
+    }
+
+    pub fn translates_output(self) -> bool {
+        matches!(self, TranslationScope::Output | TranslationScope::Both)
+    }
+
+    /// The config-file spelling, so logs say the same word the user typed.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TranslationScope::Input => "input",
+            TranslationScope::Output => "output",
+            TranslationScope::Both => "both",
+        }
+    }
+}
+
+impl std::fmt::Display for TranslationScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Simultaneous interpretation settings, ported from Go `agent-speech`'s
 /// `translation` config section (`internal/config/config.go`'s
 /// `TranslationConfig` + `internal/app/app.go`'s `handleTranslation`). The Go
@@ -960,6 +1064,11 @@ pub struct TranslationConfig {
     /// `off` | `interpret` | `assist` — see [`TranslationMode`].
     #[serde(default = "default_translation_mode")]
     pub mode: String,
+    /// `input` | `output` | `both` — see [`TranslationScope`]. Independent of
+    /// `mode`: this says which halves of the conversation are subtitled, not
+    /// whether the NPC answers.
+    #[serde(default = "default_translation_scope")]
+    pub scope: String,
     /// The language the speaker is expected to use; the target
     /// `auto_reverse` translates *back* into when someone answers in a
     /// different language.
@@ -989,8 +1098,12 @@ pub struct TranslationConfig {
     /// `api.model`.
     #[serde(default)]
     pub model: String,
-    /// 使用する preset の id。空なら `default_preset_id` に追従。
+    /// Unset inherits default_ref. Invalid assignments are preserved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_ref: Option<ModelRef>,
     #[serde(default)]
+    pub reasoning_effort: String,
+    #[serde(default, skip_serializing)]
     pub preset_id: String,
 }
 
@@ -998,6 +1111,7 @@ impl Default for TranslationConfig {
     fn default() -> Self {
         Self {
             mode: default_translation_mode(),
+            scope: default_translation_scope(),
             source_language: default_source_language(),
             target_language: default_target_language(),
             target_language_2: String::new(),
@@ -1005,6 +1119,8 @@ impl Default for TranslationConfig {
             auto_reverse: true,
             chatbox: false,
             model: String::new(),
+            model_ref: None,
+            reasoning_effort: String::new(),
             preset_id: String::new(),
         }
     }
@@ -1019,8 +1135,18 @@ impl TranslationConfig {
         }
     }
 
+    pub fn scope(&self) -> TranslationScope {
+        match self.scope.trim().to_ascii_lowercase().as_str() {
+            "input" => TranslationScope::Input,
+            "output" => TranslationScope::Output,
+            _ => TranslationScope::Both,
+        }
+    }
+
     /// Whether npc-talk should stay silent about what it hears (see
-    /// [`TranslationMode::Interpret`]).
+    /// [`TranslationMode::Interpret`]). Deliberately not affected by
+    /// [`scope`](Self::scope): whether the NPC answers is a property of the
+    /// session, not of which halves the user wants subtitled.
     pub fn suppresses_chat(&self) -> bool {
         self.mode() == TranslationMode::Interpret
     }
@@ -1088,14 +1214,32 @@ pub struct CharacterConfig {
 // mist
 // ---------------------------------------------------------------------
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MistConfig {
+    /// Local OpenAI-compatible bridge started with `mistl ai serve`.
+    #[serde(default = "default_mist_ai_base_url")]
+    pub ai_base_url: String,
     #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
     pub signaling_url: String,
     #[serde(default)]
     pub room_id: String,
+}
+
+fn default_mist_ai_base_url() -> String {
+    "http://127.0.0.1:6478/v1".to_string()
+}
+
+impl Default for MistConfig {
+    fn default() -> Self {
+        Self {
+            ai_base_url: default_mist_ai_base_url(),
+            enabled: false,
+            signaling_url: String::new(),
+            room_id: String::new(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -1116,11 +1260,10 @@ pub enum LlmTask {
     Stt,
 }
 
-/// The effective connection info for one [`LlmTask`], after resolving
-/// `preset_id` -> preset -> provider (or falling back to the legacy
-/// per-section fields). See [`Config::resolve_llm`].
+/// Connection and model resolved without modifying the stored reference.
 #[derive(Clone, Debug, Default)]
 pub struct ResolvedLlm {
+    pub provider_id: String,
     pub base_url: String,
     pub api_key: String,
     pub model: String,
@@ -1133,39 +1276,37 @@ impl Config {
         self.providers.iter().find(|p| p.id == id)
     }
 
-    /// Look up a preset by id.
-    pub fn preset(&self, id: &str) -> Option<&PresetConfig> {
-        self.presets.iter().find(|p| p.id == id)
-    }
-
-    /// The preset id assigned to `task`. An empty per-task `preset_id`
-    /// resolves to [`Config::default_preset_id`].
-    pub fn task_preset_id(&self, task: LlmTask) -> &str {
-        let assigned = match task {
-            LlmTask::Talk => &self.talk.preset_id,
-            LlmTask::Memory => &self.memory.preset_id,
-            LlmTask::Embedding => &self.memory.embedding_preset_id,
-            LlmTask::Vision => &self.vision.preset_id,
-            LlmTask::Action => &self.action.preset_id,
-            LlmTask::Translation => &self.translation.preset_id,
-            LlmTask::Tts => &self.tts.preset_id,
-            LlmTask::Stt => &self.stt.preset_id,
-        };
-        if assigned.is_empty() {
-            &self.default_preset_id
-        } else {
-            assigned
+    /// The stored assignment, without rewriting disabled or missing references.
+    pub fn task_ref(&self, task: LlmTask) -> Option<&ModelRef> {
+        match task {
+            LlmTask::Talk => self.talk.model_ref.as_ref(),
+            LlmTask::Memory => self.memory.model_ref.as_ref(),
+            LlmTask::Embedding => self.memory.embedding_ref.as_ref(),
+            LlmTask::Vision => self.vision.model_ref.as_ref(),
+            LlmTask::Action => self.action.model_ref.as_ref(),
+            LlmTask::Translation => self.translation.model_ref.as_ref(),
+            LlmTask::Tts => self.tts.model_ref.as_ref(),
+            LlmTask::Stt => self.stt.model_ref.as_ref(),
         }
     }
 
-    /// The legacy (pre-provider/preset) model value for `task`, used as the
-    /// last-resort fallback both when a preset's own `model` is empty and
-    /// when no preset resolves at all. Must match each crate's pre-existing
-    /// fallback exactly:
-    /// `crates/npc-vision/src/lib.rs:82-99`,
-    /// `crates/npc-translate/src/engine.rs:125-128`,
-    /// `crates/npc-speech/src/lib.rs:363-367` (tts), `:173` (stt, always
-    /// `stt.model` — it already carries a non-empty default).
+    fn task_effort(&self, task: LlmTask) -> &str {
+        let effort = match task {
+            LlmTask::Talk => &self.talk.reasoning_effort,
+            LlmTask::Memory => &self.memory.reasoning_effort,
+            LlmTask::Vision => &self.vision.reasoning_effort,
+            LlmTask::Action => &self.action.reasoning_effort,
+            LlmTask::Translation => &self.translation.reasoning_effort,
+            _ => &self.api.reasoning_effort,
+        };
+        if effort.is_empty() {
+            &self.api.reasoning_effort
+        } else {
+            effort
+        }
+    }
+
+    /// Pre-provider model selection, used only by the direct-field migration.
     fn legacy_model(&self, task: LlmTask) -> String {
         match task {
             LlmTask::Talk | LlmTask::Memory | LlmTask::Action => self.api.model.clone(),
@@ -1184,8 +1325,7 @@ impl Config {
                     self.api.model.clone()
                 }
             }
-            // `TtsConfig::model` empty falls back to `api.model`
-            // (`synthesize_tts` in npc-speech), unlike stt below.
+            // Legacy TTS inherited the chat model when its own was empty.
             LlmTask::Tts => {
                 if !self.tts.model.is_empty() {
                     self.tts.model.clone()
@@ -1193,21 +1333,19 @@ impl Config {
                     self.api.model.clone()
                 }
             }
-            // `SttConfig::model` has its own non-empty default
-            // (`default_stt_model`) and is used as-is, with no fallback to
-            // `api.model` in npc-speech.
+            // Legacy STT used its own model without inheriting api.model.
             LlmTask::Stt => self.stt.model.clone(),
         }
     }
 
-    /// The legacy connection info for `task` — i.e. what every crate computed
-    /// before providers/presets existed. Used by [`Config::resolve_llm`] when
-    /// no preset/provider pair resolves for the task.
+    /// Pre-provider endpoint/credentials, used only by the load migration.
     fn legacy_llm(&self, task: LlmTask) -> ResolvedLlm {
         let (base_url, api_key) = match task {
-            LlmTask::Talk | LlmTask::Memory | LlmTask::Embedding | LlmTask::Action | LlmTask::Translation => {
-                (self.api.base_url.clone(), self.api.api_key.clone())
-            }
+            LlmTask::Talk
+            | LlmTask::Memory
+            | LlmTask::Embedding
+            | LlmTask::Action
+            | LlmTask::Translation => (self.api.base_url.clone(), self.api.api_key.clone()),
             LlmTask::Vision => (
                 if !self.vision.base_url.is_empty() {
                     self.vision.base_url.clone()
@@ -1246,6 +1384,7 @@ impl Config {
             ),
         };
         ResolvedLlm {
+            provider_id: String::new(),
             base_url,
             api_key,
             model: self.legacy_model(task),
@@ -1253,45 +1392,56 @@ impl Config {
         }
     }
 
-    /// The effective connection info for `task`: resolves
-    /// `task_preset_id(task)` -> preset -> provider, falling back to the
-    /// legacy per-section fields (unchanged behavior) whenever the preset or
-    /// its provider can't be found.
-    pub fn resolve_llm(&self, task: LlmTask) -> ResolvedLlm {
-        let preset_id = self.task_preset_id(task);
-        if !preset_id.is_empty() {
-            if let Some(preset) = self.preset(preset_id) {
-                if let Some(provider) = self.provider(&preset.provider_id) {
-                    let base_url = if !provider.base_url.is_empty() {
-                        provider.base_url.clone()
-                    } else {
-                        self.api.base_url.clone()
-                    };
-                    let api_key = if !provider.api_key.is_empty() {
-                        provider.api_key.clone()
-                    } else {
-                        self.api.api_key.clone()
-                    };
-                    let model = if !preset.model.is_empty() {
-                        preset.model.clone()
-                    } else {
-                        self.legacy_model(task)
-                    };
-                    let reasoning_effort = if !preset.reasoning_effort.is_empty() {
-                        preset.reasoning_effort.clone()
-                    } else {
-                        self.api.reasoning_effort.clone()
-                    };
-                    return ResolvedLlm {
-                        base_url,
-                        api_key,
-                        model,
-                        reasoning_effort,
-                    };
-                }
-            }
+    /// Resolve exactly, or use the configured default when the task's provider
+    /// is disabled. Missing providers/models are errors, as in mistl.
+    pub fn resolve_llm(&self, task: LlmTask) -> anyhow::Result<ResolvedLlm> {
+        let mut reference = self
+            .task_ref(task)
+            .or(self.default_ref.as_ref())
+            .ok_or_else(|| anyhow::anyhow!("{task:?}: no model reference configured"))?;
+        let mut provider = self.provider(&reference.provider_id).ok_or_else(|| {
+            anyhow::anyhow!("{task:?}: provider {:?} is missing", reference.provider_id)
+        })?;
+        if !provider.enabled {
+            reference = self.default_ref.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("{task:?}: provider is disabled and no default is configured")
+            })?;
+            provider = self
+                .provider(&reference.provider_id)
+                .ok_or_else(|| anyhow::anyhow!("{task:?}: default provider is missing"))?;
         }
-        self.legacy_llm(task)
+        anyhow::ensure!(provider.enabled, "{task:?}: default provider is disabled");
+        anyhow::ensure!(
+            !reference.model.trim().is_empty(),
+            "{task:?}: model is empty"
+        );
+        anyhow::ensure!(
+            !provider.base_url.trim().is_empty(),
+            "{task:?}: provider URL is empty"
+        );
+        let is_room = provider.base_url.starts_with("mist-network://");
+        if is_room {
+            anyhow::ensure!(provider.room().is_some(), "{task:?}: room ID is empty");
+            anyhow::ensure!(
+                !self.mist.ai_base_url.trim().is_empty(),
+                "{task:?}: mistl AI serve URL is empty"
+            );
+        }
+        Ok(ResolvedLlm {
+            provider_id: provider.id.clone(),
+            base_url: if is_room {
+                self.mist.ai_base_url.clone()
+            } else {
+                provider.base_url.clone()
+            },
+            api_key: if is_room {
+                String::new()
+            } else {
+                provider.api_key.clone()
+            },
+            model: reference.model.clone(),
+            reasoning_effort: self.task_effort(task).to_string(),
+        })
     }
 }
 
@@ -1318,7 +1468,8 @@ impl Config {
     /// `./config.json` exists (the pre-`~/.tc-npc/` default), it's copied
     /// over so existing settings survive the upgrade. See
     /// [`migrate_legacy_config`]. An explicit `--config <path>` is always
-    /// used exactly as given, with no migration or redirection.
+    /// used exactly as given, with no path migration or redirection. Legacy
+    /// LLM settings migrate at either location before environment overrides.
     pub fn load(path: Option<&Path>) -> anyhow::Result<Config> {
         // Best-effort: a missing .env file is fine.
         let _ = dotenvy::dotenv();
@@ -1341,132 +1492,228 @@ impl Config {
             Config::default()
         };
 
+        if config.migrate_llm_config() && resolved.exists() {
+            std::fs::write(&resolved, serde_json::to_string_pretty(&config)?)?;
+        }
         config.apply_env_overrides();
-        config.migrate_llm_config();
         Ok(config)
     }
 
-    /// One-time, idempotent, in-memory migration from the legacy `api.*` /
-    /// per-section fields to `providers[]` / `presets[]` (see
-    /// tc-docs/drafts/llm-settings-common-v1.md §2). Only runs when both
-    /// `providers` and `presets` are empty, so it never overwrites a config
-    /// that has already been saved in the new shape. Does not write back to
-    /// disk — the new shape is only persisted once the settings UI saves.
-    fn migrate_llm_config(&mut self) {
-        if !self.providers.is_empty() || !self.presets.is_empty() {
-            return;
-        }
-
-        let has_id = |providers: &[ProviderConfig], id: &str| providers.iter().any(|p| p.id == id);
-        let has_preset_id = |presets: &[PresetConfig], id: &str| presets.iter().any(|p| p.id == id);
-
-        // `default` provider/preset, built from `api.*`.
-        if !has_id(&self.providers, "default") {
+    /// One-time preset/direct-field migration. New refs and efforts win.
+    /// Returns whether the canonical config or legacy fields changed.
+    pub fn migrate_llm_config(&mut self) -> bool {
+        let before = serde_json::to_value(&*self).expect("config serializes");
+        let presets = std::mem::take(&mut self.presets);
+        let default_id = std::mem::take(&mut self.default_preset_id);
+        let mut changed = !presets.is_empty() || !default_id.is_empty();
+        let from_preset = |id: &str| -> Option<ModelRef> {
+            if id.is_empty() {
+                return None;
+            }
+            Some(
+                presets
+                    .iter()
+                    .find(|p| p.id == id)
+                    .map(|p| ModelRef {
+                        provider_id: p.provider_id.clone(),
+                        model: p.model.clone(),
+                    })
+                    .unwrap_or_else(|| ModelRef {
+                        provider_id: String::new(),
+                        model: id.to_string(),
+                    }),
+            )
+        };
+        let direct = self.providers.is_empty()
+            && self.default_ref.is_none()
+            && presets.is_empty()
+            && default_id.is_empty()
+            && [
+                LlmTask::Talk,
+                LlmTask::Memory,
+                LlmTask::Embedding,
+                LlmTask::Vision,
+                LlmTask::Action,
+                LlmTask::Translation,
+                LlmTask::Tts,
+                LlmTask::Stt,
+            ]
+            .iter()
+            .all(|task| self.task_ref(*task).is_none());
+        if direct {
             self.providers.push(ProviderConfig {
-                id: "default".to_string(),
-                label: "既定".to_string(),
+                id: "default".into(),
+                label: "Default".into(),
                 base_url: self.api.base_url.clone(),
                 api_key: self.api.api_key.clone(),
+                ..Default::default()
             });
-        }
-        if !has_preset_id(&self.presets, "default") {
-            let label = if !self.api.model.is_empty() {
-                self.api.model.clone()
-            } else {
-                "既定".to_string()
-            };
-            self.presets.push(PresetConfig {
-                id: "default".to_string(),
-                label,
-                provider_id: "default".to_string(),
-                model: self.api.model.clone(),
-                reasoning_effort: self.api.reasoning_effort.clone(),
-            });
-        }
-        self.default_preset_id = "default".to_string();
-
-        // Embedding preset.
-        if !self.api.embedding_model.is_empty() && !has_preset_id(&self.presets, "embedding") {
-            self.presets.push(PresetConfig {
-                id: "embedding".to_string(),
-                label: self.api.embedding_model.clone(),
-                provider_id: "default".to_string(),
-                model: self.api.embedding_model.clone(),
-                reasoning_effort: String::new(),
-            });
-            self.memory.embedding_preset_id = "embedding".to_string();
-        }
-
-        // tts / stt / vision: dedicated provider only if the section's own
-        // `base_url` is set and differs from `api.base_url`; dedicated
-        // preset only if the section's own `model` is set.
-        let (tts_base_url, tts_api_key, tts_model) =
-            (self.tts.base_url.clone(), self.tts.api_key.clone(), self.tts.model.clone());
-        self.migrate_section_llm("tts", "TTS", &tts_base_url, &tts_api_key, &tts_model);
-        let (stt_base_url, stt_api_key, stt_model) =
-            (self.stt.base_url.clone(), self.stt.api_key.clone(), self.stt.model.clone());
-        self.migrate_section_llm("stt", "STT", &stt_base_url, &stt_api_key, &stt_model);
-        let (vision_base_url, vision_api_key, vision_model) = (
-            self.vision.base_url.clone(),
-            self.vision.api_key.clone(),
-            self.vision.model.clone(),
-        );
-        self.migrate_section_llm("vision", "Vision", &vision_base_url, &vision_api_key, &vision_model);
-        if !self.tts.model.is_empty() {
-            self.tts.preset_id = "tts".to_string();
-        }
-        if !self.stt.model.is_empty() {
-            self.stt.preset_id = "stt".to_string();
-        }
-        if !self.vision.model.is_empty() {
-            self.vision.preset_id = "vision".to_string();
-        }
-
-        // translation preset.
-        if !self.translation.model.is_empty() && !has_preset_id(&self.presets, "translation") {
-            self.presets.push(PresetConfig {
-                id: "translation".to_string(),
-                label: "通訳".to_string(),
-                provider_id: "default".to_string(),
-                model: self.translation.model.clone(),
-                reasoning_effort: String::new(),
-            });
-            self.translation.preset_id = "translation".to_string();
-        }
-    }
-
-    /// Shared helper for the tts/stt/vision legs of [`Config::migrate_llm_config`]:
-    /// builds an `id`-named provider (only if `base_url` is set and differs
-    /// from `api.base_url`) and an `id`-named preset (only if `model` is
-    /// set), without touching the section's own `preset_id` — the caller
-    /// assigns that afterward, once for all three sections.
-    fn migrate_section_llm(&mut self, id: &str, label: &str, base_url: &str, api_key: &str, model: &str) {
-        let has_id = |providers: &[ProviderConfig], id: &str| providers.iter().any(|p| p.id == id);
-        let has_preset_id = |presets: &[PresetConfig], id: &str| presets.iter().any(|p| p.id == id);
-
-        let provider_id = if !base_url.is_empty() && base_url != self.api.base_url {
-            if !has_id(&self.providers, id) {
-                self.providers.push(ProviderConfig {
-                    id: id.to_string(),
-                    label: label.to_string(),
-                    base_url: base_url.to_string(),
-                    api_key: api_key.to_string(),
+            if !self.api.model.is_empty() {
+                self.default_ref = Some(ModelRef {
+                    provider_id: "default".into(),
+                    model: self.api.model.clone(),
                 });
             }
-            id.to_string()
-        } else {
-            "default".to_string()
-        };
-
-        if !model.is_empty() && !has_preset_id(&self.presets, id) {
-            self.presets.push(PresetConfig {
-                id: id.to_string(),
-                label: label.to_string(),
-                provider_id,
-                model: model.to_string(),
-                reasoning_effort: String::new(),
-            });
+            for task in [
+                LlmTask::Embedding,
+                LlmTask::Vision,
+                LlmTask::Tts,
+                LlmTask::Stt,
+                LlmTask::Translation,
+            ] {
+                let has_override = match task {
+                    LlmTask::Embedding => !self.api.embedding_model.is_empty(),
+                    LlmTask::Vision => {
+                        !self.vision.model.is_empty()
+                            || !self.vision.base_url.is_empty()
+                            || !self.vision.api_key.is_empty()
+                    }
+                    LlmTask::Tts => {
+                        !self.tts.model.is_empty()
+                            || !self.tts.base_url.is_empty()
+                            || !self.tts.api_key.is_empty()
+                    }
+                    LlmTask::Stt => {
+                        !self.stt.model.is_empty()
+                            || !self.stt.base_url.is_empty()
+                            || !self.stt.api_key.is_empty()
+                    }
+                    LlmTask::Translation => !self.translation.model.is_empty(),
+                    _ => false,
+                };
+                if !has_override {
+                    continue;
+                }
+                let old = self.legacy_llm(task);
+                let distinct = old.base_url != self.api.base_url || old.api_key != self.api.api_key;
+                if old.model.is_empty() && !distinct {
+                    continue;
+                }
+                let provider_id = self
+                    .providers
+                    .iter()
+                    .find(|p| p.base_url == old.base_url && p.api_key == old.api_key)
+                    .map(|p| p.id.clone())
+                    .unwrap_or_else(|| {
+                        let id = format!("{task:?}").to_ascii_lowercase();
+                        self.providers.push(ProviderConfig {
+                            id: id.clone(),
+                            label: format!("{task:?}"),
+                            base_url: old.base_url,
+                            api_key: old.api_key,
+                            ..Default::default()
+                        });
+                        id
+                    });
+                let reference = Some(ModelRef {
+                    provider_id,
+                    model: old.model,
+                });
+                match task {
+                    LlmTask::Embedding => self.memory.embedding_ref = reference,
+                    LlmTask::Vision => self.vision.model_ref = reference,
+                    LlmTask::Tts => self.tts.model_ref = reference,
+                    LlmTask::Stt => self.stt.model_ref = reference,
+                    LlmTask::Translation => self.translation.model_ref = reference,
+                    _ => unreachable!(),
+                }
+            }
         }
+        if self.default_ref.is_none() {
+            self.default_ref = from_preset(&default_id);
+        }
+        for (reference, id, effort) in [
+            (
+                &mut self.talk.model_ref,
+                &mut self.talk.preset_id,
+                Some(&mut self.talk.reasoning_effort),
+            ),
+            (
+                &mut self.memory.model_ref,
+                &mut self.memory.preset_id,
+                Some(&mut self.memory.reasoning_effort),
+            ),
+            (
+                &mut self.memory.embedding_ref,
+                &mut self.memory.embedding_preset_id,
+                None,
+            ),
+            (
+                &mut self.vision.model_ref,
+                &mut self.vision.preset_id,
+                Some(&mut self.vision.reasoning_effort),
+            ),
+            (
+                &mut self.action.model_ref,
+                &mut self.action.preset_id,
+                Some(&mut self.action.reasoning_effort),
+            ),
+            (
+                &mut self.translation.model_ref,
+                &mut self.translation.preset_id,
+                Some(&mut self.translation.reasoning_effort),
+            ),
+            (&mut self.tts.model_ref, &mut self.tts.preset_id, None),
+            (&mut self.stt.model_ref, &mut self.stt.preset_id, None),
+        ] {
+            changed |= !id.is_empty();
+            if reference.is_none() {
+                *reference = from_preset(id);
+            }
+            if let Some(effort) = effort {
+                let inherited = if id.is_empty() { &default_id } else { &*id };
+                if effort.is_empty() {
+                    if let Some(preset) = presets.iter().find(|p| &p.id == inherited) {
+                        *effort = preset.reasoning_effort.clone();
+                    }
+                }
+            }
+            id.clear();
+        }
+        for preset in &presets {
+            if let Some(provider) = self
+                .providers
+                .iter_mut()
+                .find(|p| p.id == preset.provider_id)
+            {
+                if provider.room().is_none()
+                    && !preset.model.is_empty()
+                    && !provider.models.contains(&preset.model)
+                {
+                    provider.models.push(preset.model.clone());
+                }
+            }
+        }
+        if direct {
+            for reference in self.default_ref.iter().chain(
+                [
+                    self.talk.model_ref.as_ref(),
+                    self.memory.model_ref.as_ref(),
+                    self.memory.embedding_ref.as_ref(),
+                    self.vision.model_ref.as_ref(),
+                    self.action.model_ref.as_ref(),
+                    self.translation.model_ref.as_ref(),
+                    self.tts.model_ref.as_ref(),
+                    self.stt.model_ref.as_ref(),
+                ]
+                .into_iter()
+                .flatten(),
+            ) {
+                if let Some(provider) = self
+                    .providers
+                    .iter_mut()
+                    .find(|p| p.id == reference.provider_id)
+                {
+                    if provider.room().is_none()
+                        && !reference.model.is_empty()
+                        && !provider.models.contains(&reference.model)
+                    {
+                        provider.models.push(reference.model.clone());
+                    }
+                }
+            }
+        }
+        changed || before != serde_json::to_value(&*self).expect("config serializes")
     }
 
     fn apply_env_overrides(&mut self) {
@@ -1496,6 +1743,70 @@ impl Config {
         }
         if let Ok(v) = std::env::var("STT_API_KEY") {
             self.stt.api_key = v;
+        }
+        if let Ok(model) = std::env::var("OPENAI_MODEL") {
+            let reference = self.default_ref.get_or_insert_with(|| ModelRef {
+                provider_id: "default".into(),
+                model: String::new(),
+            });
+            reference.model = model;
+        }
+        if let Ok(model) = std::env::var("OPENAI_EMBEDDING_MODEL") {
+            let reference = self
+                .memory
+                .embedding_ref
+                .get_or_insert_with(|| self.default_ref.clone().unwrap_or_default());
+            reference.model = model;
+        }
+        if let Some(reference) = self.default_ref.clone() {
+            self.override_provider_env(&reference, "OPENAI_API_BASE_URL", "OPENAI_API_KEY");
+        }
+        for (task, url, key) in [
+            (LlmTask::Tts, "TTS_BASE_URL", "TTS_API_KEY"),
+            (LlmTask::Stt, "STT_BASE_URL", "STT_API_KEY"),
+        ] {
+            if std::env::var_os(url).is_some() || std::env::var_os(key).is_some() {
+                // Voice overrides must not change the default/chat provider.
+                let source = self.task_ref(task).or(self.default_ref.as_ref()).cloned();
+                if let Some(mut reference) = source {
+                    if let Some(mut provider) = self.provider(&reference.provider_id).cloned() {
+                        let mut id = format!("env-{task:?}").to_ascii_lowercase();
+                        while self.provider(&id).is_some() {
+                            id.push('-');
+                        }
+                        provider.id = id.clone();
+                        reference.provider_id = id;
+                        self.providers.push(provider);
+                        self.override_provider_env(&reference, url, key);
+                        match task {
+                            LlmTask::Tts => self.tts.model_ref = Some(reference),
+                            LlmTask::Stt => self.stt.model_ref = Some(reference),
+                            _ => unreachable!(),
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn override_provider_env(&mut self, reference: &ModelRef, url: &str, key: &str) {
+        if let Some(provider) = self
+            .providers
+            .iter_mut()
+            .find(|p| p.id == reference.provider_id)
+        {
+            if provider.room().is_some() {
+                if let Ok(value) = std::env::var(url) {
+                    self.mist.ai_base_url = value;
+                }
+            } else {
+                if let Ok(value) = std::env::var(url) {
+                    provider.base_url = value;
+                }
+                if let Ok(value) = std::env::var(key) {
+                    provider.api_key = value;
+                }
+            }
         }
     }
 
@@ -1732,6 +2043,50 @@ mod tests {
     }
 
     #[test]
+    fn translation_scope_defaults_to_both_for_a_config_predating_it() {
+        // Every release before `scope` existed subtitled both halves, so a
+        // config that never heard of the field has to keep doing that.
+        let config: Config = serde_json::from_str(r#"{"translation": {"mode": "assist"}}"#).unwrap();
+        assert_eq!(config.translation.scope(), TranslationScope::Both);
+        assert!(config.translation.scope().translates_input());
+        assert!(config.translation.scope().translates_output());
+        // The derived Default leaves `scope` empty, which must read the same.
+        assert_eq!(Config::default().translation.scope(), TranslationScope::Both);
+    }
+
+    #[test]
+    fn translation_scope_parses_leniently_and_gates_one_half_each() {
+        let mut translation = TranslationConfig::default();
+        translation.scope = " Input ".to_string();
+        assert_eq!(translation.scope(), TranslationScope::Input);
+        assert!(translation.scope().translates_input());
+        assert!(!translation.scope().translates_output());
+
+        translation.scope = "output".to_string();
+        assert_eq!(translation.scope(), TranslationScope::Output);
+        assert!(!translation.scope().translates_input());
+        assert!(translation.scope().translates_output());
+
+        // Unrecognized falls back to "both" — the pre-existing behaviour, so
+        // a typo can't quietly switch translation off.
+        translation.scope = "nonsense".to_string();
+        assert_eq!(translation.scope(), TranslationScope::Both);
+    }
+
+    #[test]
+    fn translation_scope_does_not_decide_whether_npc_talk_answers() {
+        // `interpret` silences npc-talk because of what kind of session it
+        // is; asking for output-only subtitles must not turn the NPC back
+        // into a conversation partner.
+        let mut translation = TranslationConfig::default();
+        translation.mode = "interpret".to_string();
+        for scope in ["input", "output", "both"] {
+            translation.scope = scope.to_string();
+            assert!(translation.suppresses_chat(), "scope={scope}");
+        }
+    }
+
+    #[test]
     fn target_languages_drop_blanks_and_duplicates() {
         let mut translation = TranslationConfig::default();
         translation.target_language = "英語".to_string();
@@ -1764,197 +2119,217 @@ mod tests {
             label: "P1".to_string(),
             base_url: "http://x".to_string(),
             api_key: "sk-provider-secret".to_string(),
+            ..Default::default()
         });
         let redacted = config.redacted_json().unwrap();
         assert_eq!(redacted["providers"][0]["api_key"], "***");
     }
 
-    #[test]
-    fn resolve_llm_falls_back_to_legacy_fields_when_no_providers_or_presets() {
-        let mut config = Config::default();
-        config.api.base_url = "http://api".to_string();
-        config.api.api_key = "api-key".to_string();
-        config.api.model = "api-model".to_string();
-        config.api.embedding_model = "embed-model".to_string();
-        config.api.reasoning_effort = "medium".to_string();
+    fn model_ref(provider: &str, model: &str) -> ModelRef {
+        ModelRef {
+            provider_id: provider.into(),
+            model: model.into(),
+        }
+    }
 
-        let talk = config.resolve_llm(LlmTask::Talk);
-        assert_eq!(talk.base_url, "http://api");
-        assert_eq!(talk.api_key, "api-key");
-        assert_eq!(talk.model, "api-model");
-        assert_eq!(talk.reasoning_effort, "medium");
-
-        let embedding = config.resolve_llm(LlmTask::Embedding);
-        assert_eq!(embedding.model, "embed-model");
-
-        // vision: empty section fields fall back to api.*
-        let vision = config.resolve_llm(LlmTask::Vision);
-        assert_eq!(vision.base_url, "http://api");
-        assert_eq!(vision.model, "api-model");
-
-        // vision: section fields override api.* when set
-        config.vision.base_url = "http://vision".to_string();
-        config.vision.api_key = "vision-key".to_string();
-        config.vision.model = "vision-model".to_string();
-        let vision = config.resolve_llm(LlmTask::Vision);
-        assert_eq!(vision.base_url, "http://vision");
-        assert_eq!(vision.api_key, "vision-key");
-        assert_eq!(vision.model, "vision-model");
-
-        // tts: model falls back to api.model when tts.model is empty
-        // (matches npc-speech's `synthesize_tts`, not just base_url/api_key).
-        let tts = config.resolve_llm(LlmTask::Tts);
-        assert_eq!(tts.model, "api-model");
-        config.tts.model = "tts-model".to_string();
-        let tts = config.resolve_llm(LlmTask::Tts);
-        assert_eq!(tts.model, "tts-model");
-
-        // stt: model has its own non-empty default and is never overridden
-        // by api.model (matches npc-speech's `transcribe_and_publish`).
-        let stt = config.resolve_llm(LlmTask::Stt);
-        assert_eq!(stt.model, "whisper-1");
+    fn model_config() -> Config {
+        Config {
+            providers: vec![
+                ProviderConfig {
+                    id: "http".into(),
+                    base_url: "http://endpoint/v1".into(),
+                    ..Default::default()
+                },
+                ProviderConfig {
+                    id: "room".into(),
+                    base_url: "mist-network://team".into(),
+                    ..Default::default()
+                },
+            ],
+            default_ref: Some(model_ref("http", "default-model")),
+            ..Default::default()
+        }
     }
 
     #[test]
-    fn resolve_llm_uses_preset_and_provider_when_assigned() {
-        let mut config = Config::default();
-        config.api.base_url = "http://legacy".to_string();
-        config.providers.push(ProviderConfig {
-            id: "p1".to_string(),
-            label: "P1".to_string(),
-            base_url: "http://provider".to_string(),
-            api_key: "provider-key".to_string(),
-        });
-        config.presets.push(PresetConfig {
-            id: "preset1".to_string(),
-            label: "Preset 1".to_string(),
-            provider_id: "p1".to_string(),
-            model: "preset-model".to_string(),
-            reasoning_effort: "high".to_string(),
-        });
-        config.default_preset_id = "preset1".to_string();
-
-        // Talk has no preset_id of its own -> falls back to default_preset_id.
-        let talk = config.resolve_llm(LlmTask::Talk);
-        assert_eq!(talk.base_url, "http://provider");
-        assert_eq!(talk.api_key, "provider-key");
-        assert_eq!(talk.model, "preset-model");
-        assert_eq!(talk.reasoning_effort, "high");
-
-        // A task-specific preset_id pointing at a preset with a dangling
-        // provider_id falls back to the legacy path entirely.
-        config.action.preset_id = "preset1".to_string();
-        config.presets[0].provider_id = "missing".to_string();
-        config.api.model = "legacy-action-model".to_string();
-        let action = config.resolve_llm(LlmTask::Action);
-        assert_eq!(action.base_url, "http://legacy");
-        assert_eq!(action.model, "legacy-action-model");
+    fn disabled_provider_falls_back_without_rewriting_assignment() {
+        let mut config = model_config();
+        config.translation.model_ref = Some(model_ref("room", "room-model"));
+        config.translation.reasoning_effort = "high".into();
+        config.providers[1].enabled = false;
+        let stored = serde_json::to_value(&config).unwrap();
+        let resolved = config.resolve_llm(LlmTask::Translation).unwrap();
+        assert_eq!(resolved.provider_id, "http");
+        assert_eq!(resolved.model, "default-model");
+        assert_eq!(resolved.reasoning_effort, "high");
+        assert_eq!(serde_json::to_value(&config).unwrap(), stored);
+        config.providers[0].enabled = false;
+        assert!(config.resolve_llm(LlmTask::Translation).is_err());
     }
 
     #[test]
-    fn task_preset_id_falls_back_to_default_preset_id() {
-        let mut config = Config::default();
-        config.default_preset_id = "d1".to_string();
-        assert_eq!(config.task_preset_id(LlmTask::Talk), "d1");
-        config.talk.preset_id = "custom".to_string();
-        assert_eq!(config.task_preset_id(LlmTask::Talk), "custom");
-        assert_eq!(config.task_preset_id(LlmTask::Embedding), "d1");
-        config.memory.embedding_preset_id = "emb".to_string();
-        assert_eq!(config.task_preset_id(LlmTask::Embedding), "emb");
+    fn missing_or_blank_refs_error_and_never_borrow_legacy_credentials() {
+        let mut config = model_config();
+        config.api.api_key = "legacy-secret".into();
+        assert!(config
+            .resolve_llm(LlmTask::Talk)
+            .unwrap()
+            .api_key
+            .is_empty());
+        config.talk.model_ref = Some(model_ref("missing", "m"));
+        assert!(config.resolve_llm(LlmTask::Talk).is_err());
+        config.talk.model_ref = Some(model_ref("http", " "));
+        assert!(config.resolve_llm(LlmTask::Talk).is_err());
+        config.talk.model_ref = None;
+        config.default_ref = None;
+        assert!(config.resolve_llm(LlmTask::Talk).is_err());
+        assert!(Config::default().resolve_llm(LlmTask::Talk).is_err());
     }
 
     #[test]
-    fn migrate_llm_config_builds_default_provider_and_preset_from_api() {
-        let mut config = Config::default();
-        config.api.base_url = "http://api".to_string();
-        config.api.api_key = "api-key".to_string();
-        config.api.model = "api-model".to_string();
-        config.api.embedding_model = "embed-model".to_string();
-        config.api.reasoning_effort = "medium".to_string();
-
-        config.migrate_llm_config();
-
-        assert_eq!(config.default_preset_id, "default");
-        let provider = config.provider("default").expect("default provider");
-        assert_eq!(provider.base_url, "http://api");
-        assert_eq!(provider.api_key, "api-key");
-        let preset = config.preset("default").expect("default preset");
-        assert_eq!(preset.provider_id, "default");
-        assert_eq!(preset.model, "api-model");
-        assert_eq!(preset.reasoning_effort, "medium");
-
-        let embedding = config.preset("embedding").expect("embedding preset");
-        assert_eq!(embedding.model, "embed-model");
-        assert_eq!(config.memory.embedding_preset_id, "embedding");
-
-        // Idempotent: running it again on an already-migrated config is a no-op.
-        let providers_before = config.providers.len();
-        let presets_before = config.presets.len();
-        config.migrate_llm_config();
-        assert_eq!(config.providers.len(), providers_before);
-        assert_eq!(config.presets.len(), presets_before);
+    fn room_refs_use_mistl_bridge_and_raw_model_for_every_use() {
+        let mut config = model_config();
+        config.default_ref = Some(model_ref("room", "raw-model"));
+        config.mist.ai_base_url = "http://127.0.0.1:16478/v1".into();
+        config.providers[1].api_key = "must-not-leak".into();
+        for task in [
+            LlmTask::Talk,
+            LlmTask::Memory,
+            LlmTask::Embedding,
+            LlmTask::Vision,
+            LlmTask::Action,
+            LlmTask::Translation,
+            LlmTask::Tts,
+            LlmTask::Stt,
+        ] {
+            let resolved = config.resolve_llm(task).unwrap();
+            assert_eq!(resolved.provider_id, "room");
+            assert_eq!(resolved.base_url, config.mist.ai_base_url);
+            assert_eq!(resolved.model, "raw-model");
+            assert!(resolved.api_key.is_empty());
+        }
+        config.tts.model_ref = Some(model_ref("room", "network-auto"));
+        assert_eq!(
+            config.resolve_llm(LlmTask::Tts).unwrap().model,
+            "network-auto"
+        );
     }
 
     #[test]
-    fn migrate_llm_config_skips_when_providers_or_presets_already_exist() {
-        let mut config = Config::default();
-        config.api.model = "should-not-be-used".to_string();
-        config.providers.push(ProviderConfig {
-            id: "existing".to_string(),
-            label: "Existing".to_string(),
-            base_url: "http://existing".to_string(),
-            api_key: String::new(),
-        });
-
-        config.migrate_llm_config();
-
-        assert_eq!(config.providers.len(), 1);
-        assert!(config.presets.is_empty());
-        assert_eq!(config.default_preset_id, "");
+    fn migration_preserves_all_uses_effort_cache_and_new_assignments() {
+        let mut config: Config = serde_json::from_value(serde_json::json!({
+            "providers": [
+                { "id": "http", "base_url": "http://endpoint", "models": ["cached"] },
+                { "id": "room", "base_url": "mist-network://team", "enabled": false }
+            ],
+            "presets": [
+                { "id": "old", "provider_id": "http", "model": "manual-model", "reasoning_effort": "high", "temperature": 0.7 },
+                { "id": "remote", "provider_id": "room", "model": "raw-model" }
+            ],
+            "default_preset_id": "old",
+            "talk": { "preset_id": "old", "reasoning_effort": "low" },
+            "memory": { "preset_id": "old", "embedding_preset_id": "old" },
+            "vision": { "preset_id": "old", "model_ref": { "provider_id": "room", "model": "selected" } },
+            "action": { "preset_id": "old" },
+            "translation": { "preset_id": "old" },
+            "tts": { "preset_id": "remote" },
+            "stt": { "preset_id": "old" }
+        })).unwrap();
+        assert!(config.migrate_llm_config());
+        assert_eq!(config.default_ref, Some(model_ref("http", "manual-model")));
+        assert_eq!(config.memory.embedding_ref, config.default_ref);
+        assert_eq!(config.talk.reasoning_effort, "low");
+        assert_eq!(config.memory.reasoning_effort, "high");
+        assert_eq!(config.translation.reasoning_effort, "high");
+        assert_eq!(config.vision.model_ref, Some(model_ref("room", "selected")));
+        assert_eq!(config.tts.model_ref, Some(model_ref("room", "raw-model")));
+        assert_eq!(config.providers[0].models, ["cached", "manual-model"]);
+        assert!(config.providers[1].models.is_empty());
+        assert!(!config.providers[1].enabled);
+        let serialized = serde_json::to_string(&config).unwrap();
+        assert!(!serialized.contains("preset"));
+        assert!(!serialized.contains("temperature"));
+        assert!(!config.migrate_llm_config());
+        let round_trip: Config = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(round_trip.providers[0].models, config.providers[0].models);
+        assert_eq!(round_trip.default_ref, config.default_ref);
     }
 
     #[test]
-    fn migrate_llm_config_gives_tts_stt_vision_dedicated_providers_only_when_distinct() {
+    fn legacy_direct_fields_migrate_with_distinct_credentials() {
         let mut config = Config::default();
-        config.api.base_url = "http://api".to_string();
-        config.tts.base_url = "http://api".to_string(); // same as api.base_url -> no dedicated provider
-        config.tts.model = "tts-model".to_string();
-        config.vision.base_url = "http://vision".to_string(); // distinct -> dedicated provider
-        config.vision.api_key = "vision-key".to_string();
-        config.vision.model = "vision-model".to_string();
-        // stt: model left at its non-empty default ("whisper-1") but base_url
-        // empty -> provider_id falls back to "default".
-
-        config.migrate_llm_config();
-
-        let tts_preset = config.preset("tts").expect("tts preset");
-        assert_eq!(tts_preset.provider_id, "default");
-        assert_eq!(config.tts.preset_id, "tts");
-
-        let vision_preset = config.preset("vision").expect("vision preset");
-        assert_eq!(vision_preset.provider_id, "vision");
-        assert_eq!(config.vision.preset_id, "vision");
-        let vision_provider = config.provider("vision").expect("vision provider");
-        assert_eq!(vision_provider.base_url, "http://vision");
-        assert_eq!(vision_provider.api_key, "vision-key");
-
-        let stt_preset = config.preset("stt").expect("stt preset (non-empty default model)");
-        assert_eq!(stt_preset.provider_id, "default");
-        assert_eq!(config.stt.preset_id, "stt");
+        config.api.model = "chat-model".into();
+        config.api.api_key = "chat-key".into();
+        config.api.embedding_model = "embedding-model".into();
+        config.tts.model = "speech-model".into();
+        config.tts.api_key = "voice-key".into();
+        config.vision.base_url = "http://vision/v1".into();
+        config.vision.model = "vision-model".into();
+        assert!(config.migrate_llm_config());
+        assert_eq!(
+            config.resolve_llm(LlmTask::Talk).unwrap().model,
+            "chat-model"
+        );
+        assert_eq!(
+            config.resolve_llm(LlmTask::Embedding).unwrap().model,
+            "embedding-model"
+        );
+        let tts = config.resolve_llm(LlmTask::Tts).unwrap();
+        assert_eq!(tts.api_key, "voice-key");
+        assert_eq!(tts.base_url, config.api.base_url);
+        assert_eq!(
+            config.resolve_llm(LlmTask::Vision).unwrap().base_url,
+            "http://vision/v1"
+        );
+        assert!(!config.migrate_llm_config());
     }
 
     #[test]
-    fn migrate_llm_config_leaves_translation_preset_id_empty_when_model_unset() {
-        let mut config = Config::default();
-        config.migrate_llm_config();
-        assert_eq!(config.translation.preset_id, "");
-        assert!(config.preset("translation").is_none());
+    fn unresolved_legacy_preset_and_new_default_survive_migration() {
+        let mut config = model_config();
+        config.default_preset_id = "unknown-default".into();
+        config.talk.preset_id = "unknown-task".into();
+        assert!(config.migrate_llm_config());
+        assert_eq!(config.default_ref, Some(model_ref("http", "default-model")));
+        assert_eq!(config.talk.model_ref, Some(model_ref("", "unknown-task")));
+        assert!(config.resolve_llm(LlmTask::Talk).is_err());
+        assert!(!config.migrate_llm_config());
+    }
 
-        let mut config = Config::default();
-        config.translation.model = "translate-model".to_string();
-        config.migrate_llm_config();
-        assert_eq!(config.translation.preset_id, "translation");
-        assert_eq!(config.preset("translation").unwrap().model, "translate-model");
+    #[test]
+    fn load_persists_migration_once_and_example_uses_current_schema() {
+        let path = std::env::temp_dir().join(format!("npc-refs-{}.json", uuid::Uuid::new_v4()));
+        std::fs::write(
+            &path,
+            r#"{
+            "providers": [{"id":"http","base_url":"http://endpoint"}],
+            "presets": [{"id":"old","provider_id":"http","model":"raw"}],
+            "default_preset_id":"old"
+        }"#,
+        )
+        .unwrap();
+        let config = Config::load(Some(&path)).unwrap();
+        assert_eq!(config.resolve_llm(LlmTask::Talk).unwrap().model, "raw");
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(!saved.contains("preset"));
+        Config::load(Some(&path)).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), saved);
+        std::fs::remove_file(path).unwrap();
+        let mut example: Config =
+            serde_json::from_str(include_str!("../../../config.example.json")).unwrap();
+        assert!(!example.migrate_llm_config());
+        for task in [
+            LlmTask::Talk,
+            LlmTask::Memory,
+            LlmTask::Embedding,
+            LlmTask::Vision,
+            LlmTask::Action,
+            LlmTask::Translation,
+            LlmTask::Tts,
+            LlmTask::Stt,
+        ] {
+            assert!(!example.resolve_llm(task).unwrap().model.is_empty());
+        }
     }
 
     #[test]
@@ -1965,12 +2340,14 @@ mod tests {
             label: "P1".to_string(),
             base_url: "http://p1".to_string(),
             api_key: "real-p1-key".to_string(),
+            ..Default::default()
         });
         current.providers.push(ProviderConfig {
             id: "p2".to_string(),
             label: "P2".to_string(),
             base_url: "http://p2".to_string(),
             api_key: "real-p2-key".to_string(),
+            ..Default::default()
         });
 
         // Incoming reorders p2 before p1 and masks both keys; positional
