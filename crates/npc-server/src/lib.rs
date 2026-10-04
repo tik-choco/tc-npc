@@ -4,6 +4,7 @@
 mod assets;
 mod bus_forward;
 mod hub;
+mod mist_sync;
 mod protocol;
 mod rest;
 mod ws;
@@ -47,6 +48,7 @@ const MAX_AUDIO_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone)]
 struct AppState {
+    mist_sync: mist_sync::MistSync,
     ctx: ModuleCtx,
     hub: Hub,
     echo: Arc<EchoGuard>,
@@ -149,6 +151,7 @@ async fn run_server(ctx: ModuleCtx) -> anyhow::Result<()> {
     );
 
     let state = AppState {
+        mist_sync: mist_sync::MistSync::start(ctx.config.clone(), ctx.shutdown.clone()),
         current_config: Arc::new(std::sync::RwLock::new(ctx.config.clone())),
         ctx: ctx.clone(),
         hub,
@@ -171,6 +174,8 @@ async fn run_server(ctx: ModuleCtx) -> anyhow::Result<()> {
         .route("/healthz", get(rest::healthz))
         .route("/ws", get(ws::ws_handler))
         .route("/api/state", get(rest::api_state))
+        .route("/api/mist/sync", get(rest::api_mist_sync))
+        .route("/api/mist/rooms", get(rest::api_mist_rooms))
         .route(
             "/api/config",
             get(rest::api_get_config).put(rest::api_put_config),

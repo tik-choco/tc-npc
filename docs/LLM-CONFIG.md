@@ -2,8 +2,7 @@
 
 tc-npc selects raw model IDs directly from enabled providers. There are no
 runtime presets and no temperature parameter. The Rust config is the source
-of truth; Phase 1 changes its schema and consumers, while the web settings
-migration is a separate rollout task.
+of truth for the Connections / Tasks / Sharing settings UI.
 
 ```json
 {
@@ -22,7 +21,9 @@ migration is a separate rollout task.
       "base_url": "mist-network://team-room",
       "api_key": "",
       "enabled": true,
-      "models": ["remote-model"]
+      "models": ["remote-model"],
+      "provide": true,
+      "shared": [{ "provider_id": "http", "model": "chat-model" }]
     }
   ],
   "default_ref": { "provider_id": "http", "model": "chat-model" },
@@ -42,7 +43,12 @@ migration is a separate rollout task.
   "stt": {
     "model_ref": { "provider_id": "http", "model": "transcription-model" }
   },
-  "mist": { "ai_base_url": "http://127.0.0.1:6478/v1" }
+  "mist": {
+    "ai_base_url": "http://127.0.0.1:6478/v1",
+    "cli_path": "mistl",
+    "instance": "work",
+    "state_dir": "C:/path/to/mistl-state"
+  }
 }
 ```
 
@@ -60,24 +66,57 @@ tc-npc never selects the first provider or cached model. Empty HTTP API keys
 stay empty and do not inherit another provider's credentials.
 
 `models` and optional `models_fetched_at` are caches, not allowlists. Provider
-entries also accept `provide` and `shared` refs in the mistl reference shape;
-tc-npc preserves them, but mistl owns network membership, discovery and sharing.
+entries also accept `provide` and `shared` refs. The Sharing tab edits these
+per-room flags and HTTP model refs; mistl applies them through external registration.
 
 ## Rooms through mistl
 
-Start `mistl ai serve` and configure the corresponding enabled Room provider
-and model in mistl. tc-npc routes Room refs to `mist.ai_base_url` (default
-`http://127.0.0.1:6478/v1`), sends the raw model ID and no API key, and leaves
-network routing to mistl. The existing configuration with an HTTP provider
-pointing directly at mistl's `/v1` API continues to work.
+Run a mistl daemon implementing the external registration API (SPEC N1/N2)
+and its `ai serve` room-scoped API (M1/M3). tc-npc registers its enabled rooms
+automatically at server start and after a successful config save. It invokes
+only `ai external apply --owner tc-npc`, `remove --owner tc-npc`, and
+`get --owner tc-npc`; it never reads or edits mistl's configuration.
 
-The local serve API selects chat providers from its default and model catalogs;
-it does not accept a room selector from tc-npc. For multiple rooms, configure
-mistl's defaults/catalogs accordingly. Duplicate raw IDs are resolved by mistl.
-Its voice endpoints use its TTS/STT configuration; `network-auto` can defer voice
-model selection to the remote provider. Set `mist.ai_base_url` when mistl serves
-on a different port. `mist.enabled` controls tc-npc's optional integration and
-is not required for this HTTP bridge.
+`mist.cli_path` defaults to `mistl` on PATH. If it is missing, tc-npc tries
+`%LOCALAPPDATA%/Programs/mistl/mistl.exe`. An explicit executable path disables
+that fallback. Optional `mist.instance` and `mist.state_dir` are passed as
+separate global arguments (`--instance` / `--state-dir`), without a shell.
+Omit them to use mistl's default instance. JSON travels over stdin/stdout;
+each operation has a 10-second timeout and the child is killed on cancellation.
+
+Registration replaces everything owned by `tc-npc`. Enabled rooms have
+`consume: true` and their configured `provide` flag. Disabled rooms are omitted
+so they neither join nor provide; their saved flags/refs remain intact. Only
+enabled HTTP providers referenced by usable room shares are registered (with
+their real keys); Room refs, missing/disabled providers and blank model refs
+are excluded from shares. Providers and rooms are sorted deterministically;
+shared refs keep their first-occurrence order because the first ref wins when
+providers share the same raw model ID. With no enabled rooms, tc-npc removes
+its registration. mistl owns merging with other registrations and its own
+settings; a room disabled by the mistl user remains disabled and may produce
+a warning.
+
+Sync runs in the background and never blocks saving or server startup. Saves
+are serialized with the latest config winning over older in-flight syncs.
+Failures are logged and exposed via `GET /api/mist/sync` (`pending`, `applied`,
+`error`, `warnings`, `updated_at`, `generation`); another save or server start
+retries. `GET /api/mist/rooms` returns the `tc-npc` registration's applied rooms,
+timestamp and live status (`joined`, `providing`, `peers`, `models`) from
+external get, omitting provider credentials. CLI failures return HTTP 502.
+While AI settings are open, the UI reads this live state for room status dots,
+model lists and applied/pending Sharing state, and displays sync errors/warnings.
+
+Room refs route to `{mist.ai_base_url}/rooms/{URL-encoded-room}/...`, with the
+raw model ID and no API key. Chat (streaming or non-streaming) includes the
+task's `reasoning_effort`, including explicit `none` and unknown values. mistl
+uses `llm_request` for text chat and its OAI tunnel for image parts such as OCR.
+Models and voice requests use the same room path; `network-auto` can defer
+voice model selection to that room. The M3 contract does not define a
+room-scoped embeddings route; use an HTTP provider for embeddings.
+`mist.ai_base_url` defaults to `http://127.0.0.1:6478/v1`; set it to the actual
+serve URL when using another port/instance. An HTTP provider pointing directly
+at mistl's default `/v1` routes continues to work. `mist.enabled` controls the
+optional native integration and is not required for registration or this bridge.
 
 ## Migration
 
@@ -110,8 +149,12 @@ changes the local mistl bridge URL and API keys are ignored.
 モデルが空、既定が使えない場合はエラーです。temperature は送信しません。
 旧プリセットと ID は初回読み込み時に移行して保存から除外します。
 ルームは `mist-network://<room>` で指定し、`mistl ai serve` を経由します。
-mistl 側にも対応するルーム・モデルと音声設定を用意してください。
-複数ルームの同名モデルの振り分けは mistl の既定と一覧に従います。
+サーバー起動・設定保存時に `ai external apply/remove --owner tc-npc` で
+有効なルームと HTTP の共有モデルを自動登録します。mistl の設定ファイルは読み書きしません。
+`mist.cli_path`、任意の `mist.instance` / `mist.state_dir` で CLI を指定できます。
+同期は非同期で、失敗しても保存を妨げません。接続先・提供タブに実際の接続状態、適用状態、
+同期エラーを表示します。リクエストは `/rooms/{ルームID}/...` に送信し、タスクの
+`reasoning_effort` を維持します。埋め込みには HTTP 接続先を使用してください。
 
 ## 中文
 
@@ -119,6 +162,9 @@ mistl 側にも対応するルーム・モデルと音声設定を用意して�
 `memory.embedding_ref`。未设置的引用继承默认值。禁用连接不会改写引用；运行时
 会回退到可用的默认模型。连接不存在、模型为空或默认模型不可用时会报错。
 请求不发送 temperature。旧预设及其 ID 在首次加载时迁移，之后不再保存。
-房间使用 `mist-network://<room>`，通过 `mistl ai serve` 访问。请同时配置
-mistl 中对应的房间、模型和语音设置；多个房间中的同名模型由 mistl 的默认配置
-和模型列表决定路由。
+房间使用 `mist-network://<room>`，通过 `mistl ai serve` 访问。服务器启动和保存设置时，
+会调用 `ai external apply/remove --owner tc-npc` 自动注册启用的房间和 HTTP 共享模型，
+不会读写 mistl 配置文件。可设置 `mist.cli_path` 及可选的 `mist.instance` / `mist.state_dir`。
+同步在后台运行，失败不会阻止保存；连接和共享选项卡显示实际连接状态、应用状态及同步错误。
+请求通过 `/rooms/{房间ID}/...` 路由，并携带任务的 `reasoning_effort`。
+嵌入模型请使用 HTTP 连接。

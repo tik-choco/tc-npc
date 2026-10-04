@@ -59,7 +59,8 @@ pub struct LlmClient {
 
 impl LlmClient {
     /// `base_url` is normalized: trailing `/` trimmed, then `/v1` appended
-    /// unless it's already present. `api_key` may be empty, in which case no
+    /// unless it's already present or the URL selects a mistl room.
+    /// `api_key` may be empty, in which case no
     /// `Authorization` header is sent. Chat requests default to
     /// `DEFAULT_REASONING_EFFORT`; see [`LlmClient::with_reasoning_effort`].
     pub fn new(base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
@@ -366,7 +367,9 @@ fn describe_reqwest_error(err: &reqwest::Error) -> String {
 
 fn normalize_base_url(base_url: &str) -> String {
     let trimmed = base_url.trim_end_matches('/');
-    if trimmed.ends_with("/v1") {
+    if trimmed.ends_with("/v1")
+        || trimmed.rsplit_once("/rooms/").is_some_and(|(_, room)| !room.is_empty() && !room.contains('/'))
+    {
         trimmed.to_string()
     } else {
         format!("{trimmed}/v1")

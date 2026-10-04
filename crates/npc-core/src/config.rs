@@ -1216,6 +1216,12 @@ pub struct CharacterConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MistConfig {
+    #[serde(default = "default_mist_cli_path")]
+    pub cli_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_dir: Option<PathBuf>,
     /// Local OpenAI-compatible bridge started with `mistl ai serve`.
     #[serde(default = "default_mist_ai_base_url")]
     pub ai_base_url: String,
@@ -1231,10 +1237,17 @@ fn default_mist_ai_base_url() -> String {
     "http://127.0.0.1:6478/v1".to_string()
 }
 
+fn default_mist_cli_path() -> String {
+    "mistl".to_string()
+}
+
 impl Default for MistConfig {
     fn default() -> Self {
         Self {
             ai_base_url: default_mist_ai_base_url(),
+            cli_path: default_mist_cli_path(),
+            instance: None,
+            state_dir: None,
             enabled: false,
             signaling_url: String::new(),
             room_id: String::new(),
@@ -1430,7 +1443,7 @@ impl Config {
         Ok(ResolvedLlm {
             provider_id: provider.id.clone(),
             base_url: if is_room {
-                self.mist.ai_base_url.clone()
+                crate::mist::room_base_url(&self.mist.ai_base_url, provider.room().unwrap())
             } else {
                 provider.base_url.clone()
             },
@@ -2204,7 +2217,7 @@ mod tests {
         ] {
             let resolved = config.resolve_llm(task).unwrap();
             assert_eq!(resolved.provider_id, "room");
-            assert_eq!(resolved.base_url, config.mist.ai_base_url);
+            assert_eq!(resolved.base_url, format!("{}/rooms/team", config.mist.ai_base_url));
             assert_eq!(resolved.model, "raw-model");
             assert!(resolved.api_key.is_empty());
         }
