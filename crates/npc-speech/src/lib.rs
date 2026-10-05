@@ -133,7 +133,7 @@ struct Shared {
     /// `run_chat_response_tts_task`/`speak_reply`. Bumped every time a reply
     /// starts (so a newer reply always supersedes an older one still mid-way
     /// through its sentences) and by every path that must cut a reply dead —
-    /// barge-in, `suspend`, the voice-loop's 停止 switch — via
+    /// barge-in, `suspend`, disabling TTS, the voice-loop's 停止 switch — via
     /// `cancel_current_speech`.
     ///
     /// This exists because splitting a reply into sentences turned a single
@@ -169,6 +169,20 @@ struct Shared {
 impl Shared {
     fn config(&self) -> Arc<Config> {
         self.config.read().unwrap().clone()
+    }
+
+    fn update_config(&self, config: Arc<Config>) {
+        let disabled = {
+            let mut current = self.config.write().unwrap();
+            let disabled = current.tts.enabled && !config.tts.enabled;
+            *current = config;
+            disabled
+        };
+        if disabled {
+            // Invalidate in-flight replies even if playback never opened.
+            // Re-enabling TTS must only speak new replies.
+            self.cancel_current_speech();
+        }
     }
 
     fn send_playback(&self, cmd: PlaybackCmd) {
@@ -302,7 +316,7 @@ impl Module for SpeechModule {
             match serde_json::from_value::<Config>(msg.env.payload) {
                 Ok(new_config) => {
                     let new_config = Arc::new(new_config);
-                    *shared.config.write().unwrap() = new_config.clone();
+                    shared.update_config(new_config.clone());
                     shared.vad_params.set(&new_config.stt);
                     // A character can now be activated at runtime (see
                     // `api_activate_character`), and that change arrives on
@@ -555,6 +569,11 @@ async fn run_chat_response_tts_task(ctx: ModuleCtx, shared: Arc<Shared>, suspend
             continue;
         }
 
+        let cfg = shared.config();
+        if !cfg.tts.enabled {
+            continue;
+        }
+
         if !shared.voice_active.load(Ordering::SeqCst) {
             tracing::debug!("npc-speech: voice loop stopped, dropping chat_response tts");
             continue;
@@ -572,7 +591,6 @@ async fn run_chat_response_tts_task(ctx: ModuleCtx, shared: Arc<Shared>, suspend
             continue;
         }
 
-        let cfg = shared.config();
         let character = shared.active_character.read().unwrap().clone();
         let content = content.to_string();
         let ctx = ctx.clone();
@@ -608,6 +626,9 @@ async fn speak_reply(
     my_gen: u64,
 ) {
     for sentence in split_sentences(&content) {
+        if !cfg.tts.enabled || !shared.config().tts.enabled {
+            return;
+        }
         if shared.speech_generation.load(Ordering::SeqCst) != my_gen {
             tracing::debug!("npc-speech: reply superseded/cancelled, stopping mid-reply");
             return;
@@ -633,7 +654,7 @@ async fn speak_reply(
             continue;
         };
 
-        if shared.speech_generation.load(Ordering::SeqCst) != my_gen {
+        if !shared.config().tts.enabled || shared.speech_generation.load(Ordering::SeqCst) != my_gen {
             tracing::debug!("npc-speech: reply superseded/cancelled mid-synthesis, discarding sentence");
             return;
         }
@@ -852,6 +873,9 @@ async fn handle_priority_tts(
     bgm_end_time: String,
     shared: &Arc<Shared>,
 ) {
+    if !cfg.tts.enabled || !shared.config().tts.enabled {
+        return;
+    }
     let mut items: Vec<Vec<u8>> = Vec::new();
 
     if !chime_file.is_empty() {
@@ -879,12 +903,19 @@ async fn handle_priority_tts(
     }
 
     if !content.is_empty() {
+        // Reading/mixing the chime can outlive a settings save.
+        if !shared.config().tts.enabled {
+            return;
+        }
         // Not split into sentences: these are short, deliberate one-shot
         // announcements (scheduler chimes, `agent:interrupt` "tts"), not a
         // multi-sentence chat reply, so the time-to-first-audio problem
         // `speak_reply` exists for doesn't apply here.
         let text = truncate_for_tts(&content, cfg.tts.max_len as usize);
         if let Some(wav) = synthesize_tts(cfg, &text, character.as_deref()).await {
+            if !shared.config().tts.enabled {
+                return;
+            }
             if cfg.vrc.chatbox {
                 osc::send_chatbox(&cfg.vrc.osc_address, &text);
             }
@@ -918,7 +949,7 @@ async fn handle_priority_tts(
         }
     }
 
-    if !items.is_empty() {
+    if !items.is_empty() && shared.config().tts.enabled {
         shared.send_playback(PlaybackCmd::Priority(items));
     }
 }
@@ -1037,6 +1068,11 @@ fn load_active_character(data_dir: &Path, cfg: &Config) -> Option<Arc<Character>
 }
 
 async fn synthesize_tts(cfg: &Config, text: &str, character: Option<&Character>) -> Option<Vec<u8>> {
+    // All callers, including priority announcements, must stay silent when
+    // disabled: do not resolve a provider, log an error, or send a request.
+    if !cfg.tts.enabled {
+        return None;
+    }
     // 接続先とモデルは model_ref / default_ref から解決する。
     // voice/speed は tts セクションから読み、resolve_voice が有効な
     // キャラクターの voice_name/voice_model を優先させる。
@@ -1071,6 +1107,190 @@ fn truncate_for_tts(content: &str, max_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Clone, Default)]
+    struct WarningCounter(Arc<AtomicU64>);
+
+    impl tracing::Subscriber for WarningCounter {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            if *event.metadata().level() <= tracing::Level::WARN {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    fn tts_context(enabled: bool) -> (ModuleCtx, Arc<Shared>) {
+        // An invalid reference fails resolution locally when enabled. No
+        // network or audio device is needed to observe synthesis attempts.
+        let config: Config = serde_json::from_value(serde_json::json!({
+            "tts": { "enabled": enabled,
+                "model_ref": { "provider_id": "missing", "model": "tts-test" } }
+        }))
+        .unwrap();
+        let ctx = ModuleCtx {
+            bus: npc_core::Bus::new(),
+            config: Arc::new(config),
+            config_path: Default::default(),
+            shutdown: Default::default(),
+            data_dir: Default::default(),
+        };
+        let is_tts_playing = Arc::new(AtomicBool::new(false));
+        let shared = Arc::new(Shared {
+            config: RwLock::new(ctx.config.clone()),
+            vad_params: VadParams::new(&ctx.config.stt),
+            speaking: SpeakingGate::new(is_tts_playing.clone(), ctx.bus.clone()),
+            is_tts_playing,
+            is_priority_playing: Arc::new(AtomicBool::new(false)),
+            voice_active: Arc::new(AtomicBool::new(true)),
+            playback_tx: Mutex::new(None),
+            speech_generation: AtomicU64::new(0),
+            active_character: RwLock::new(None),
+        });
+        (ctx, shared)
+    }
+
+    fn set_tts_enabled(shared: &Shared, enabled: bool) {
+        let mut config = (*shared.config()).clone();
+        config.tts.enabled = enabled;
+        shared.update_config(Arc::new(config));
+    }
+
+    #[tokio::test]
+    async fn disabled_tts_skips_synthesis_and_priority_without_warnings() {
+        let warnings = WarningCounter::default();
+        let _guard = tracing::subscriber::set_default(warnings.clone());
+        let (ctx, shared) = tts_context(false);
+        let mut rx = ctx.bus.subscribe();
+        assert!(synthesize_tts(&ctx.config, "hello", None).await.is_none());
+        speak_reply(
+            ctx.clone(),
+            shared.clone(),
+            ctx.config.clone(),
+            None,
+            "hello!".into(),
+            0,
+        )
+        .await;
+        handle_priority_tts(
+            &ctx.config,
+            &ctx.data_dir,
+            None,
+            "hello".into(),
+            "missing.wav".into(),
+            1.0,
+            String::new(),
+            0.0,
+            false,
+            String::new(),
+            &shared,
+        )
+        .await;
+        assert_eq!(warnings.0.load(Ordering::SeqCst), 0);
+        assert!(rx.try_recv().is_err(), "disabled TTS must not announce a spoken line");
+
+        set_tts_enabled(&shared, true);
+        assert!(synthesize_tts(&shared.config(), "hello", None).await.is_none());
+        assert_eq!(
+            warnings.0.load(Ordering::SeqCst),
+            1,
+            "enabled TTS still resolves its provider"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_response_tts_follows_live_config_and_voice_gate() {
+        let (ctx, shared) = tts_context(false);
+        let mut rx = ctx.bus.subscribe();
+        let suspend = Arc::new(SuspendState {
+            suspended: AtomicBool::new(false),
+            generation: AtomicU64::new(0),
+        });
+        let task = tokio::spawn(run_chat_response_tts_task(ctx.clone(), shared.clone(), suspend));
+        tokio::task::yield_now().await; // Subscribe before publishing.
+        let reply = || {
+            ctx.bus.publish(
+                npc_core::topic::CHAT,
+                npc_core::msg::CHAT_RESPONSE,
+                serde_json::json!({ "content": "hello!" }),
+            )
+        };
+        reply();
+        tokio::task::yield_now().await;
+        assert_eq!(shared.speech_generation.load(Ordering::SeqCst), 0);
+        assert_eq!(rx.try_recv().unwrap().env.r#type, npc_core::msg::CHAT_RESPONSE);
+        assert!(rx.try_recv().is_err());
+
+        set_tts_enabled(&shared, true);
+        reply();
+        let line = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let message = rx.recv().await.unwrap();
+                if message.env.r#type == UI_MSG_TTS_LINE {
+                    break message;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(line.env.payload["text"], "hello!");
+        assert_eq!(shared.speech_generation.load(Ordering::SeqCst), 1);
+
+        set_tts_enabled(&shared, false);
+        reply();
+        tokio::task::yield_now().await;
+        assert_eq!(shared.speech_generation.load(Ordering::SeqCst), 2);
+        assert_eq!(rx.try_recv().unwrap().env.r#type, npc_core::msg::CHAT_RESPONSE);
+        assert!(rx.try_recv().is_err());
+        set_tts_enabled(&shared, true);
+        reply();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if rx.recv().await.unwrap().env.r#type == UI_MSG_TTS_LINE {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(shared.speech_generation.load(Ordering::SeqCst), 3);
+
+        shared.voice_active.store(false, Ordering::SeqCst);
+        reply();
+        tokio::task::yield_now().await;
+        assert_eq!(shared.speech_generation.load(Ordering::SeqCst), 3);
+        ctx.shutdown.cancel();
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn disabling_tts_cancels_old_reply_even_after_reenable() {
+        let (ctx, shared) = tts_context(true);
+        let mut rx = ctx.bus.subscribe();
+        let (tx, playback) = std_mpsc::channel();
+        *shared.playback_tx.lock().unwrap() = Some(tx);
+        set_tts_enabled(&shared, false);
+        assert!(matches!(playback.try_recv().unwrap(), PlaybackCmd::Stop));
+        assert_eq!(shared.speech_generation.load(Ordering::SeqCst), 1);
+        // The reply still holds the old enabled config snapshot.
+        speak_reply(ctx.clone(), shared.clone(), ctx.config.clone(), None, "old!".into(), 0).await;
+        set_tts_enabled(&shared, true);
+        speak_reply(ctx.clone(), shared.clone(), ctx.config.clone(), None, "old!".into(), 0).await;
+        assert!(rx.try_recv().is_err());
+        assert!(playback.try_recv().is_err());
+        // Unrelated/enabled saves preserve new replies' generation.
+        set_tts_enabled(&shared, true);
+        assert_eq!(shared.speech_generation.load(Ordering::SeqCst), 1);
+    }
 
     fn speech(input: &str, output: &str, rate: u32) -> SpeechConfig {
         SpeechConfig {
