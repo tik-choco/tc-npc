@@ -63,12 +63,8 @@ struct CatalogSheet {
 /// `CatalogPayloadV1` JSON its `cid` points to, converts the embedded
 /// character into an `npc_core::Character`, and saves it under
 /// `{data_dir}/catalog/`. Anything that doesn't parse as a well-formed
-/// catalog entry is silently ignored -- the same "coexist on the wire by
-/// shape" approach `mistl` uses for its own room-multiplexed protocols
-/// (each handler parses inbound bytes against its own schema and ignores
-/// what it can't parse), which matters here since a custom
-/// `config.mist.room_id` and the catalog room are mutually exclusive but
-/// this handler only ever runs when the catalog room is the one joined.
+/// catalog entry is silently ignored. The room-scoped dispatcher only
+/// calls this handler for messages from the catalog room.
 ///
 /// NOTE (v1): unlike tc-town's own web client (`catalog.ts`'s
 /// `handleEntryWire`, which calls `verifyWire` against the entry's did:key

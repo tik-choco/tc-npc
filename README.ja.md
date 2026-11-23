@@ -37,8 +37,9 @@ English README: [README.md](README.md)
   単体で使え、キャラごとの割り当ても可能。`#/avatar` は同じアバターだけを表示
   する画面で、別ウィンドウとして開ける(画角・背景・カメラ位置はリロードしても
   保持される)
-- **mist (オプション機能)**: `mist` cargo featureで mistlib (P2P) を組み込み、
-  tc-townのキャラクターカタログルームに接続。既定では無効
+- **mist (オプション機能)** は mistlib `v0.7.3-beta.6` で tc-town のカタログと
+  追加のルームに同時接続。Avatar Link の brain として tc-streaming の
+  Live2D オーバーレイなどの外部アバターを制御。既定では無効
 
 モジュール・バス・プロトコルの詳細(人物メモリの仕組みを含む)は
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)(英語)を参照してください。

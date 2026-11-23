@@ -1,115 +1,156 @@
-//! Thin wrapper around mistlib-native's process-wide singleton engine
-//! (`mistlib::app::*`), mirroring the embedding pattern the `mistl` daemon
-//! app uses (see `mistl/src/net/mod.rs`), simplified for tc-npc's
-//! single-room use.
-//!
-//! IMPORTANT: as of the pinned mistlib tag (v0.6.0), mistlib-native's
-//! engine tracks exactly **one** joined room at a time --
-//! `mistlib-native/src/transports/webrtc.rs`'s `WebRtcTransport::room_id`
-//! is a plain `RwLock<String>` that `join_room`/`set_room_id` *overwrite*,
-//! not a set that grows. Newer mistlib builds may support additive
-//! multi-room engines, but the public pinned tag does not, so `lib.rs`
-//! picks a single room to join accordingly (presence room XOR catalog
-//! room).
+//! Thin wrapper around mistlib-native's process-wide engine and room sessions.
 
 use std::sync::OnceLock;
 
 use anyhow::Context;
+use mistlib::events::{EVENT_RAW, EVENT_ROOM_JOINED, EVENT_ROOM_JOIN_FAILED};
+use mistlib_core::config::{Config, NostrSignalingConfig, SignalingConfig, SignalingMode};
 use tokio::sync::mpsc;
 
-/// mistlib's registered event callback is a bare `unsafe extern "C" fn`
-/// pointer with no captured state (`mistlib::events::EventCallback`) -- it
-/// can't be a closure. So, like `mistl`'s own `dispatch_room_event`, the
-/// actual handler state (this channel's sender) lives in a static instead.
-static RAW_TX: OnceLock<mpsc::UnboundedSender<Vec<u8>>> = OnceLock::new();
+pub enum RoomEvent {
+    Joined(String),
+    JoinFailed(String, String),
+    Raw(String, Vec<u8>),
+}
 
-/// mistlib's dispatch thread calls this synchronously, with no tokio
-/// runtime of its own available -- keep it cheap (just a channel send) and
-/// hand real (async, fallible) processing off to our own async world via
-/// `RAW_TX`. Only `EVENT_RAW` (actual room messages) are forwarded; join/
-/// leave/overlay events are ignored.
-///
+// The C callback has no captured state and runs on mistlib's dispatch thread.
+static EVENT_TX: OnceLock<mpsc::UnboundedSender<RoomEvent>> = OnceLock::new();
+
 /// # Safety
-/// Called only by mistlib's own event dispatch
-/// (`mistlib_native::events::dispatch_event`), which guarantees `data_ptr`
-/// is valid for `data_len` bytes for the duration of this call.
-unsafe extern "C" fn dispatch_raw_event(
+/// mistlib guarantees the pointer/length pairs are valid for this call.
+unsafe extern "C" fn dispatch_room_event(
     event_type: u32,
+    room_ptr: *const u8,
+    room_len: usize,
     _from_ptr: *const u8,
     _from_len: usize,
     data_ptr: *const u8,
     data_len: usize,
 ) {
-    if event_type != mistlib::events::EVENT_RAW {
+    let Some(tx) = EVENT_TX.get() else { return };
+    if !matches!(
+        event_type,
+        EVENT_RAW | EVENT_ROOM_JOINED | EVENT_ROOM_JOIN_FAILED
+    ) {
         return;
     }
-    let data = unsafe { std::slice::from_raw_parts(data_ptr, data_len) }.to_vec();
-    if let Some(tx) = RAW_TX.get() {
-        let _ = tx.send(data);
-    }
+    let room = String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(room_ptr, room_len) })
+        .into_owned();
+    let event = match event_type {
+        EVENT_ROOM_JOINED => RoomEvent::Joined(room),
+        EVENT_ROOM_JOIN_FAILED => {
+            let data = unsafe { std::slice::from_raw_parts(data_ptr, data_len) };
+            RoomEvent::JoinFailed(room, String::from_utf8_lossy(data).into_owned())
+        }
+        _ => {
+            let data = unsafe { std::slice::from_raw_parts(data_ptr, data_len) }.to_vec();
+            RoomEvent::Raw(room, data)
+        }
+    };
+    let _ = tx.send(event);
 }
 
-/// Initializes the process-wide mistlib engine (identity + signaling) and
-/// registers the raw event handler. Content storage is wired up
-/// automatically *inside* mistlib-native's own `init()` ->
-/// `build_context()` -> `init_storage()` (see
-/// `mistlib-native/src/layers/native_l0/init.rs`), so no separate storage
-/// setup call is needed here before [`storage_get`] can be used.
-///
-/// Must be called at most once per process -- returns an error on a second
-/// call (`npc-mist` only ever runs one module instance, so this should
-/// never happen in practice).
-///
-/// mistlib's sync entry points (`init`) call `ENGINE.runtime.block_on(...)`
-/// internally, which panics if invoked directly from a tokio worker thread
-/// (nested runtime entry) -- run on a blocking thread, mirroring how the
-/// `mistl` daemon calls the same entry points (see its `net::start_engine`).
+fn signaling_config(signaling_url: &str) -> Config {
+    let mut config = Config::new_default();
+    if signaling_url.is_empty() {
+        config.signaling = SignalingConfig {
+            mode: SignalingMode::Nostr,
+            nostr: Some(NostrSignalingConfig {
+                relays: Vec::new(),
+                discovery_kind: 25049,
+                message_kind: 25050,
+                ttl_seconds: 600,
+                invite_salt: "tik-choco-v1".to_string(),
+                invite_code: "tik-choco-public-v1".to_string(),
+                ..Default::default()
+            }),
+        };
+    } else {
+        config.use_websocket_signaling_url(signaling_url.to_string());
+    }
+    config
+}
+
+/// Initializes the engine once per process, before scheduling any room joins.
 pub async fn start(
     node_id: String,
-    signaling_url: String,
-) -> anyhow::Result<mpsc::UnboundedReceiver<Vec<u8>>> {
+    signaling_url: &str,
+) -> anyhow::Result<mpsc::UnboundedReceiver<RoomEvent>> {
+    let config = serde_json::to_vec(&signaling_config(signaling_url.trim()))?;
     let (tx, rx) = mpsc::unbounded_channel();
-    RAW_TX
+    EVENT_TX
         .set(tx)
         .map_err(|_| anyhow::anyhow!("mist engine already started in this process"))?;
 
     tokio::task::spawn_blocking(move || {
-        mistlib::app::register_event_callback(dispatch_raw_event);
-        mistlib::app::init(node_id, signaling_url);
+        anyhow::ensure!(
+            mistlib::app::init_with_config(node_id, &config),
+            "mistlib rejected the signaling config"
+        );
+        mistlib::app::register_event_callback_v2(dispatch_room_event);
+        Ok(())
     })
     .await
-    .context("mist: initializing mistlib engine")?;
+    .context("mist: initializing mistlib engine")??;
 
     Ok(rx)
 }
 
-/// Joins `room_id`, replacing whatever room (if any) was previously joined
-/// -- see this module's doc comment on mistlib's single-room-per-engine
-/// behavior at the pinned tag.
-pub async fn join_room(room_id: String) -> anyhow::Result<()> {
-    tokio::task::spawn_blocking(move || mistlib::app::join_room(room_id))
-        .await
-        .context("mist: joining room")
+/// Schedules an additive join. The callback reports when the session is ready.
+pub fn join_room(room_id: String) {
+    mistlib::app::join_room(room_id);
 }
 
-/// Leaves the currently joined room and tears down the WebRTC/WebSocket
-/// session.
-pub async fn leave_room() -> anyhow::Result<()> {
-    tokio::task::spawn_blocking(mistlib::app::leave_room)
-        .await
-        .context("mist: leaving room")
+pub fn broadcast(room_id: &str, data: &[u8], unreliable: bool) -> anyhow::Result<()> {
+    let delivery = if unreliable {
+        mistlib::app::DELIVERY_UNRELIABLE
+    } else {
+        mistlib::app::DELIVERY_RELIABLE
+    };
+    mistlib::app::try_send_message_in_room(room_id.to_string(), String::new(), data, delivery)?;
+    Ok(())
 }
 
-/// Fetches content previously published via mist storage (`storage_add`),
-/// e.g. tc-town's catalog payload JSON referenced by a `CatalogEntryWire`'s
-/// `cid`. `NativeL0` is a zero-sized handle -- all real state lives in
-/// mistlib's process-wide `ENGINE`/`STORAGE` statics, so constructing a
-/// fresh one per call is fine (mirrors mistlib-native's own `app::*` free
-/// functions, which do the same internally via `ENGINE.l0`).
+pub async fn leave_all_rooms() -> anyhow::Result<()> {
+    // On a plain thread, mistlib waits for active room teardown to finish.
+    let (done, rx) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("mist-shutdown".to_string())
+        .spawn(move || {
+            mistlib::app::leave_all_rooms();
+            let _ = done.send(());
+        })?;
+    rx.await.context("mist: leaving rooms")
+}
+
+/// Fetches content from mistlib's storage, shared by all room sessions.
 pub async fn storage_get(cid: &str) -> anyhow::Result<Vec<u8>> {
     use mistlib_core::layers::L0Engine;
     mistlib::layers::NativeL0::new()
         .storage_get(cid)
         .await
         .map_err(|err| anyhow::anyhow!("mist: storage_get({cid}) failed: {err}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signaling_matches_web_namespace_and_supports_websocket_override() {
+        let config = signaling_config("");
+        let wire = serde_json::to_value(config).unwrap();
+        let signaling = &wire["signaling"];
+        assert_eq!(signaling["mode"], "nostr");
+        assert_eq!(signaling["nostr"]["relays"], serde_json::json!([]));
+        assert_eq!(signaling["nostr"]["inviteSalt"], "tik-choco-v1");
+        assert_eq!(signaling["nostr"]["inviteCode"], "tik-choco-public-v1");
+        assert_eq!(signaling["nostr"]["discoveryKind"], 25049);
+        assert_eq!(signaling["nostr"]["messageKind"], 25050);
+        assert_eq!(signaling["nostr"]["ttlSeconds"], 600);
+
+        let config = signaling_config("wss://example.test/signal");
+        assert_eq!(config.signaling_url, "wss://example.test/signal");
+        assert_eq!(config.signaling.mode, SignalingMode::WebSocket);
+    }
 }

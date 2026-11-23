@@ -7,6 +7,19 @@
 
 export interface ModelRef { provider_id: string; model: string }
 
+export interface MistSection {
+  [key: string]: unknown;
+  enabled?: boolean;
+  signaling_url?: string;
+  room_id?: string;
+  avatar_link?: {
+    enabled?: boolean;
+    room_id?: string;
+    name?: string;
+    allow_hosts?: string[];
+  };
+}
+
 /**
  * config.scheduler.announcements[].actions[] — extra bus messages an
  * announcement publishes when it fires (the port of the Go scheduler's

@@ -206,6 +206,12 @@
     "enabled": false,
     "signaling_url": "",
     "room_id": "",
+    "avatar_link": {
+      "enabled": false,
+      "room_id": "tc-avatar-link-v1",
+      "name": "",
+      "allow_hosts": []
+    },
     "ai_base_url": "http://127.0.0.1:6478/v1"
   },
   "default_ref": {

@@ -16,12 +16,10 @@ members = [
 # crates/npc-mist (the optional `mist` feature's crate) is deliberately NOT
 # a member of this workspace, and is excluded here so Cargo's workspace
 # directory-tree auto-discovery doesn't trip over it declaring its own
-# `[workspace]` table (see its Cargo.toml) nested under this one. Excluding
-# it keeps `cargo check/build --workspace` at the root from ever resolving
-# or fetching its heavy mistlib git dependency. It's still reachable as an
-# ordinary optional path dependency of the root package below, activated
-# only by `--features mist`.
-exclude = ["crates/npc-mist"]
+# `[workspace]` table (see its Cargo.toml) nested under this one. The root
+# package enables npc-mist with `--features mist`. Default workspace builds
+# skip compiling mistlib, though Cargo can resolve the optional Git source.
+exclude = ["crates/npc-mist", "third_party/webrtc-sctp"]
 
 [workspace.package]
 edition = "2021"
@@ -143,6 +141,12 @@ tauri-build = { version = "2.2", optional = true }
 [features]
 mist = ["dep:npc-mist"]
 desktop = ["dep:tauri", "dep:tauri-plugin-window-state", "dep:tauri-build"]
+
+[patch.crates-io]
+# Cargo ignores patches from dependency workspaces. Use the SCTP fork
+# bundled with the mistlib tag for both mistlib-native and WebRTC. A local
+# path lets Cargo resolve the patch without a Git fetch.
+webrtc-sctp = { path = "third_party/webrtc-sctp" }
 
 [profile.dev]
 # Windows `.pdb` files were 4.83 GB of this crate's 37.82 GB debug target dir

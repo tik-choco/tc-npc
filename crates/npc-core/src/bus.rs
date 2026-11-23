@@ -71,6 +71,28 @@ impl Default for Bus {
     }
 }
 
+/// Build an `agent:sense` / `speech` payload for an operator or external client.
+/// npc-talk echoes `request_id` on the resulting reply, silence, or error.
+/// `transliterate_name` opts stream-event viewer handles into katakana conversion.
+pub fn speech_payload(
+    content: &str,
+    speaker: Option<&str>,
+    request_id: Option<&str>,
+    transliterate_name: bool,
+) -> serde_json::Value {
+    let mut payload = serde_json::json!({ "content": content });
+    if let Some(speaker) = speaker.map(str::trim).filter(|s| !s.is_empty()) {
+        payload["speaker"] = serde_json::json!(speaker);
+    }
+    if let Some(request_id) = request_id {
+        payload["request_id"] = serde_json::json!(request_id);
+    }
+    if transliterate_name {
+        payload["transliterate_name"] = serde_json::json!(true);
+    }
+    payload
+}
+
 /// Canonical channel names shared across the former agent-* services.
 pub mod topic {
     pub const CHAT: &str = "agent:chat";

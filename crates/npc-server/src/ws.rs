@@ -6,6 +6,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
+use npc_core::bus::speech_payload;
 use npc_core::{msg, topic};
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
@@ -503,44 +504,6 @@ fn set_voice_active(state: &AppState, active: bool) {
         serde_json::json!({}),
     );
     state.hub.broadcast(&ServerMsg::Voice { active });
-}
-
-/// Build the `agent:sense`/`speech` payload for `content`, attributing it to
-/// `speaker` when given a non-empty name (see the person-memory contract
-/// §4: `{"content": "...", "speaker": "..."}`) and carrying `request_id`
-/// (snake_case, a sibling of `speaker`) when this content came from a
-/// specific WS request rather than e.g. a scheduler announcement. A missing
-/// speaker/request_id simply omits that field, so existing consumers that
-/// don't know about either see no change from before those fields existed.
-///
-/// `request_id` is a convention on this JSON payload, not a new bus message
-/// shape: npc-talk (see the extension API compatibility work) reads it back
-/// off this same payload and threads it through to the `chat_response`/
-/// `chat_silent` envelope it publishes, which is what lets
-/// `bus_forward.rs` correlate a `response` frame to the `input`/`event` that
-/// produced it instead of hardcoding `requestId: "-"` for every turn.
-///
-/// `transliterate_name`, another sibling flag, is only ever `true` from
-/// `process_event`: it tells npc-talk that `speaker`, when present and
-/// containing Latin letters, is a stream-event viewer handle worth running
-/// through its LLM's katakana transliteration before the turn (ported from
-/// tc-assistant2's `hasLatinLetters`/`convertNameToKatakana`) — not a plain
-/// conversation partner's name from `process_input`, which is left alone.
-/// Omitted (rather than emitted as `false`) on every other payload, matching
-/// this function's existing omit-when-absent treatment of `speaker`/
-/// `request_id` above.
-fn speech_payload(content: &str, speaker: Option<&str>, request_id: Option<&str>, transliterate_name: bool) -> serde_json::Value {
-    let mut payload = serde_json::json!({ "content": content });
-    if let Some(speaker) = speaker.map(str::trim).filter(|s| !s.is_empty()) {
-        payload["speaker"] = serde_json::json!(speaker);
-    }
-    if let Some(request_id) = request_id {
-        payload["request_id"] = serde_json::json!(request_id);
-    }
-    if transliterate_name {
-        payload["transliterate_name"] = serde_json::json!(true);
-    }
-    payload
 }
 
 /// Turn a viewer/platform event into a short Japanese instruction line fed to

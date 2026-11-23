@@ -1,30 +1,22 @@
-//! npc-mist: optional mistlib P2P integration for tc-npc, gated behind the
-//! `mist` cargo feature (see root `Cargo.toml`/`src/main.rs`). Depends on
-//! mistlib-core/mistlib-native -- MPL-2.0,
-//! https://github.com/tik-choco-lab/mistlib -- as git dependencies pinned
-//! to a specific tag (currently v0.6.0).
-//!
-//! When `config.mist.enabled`, [`module`]'s `run` (see [`MistModule`]):
-//!
-//! 1. Creates/loads a persistent node id at `{data_dir}/mist-node-id.txt`.
-//! 2. Initializes the mistlib engine (falling back to mistlib's own default
-//!    signaling URL when `config.mist.signaling_url` is empty) and joins a
-//!    single room -- `config.mist.room_id` if set (a plain presence/
-//!    messaging room; no special handling of its traffic yet), otherwise
-//!    the public tc-town character catalog room (see [`catalog`]).
-//! 3. Leaves the room and drops the engine cleanly on `ctx.shutdown`.
-//!
-//! See `engine.rs`'s module doc comment for *why* it's "a single room" --
-//! mistlib-native's engine (at the pinned tag) tracks only one joined room
-//! per process.
+//! Optional mistlib P2P integration for tc-town catalog discovery, room
+//! presence, and the Avatar Link brain role. All rooms share a persistent
+//! node id at `{data_dir}/mist-node-id.txt`.
 
+mod avatar_bridge;
+mod avatar_link;
 mod catalog;
 mod engine;
 
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use npc_core::{Module, ModuleCtx};
+use tokio::sync::broadcast::error::RecvError;
+
+use avatar_bridge::{AvatarBridge, HELLO_INTERVAL};
+use avatar_link::BrainMessage;
+use engine::RoomEvent;
 
 pub fn module(_ctx: &ModuleCtx) -> anyhow::Result<Box<dyn Module>> {
     Ok(Box::new(MistModule))
@@ -40,91 +32,114 @@ impl Module for MistModule {
 
     async fn run(self: Box<Self>, ctx: ModuleCtx) -> anyhow::Result<()> {
         if !ctx.config.mist.enabled {
-            // `src/main.rs` already only spawns this module when
-            // `config.mist.enabled`, but guard here too so the module stays
-            // well-behaved if ever constructed unconditionally in the
-            // future -- idle until shutdown rather than doing nothing and
-            // exiting (which `spawn_module` would log as a module having
-            // "exited").
             tracing::debug!("npc-mist: mist.enabled is false, idling until shutdown");
             ctx.shutdown.cancelled().await;
             return Ok(());
         }
 
         let node_id = load_or_create_node_id(&ctx.data_dir)?;
-
-        let signaling_url = if ctx.config.mist.signaling_url.trim().is_empty() {
-            mistlib_core::config::Config::new_default().signaling_url
-        } else {
-            ctx.config.mist.signaling_url.clone()
-        };
-
-        let custom_room = ctx.config.mist.room_id.trim().to_string();
-        let (room_id, catalog_enabled) = if custom_room.is_empty() {
-            (catalog::CATALOG_ROOM_ID.to_string(), true)
-        } else {
-            // Tradeoff documented in `engine.rs`'s module doc comment:
-            // mistlib (at the pinned tag) only tracks one joined room per
-            // process, so an explicit `mist.room_id` wins over catalog
-            // discovery for this run.
-            tracing::warn!(
-                room_id = %custom_room,
-                catalog_room = catalog::CATALOG_ROOM_ID,
-                "npc-mist: mist.room_id is set, so this instance will NOT listen to the tc-town \
-                 character catalog room this run -- mistlib's engine (at the pinned tag) tracks \
-                 only one joined room per process; unset mist.room_id to discover catalog \
-                 characters instead"
-            );
-            (custom_room, false)
-        };
-
-        tracing::info!(
-            node_id = %node_id,
-            room = %room_id,
-            catalog_enabled,
-            "npc-mist: starting mist engine"
-        );
-
-        let mut raw_rx = engine::start(node_id, signaling_url).await?;
-
-        if let Err(err) = engine::join_room(room_id.clone()).await {
-            tracing::error!(error = %err, room = %room_id, "npc-mist: failed to join room");
-            return Err(err);
+        let mut avatar = ctx
+            .config
+            .mist
+            .avatar_link
+            .enabled
+            .then(|| AvatarBridge::new(&ctx, &node_id));
+        let mut rooms = vec![catalog::CATALOG_ROOM_ID];
+        let custom_room = ctx.config.mist.room_id.trim();
+        if !custom_room.is_empty() && !rooms.contains(&custom_room) {
+            rooms.push(custom_room);
         }
-        tracing::info!(room = %room_id, "npc-mist: joined room");
+        if let Some(avatar) = &avatar {
+            let room = avatar.room_id.as_str();
+            anyhow::ensure!(
+                !room.is_empty(),
+                "mist.avatar_link.room_id must not be empty"
+            );
+            if !rooms.contains(&room) {
+                rooms.push(room);
+            }
+        }
+
+        tracing::info!(%node_id, ?rooms, "npc-mist: starting mist engine");
+        let mut bus_rx = ctx.bus.subscribe();
+        let mut room_rx = engine::start(node_id, &ctx.config.mist.signaling_url).await?;
+        for room in rooms {
+            engine::join_room(room.to_string());
+        }
+
+        let mut failed_rooms = Vec::new();
+        let first_tick = tokio::time::Instant::now() + HELLO_INTERVAL;
+        let mut heartbeat = tokio::time::interval_at(first_tick, HELLO_INTERVAL);
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
             tokio::select! {
-                _ = ctx.shutdown.cancelled() => {
-                    tracing::info!("npc-mist: shutdown requested, leaving room");
-                    if let Err(err) = engine::leave_room().await {
-                        tracing::warn!(error = %err, "npc-mist: failed to leave room cleanly");
+                _ = ctx.shutdown.cancelled() => break,
+                _ = heartbeat.tick() => {
+                    for room in failed_rooms.drain(..) {
+                        engine::join_room(room);
                     }
-                    break;
+                    if let Some(avatar) = avatar.as_mut().filter(|avatar| avatar.joined) {
+                        avatar.hello();
+                    }
                 }
-                event = raw_rx.recv() => {
+                event = room_rx.recv() => {
                     match event {
-                        Some(data) if catalog_enabled => {
-                            let data_dir = ctx.data_dir.clone();
-                            let bus = ctx.bus.clone();
-                            tokio::spawn(async move {
-                                catalog::handle_raw_event(&data, &data_dir, &bus).await;
-                            });
+                        Some(RoomEvent::Joined(room)) => {
+                            tracing::info!(%room, "npc-mist: joined room");
+                            if let Some(avatar) = avatar.as_mut().filter(|avatar| avatar.room_id == room) {
+                                avatar.joined = true;
+                                avatar.hello();
+                                heartbeat.reset();
+                            }
                         }
-                        Some(_) => {
-                            // Presence/messaging room traffic: no handling
-                            // defined for tc-npc yet, just receive-and-drop.
+                        Some(RoomEvent::JoinFailed(room, error)) => {
+                            tracing::warn!(%room, %error, "npc-mist: failed to join room, will retry");
+                            failed_rooms.push(room);
+                        }
+                        Some(RoomEvent::Raw(room, data)) => {
+                            if let Some(avatar) = avatar.as_mut().filter(|avatar| avatar.joined && avatar.room_id == room) {
+                                if avatar.receive(&ctx.bus, &data, Instant::now()) {
+                                    avatar.hello();
+                                }
+                            }
+                            if room == catalog::CATALOG_ROOM_ID {
+                                let data_dir = ctx.data_dir.clone();
+                                let bus = ctx.bus.clone();
+                                tokio::spawn(async move {
+                                    catalog::handle_raw_event(&data, &data_dir, &bus).await;
+                                });
+                            }
                         }
                         None => {
-                            tracing::warn!("npc-mist: raw event channel closed, stopping");
+                            tracing::warn!("npc-mist: room event channel closed, stopping");
                             break;
                         }
+                    }
+                }
+                event = bus_rx.recv(), if avatar.is_some() => {
+                    match event {
+                        Ok(event) => {
+                            if let Some(avatar) = &mut avatar {
+                                if let Some(message) = avatar.from_bus(&event, Instant::now()) {
+                                    avatar.send(message);
+                                }
+                            }
+                        }
+                        Err(RecvError::Lagged(skipped)) => tracing::warn!(skipped, "npc-mist: bus receiver lagged"),
+                        Err(RecvError::Closed) => break,
                     }
                 }
             }
         }
 
-        Ok(())
+        if avatar.is_some_and(|avatar| avatar.joined && avatar.send(BrainMessage::Bye)) {
+            // Give the queued broadcast time to reach the send worker before
+            // tearing down the sessions.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        tracing::info!("npc-mist: leaving rooms");
+        engine::leave_all_rooms().await
     }
 }
 
@@ -156,12 +171,10 @@ mod tests {
     fn node_id_persists_across_calls() {
         let dir = std::env::temp_dir().join(format!("npc-mist-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-
         let first = load_or_create_node_id(&dir).unwrap();
         let second = load_or_create_node_id(&dir).unwrap();
         assert_eq!(first, second);
         assert!(first.starts_with("tc-npc-"));
-
         std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -42,8 +42,10 @@ served on startup.
   assigning one per character works too. `#/avatar` is the same avatar with
   no UI around it, for opening in a window of its own; its framing, backdrop
   and camera angle are remembered between reloads.
-- **mist** (optional feature): connects to tc-town's character catalog room
-  via mistlib (P2P). Disabled by default.
+- **mist** (optional feature) uses mistlib `v0.7.3-beta.6` to join the
+  tc-town catalog and additional rooms in parallel. Its Avatar Link brain
+  role drives external avatars such as tc-streaming's Live2D overlay.
+  Disabled by default.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how the modules,
 bus, and protocol fit together, including a deeper look at person memory.

@@ -1227,10 +1227,13 @@ pub struct MistConfig {
     pub ai_base_url: String,
     #[serde(default)]
     pub enabled: bool,
+    /// Optional WebSocket signaling override for the embedded mist engine.
     #[serde(default)]
     pub signaling_url: String,
     #[serde(default)]
     pub room_id: String,
+    #[serde(default)]
+    pub avatar_link: AvatarLinkConfig,
 }
 
 fn default_mist_ai_base_url() -> String {
@@ -1251,6 +1254,27 @@ impl Default for MistConfig {
             enabled: false,
             signaling_url: String::new(),
             room_id: String::new(),
+            avatar_link: AvatarLinkConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AvatarLinkConfig {
+    pub enabled: bool,
+    pub room_id: String,
+    pub name: String,
+    pub allow_hosts: Vec<String>,
+}
+
+impl Default for AvatarLinkConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            room_id: "tc-avatar-link-v1".to_string(),
+            name: String::new(),
+            allow_hosts: Vec::new(),
         }
     }
 }
@@ -1912,6 +1936,20 @@ pub fn data_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn avatar_link_defaults_in_older_mist_configs() {
+        let config: Config = serde_json::from_str(r#"{"mist":{"enabled":true}}"#).unwrap();
+        let link = config.mist.avatar_link;
+        assert!(!link.enabled);
+        assert_eq!(link.room_id, "tc-avatar-link-v1");
+        assert!(link.name.is_empty());
+        assert!(link.allow_hosts.is_empty());
+
+        let config: Config = serde_json::from_str(r#"{"mist":{"avatar_link":{"enabled":true}}}"#).unwrap();
+        assert!(config.mist.avatar_link.enabled);
+        assert_eq!(config.mist.avatar_link.room_id, "tc-avatar-link-v1");
+    }
 
     #[test]
     fn defaults_round_trip() {

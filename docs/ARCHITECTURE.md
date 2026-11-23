@@ -744,43 +744,58 @@ frontend, which this scaffold intentionally does not create).
 
 ## mist (optional feature)
 
-`npc-mist` (`crates/npc-mist`) is an optional, feature-gated module that
-connects tc-npc to the [mistlib](https://github.com/tik-choco-lab/mistlib)
-P2P network (MPL-2.0). It's excluded from the default build — `cargo check
---workspace`/`cargo build --workspace` never touch it. Building with
-`cargo build --features mist` (or `just check-mist` / `just build-mist`)
-pulls in `mistlib-core`/`mistlib-native` as git dependencies pinned to a
-specific tag (currently v0.6.0) and compiles the module in; it's a heavy
-build (mistlib
-bundles a WebRTC stack). `src/main.rs` only spawns the module when both the
-`mist` feature is enabled at compile time *and* `config.mist.enabled` is
-true at runtime (see `config.mist` in `crates/npc-core/src/config.rs`:
-`enabled`, `signaling_url`, `room_id`).
+`npc-mist` (`crates/npc-mist`) connects tc-npc to the mistlib P2P network.
+The default Cargo workspace build and test graph excludes mistlib. A clean
+Cargo cache may still need to fetch the optional Git source during
+dependency resolution. To build the module and its WebRTC dependencies, run
+`cargo build --features mist` or
+`just build-mist`, then set `mist.enabled` to `true` to run it.
+`mistlib-core` and `mistlib-native` are pinned to `v0.7.3-beta.6`, the
+engine used by `@tik-choco/mistlib-web@0.3.1-beta.5`.
+[mistlib](https://github.com/tik-choco-lab/mistlib)
 
-When running, it:
+Mistlib-native relies on the tagged SCTP fork in `third_party/webrtc-sctp`.
+Both Cargo workspaces patch it in from disk because Cargo resolves patches
+before selecting build features.
 
-- Generates (or loads) a persistent node id at
-  `{data_dir}/mist-node-id.txt` (`tc-npc-<8 hex chars>`).
-- Initializes the mistlib engine — falling back to mistlib's own default
-  signaling URL (`mistlib_core::config::Config::new_default()`) when
-  `config.mist.signaling_url` is empty — and joins a single room:
-  - `config.mist.room_id` if set: a plain presence/messaging room, with no
-    special handling of its traffic yet.
-  - Otherwise, the public tc-town character catalog room
-    (`tc-town-character-catalog-v1`): entries broadcast there are fetched
-    via mist content storage (`storage_get`), parsed as tc-town's
-    `CatalogPayloadV1`, converted to an `npc_core::Character`, and saved
-    under `{data_dir}/catalog/{id}.json` — deliberately separate from
-    `{data_dir}/characters/`, since these are *discovered* characters an
-    operator hasn't chosen to import yet. Each discovery logs at info and
-    publishes an `npc:ui`/`action_log` bus message so it shows up in the web
-    UI's log.
-  - mistlib-native's engine, at the pinned tag this crate depends on,
-    tracks only **one** joined room per process, so setting
-    `config.mist.room_id` disables catalog discovery for that run (logged
-    as a warning) — see the module doc comment in
-    `crates/npc-mist/src/engine.rs` for the underlying constraint.
-- Leaves the room and drops the engine cleanly on `ctx.shutdown`.
+The engine uses a persistent node ID at `{data_dir}/mist-node-id.txt` and
+defaults to the shared tik-choco Nostr namespace. It uses the invite salt
+`tik-choco-v1`, invite code `tik-choco-public-v1`, discovery and message
+kinds 25049 and 25050, a 600-second TTL, and mistlib's default relay list.
+A non-empty `mist.signaling_url` switches the engine to that WebSocket
+signaling endpoint for all rooms. Leave it empty to connect to the standard
+tik-choco web apps.
+
+Mistlib's SPEC-15 sessions allow the engine to join all configured rooms
+concurrently. The v2 event callback forwards events with their room IDs.
+
+- The engine always joins `tc-town-character-catalog-v1`. It fetches
+  catalog entries via mist storage, saves converted characters under
+  `{data_dir}/catalog/{id}.json`, and publishes each discovery to
+  `npc:ui` / `action_log`. An operator can import a discovery into the
+  active character store.
+- Set `mist.room_id` to join an additional presence room.
+- Set `mist.avatar_link.enabled` to join an Avatar Link room as a brain
+  for an external avatar host such as tc-streaming's Live2D overlay.
+  See tc-streaming docs/avatar-link.md (protocol `tc-avatar-link/1`).
+  The default room is `tc-avatar-link-v1`. Use a private room ID on the
+  public namespace. `name` defaults to the active character name at startup
+  or `tc-npc`. `allow_hosts` filters by the envelope's host ID and defaults
+  to accepting any host. Peers declare these IDs themselves.
+
+Avatar Link sends `hello` on join, on first contact with each host, and
+every 30 seconds. It sends a best-effort `bye` before the engine leaves all
+rooms on shutdown. Host `input` enters the same `agent:sense` / `speech`
+path as WebSocket input, including the speaker. npc-talk's request ID
+correlates the original input to `say` or `silent`. The brain chooses
+`audio: "brain"` when `tts.enabled` is true and `audio: "host"` otherwise.
+It follows TTS config updates live, forwards playback edges as `speaking`,
+sends unreliable `mouth` levels at up to 30 Hz, and forwards interrupt,
+suspend, and voice stop as `stop`. Playback events carry a global speaking
+state, so `speaking` omits the optional line ID. npc-talk publishes completed text
+and affect snapshots. The bridge omits `delta` and `emotion` because the
+bus carries neither reply deltas nor the six expression labels. Inbound
+host `state` refreshes presence.
 
 Catalog entries are trusted without verifying tc-town's did:key signature
 (`CatalogEntryWire.signature`) — there's no DID identity/crypto story on the

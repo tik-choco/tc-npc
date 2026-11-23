@@ -2,6 +2,8 @@
 // this in sync with the server side — it is intentionally the single source
 // of truth for frame shapes on the web UI.
 
+import type { MistSection } from "./config-types";
+
 /** A 3D model, naming a `.vrm` in the server's model folder
  *  (`{data_dir}/vrm/`). Fetched for display over `/api/vrm/file/:file`. */
 export interface AvatarRef {
@@ -407,9 +409,8 @@ export interface VrmModel {
 
 /** Opaque config blob — GET /api/config masks api keys as "***"; PUT sends
  *  the full (edited) JSON back and the server preserves any key still left
- *  as "***". The web UI treats this as an untyped JSON document (see
- *  views/SettingsView.tsx). */
-export type ConfigDocument = Record<string, unknown>;
+ *  as "***". The JSON settings editor can edit the full document. */
+export type ConfigDocument = Record<string, unknown> & { mist?: MistSection };
 
 /** GET /api/memory — a snapshot of the memory module's current state. */
 export interface MemoryDocument {
