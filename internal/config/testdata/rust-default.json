@@ -1,0 +1,136 @@
+{
+  "language": "",
+  "api": {
+    "base_url": "http://localhost:11434/v1",
+    "api_key": "",
+    "model": "",
+    "embedding_model": "",
+    "reasoning_effort": "none"
+  },
+  "tts": {
+    "enabled": false,
+    "base_url": "",
+    "api_key": "",
+    "model": "",
+    "voice": "alloy",
+    "speed": 1.0,
+    "max_len": 200
+  },
+  "stt": {
+    "enabled": false,
+    "base_url": "",
+    "api_key": "",
+    "model": "",
+    "silence_duration": 1.5,
+    "input_threshold": 0.01,
+    "barge_in": true,
+    "barge_in_factor": 2.5
+  },
+  "talk": {
+    "enabled": true,
+    "history_size": 20,
+    "prompts": [],
+    "filter_prompt_name": "",
+    "style_rules": true,
+    "allow_silence": true,
+    "affect": {
+      "enabled": true,
+      "forced_closure": true,
+      "absence_timeout_secs": 300
+    },
+    "reasoning_effort": ""
+  },
+  "memory": {
+    "enabled": true,
+    "idle_timeout_minutes": 5,
+    "top_k": 5,
+    "threshold": 0.1,
+    "chunk_size": 512,
+    "chunk_overlap": 64,
+    "summarize_prompt": "以下の会話を短く要約してください。",
+    "consolidate_prompt": "以下の記憶をまとめ、重複を除いて簡潔に整理してください。",
+    "people": {
+      "enabled": true,
+      "extract_prompt": "以下の会話から、登場した人物について新たに分かった事実だけを抽出してください。JSON配列で、各要素は {\"name\": \"人物名\", \"facts\": [\"事実1\", \"事実2\"]} の形式にしてください。人物が特定できない、または新しい情報がない場合は空配列 [] を返してください。説明や前置きは不要です。",
+      "max_facts": 20,
+      "link_vision": true
+    },
+    "reasoning_effort": ""
+  },
+  "vision": {
+    "enabled": false,
+    "base_url": "",
+    "api_key": "",
+    "model": "",
+    "interval_seconds": 5.0,
+    "capture_mode": "entire",
+    "target_window_title": "",
+    "system_prompt": "画面のスクリーンショットを簡潔に日本語で説明してください。",
+    "debug_save": false,
+    "person_detection": false,
+    "reasoning_effort": ""
+  },
+  "speech": {
+    "input_device": "",
+    "output_device": "",
+    "input_sample_rate": 16000,
+    "output_sample_rate": 44100
+  },
+  "action": {
+    "enabled": false,
+    "osc_address": "127.0.0.1:9000",
+    "locations": [],
+    "routes": [],
+    "reasoning_effort": ""
+  },
+  "vrc": {
+    "chatbox": false,
+    "osc_address": "127.0.0.1:9000"
+  },
+  "scheduler": {
+    "enabled": false,
+    "announcements": [],
+    "defaults": {
+      "chime_file": "",
+      "volume": 1.0,
+      "bgm_volume": 0.5
+    }
+  },
+  "schedule_profile": {
+    "active_id": ""
+  },
+  "translation": {
+    "mode": "off",
+    "scope": "both",
+    "source_language": "日本語",
+    "target_language": "英語",
+    "target_language_2": "",
+    "context_size": 3,
+    "auto_reverse": true,
+    "chatbox": false,
+    "model": "",
+    "reasoning_effort": ""
+  },
+  "server": {
+    "addr": "127.0.0.1:47950",
+    "auto_open": true
+  },
+  "character": {
+    "active_id": "",
+    "avatar_file": ""
+  },
+  "mist": {
+    "cli_path": "mistl",
+    "ai_base_url": "http://127.0.0.1:6478/v1",
+    "enabled": false,
+    "signaling_url": "",
+    "room_id": "",
+    "avatar_link": {
+      "enabled": false,
+      "room_id": "tc-avatar-link-v1",
+      "name": "",
+      "allow_hosts": []
+    }
+  },
+  "providers": []
+}

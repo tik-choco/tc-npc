@@ -17,3 +17,6 @@ crates/npc-mist/target/
 # every window loads a remote `http://127.0.0.1:*` URL instead (see
 # src/desktop/).
 /gen/
+
+# mistlib.dll dropped next to a local Go build for the mist feature
+mistlib.dll

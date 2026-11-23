@@ -118,3 +118,45 @@ eval-trace:
 # vrm-emotion.ts's scoring — neither can be judged by reading the diff.
 eval-emotion: eval-trace
     cd web && npm run eval:emotion
+
+# ---------------------------------------------------------------------------
+# Go port (branch go-rewrite, see docs/GO-PORT.md). Pure Go, no cgo: builds in
+# seconds and needs no C toolchain. The Rust recipes above stay until the Go
+# version reaches parity and the Rust tree is deleted.
+
+# Type-check (vet) and build everything.
+go-check:
+    go vet ./...
+    go build ./...
+
+# Run all Go tests.
+go-test:
+    go test ./...
+
+# Run the server with no GUI.
+go-run:
+    go run ./cmd/tc-npc serve --no-open
+
+# Attach the terminal UI to an already-running instance.
+go-tui:
+    go run ./cmd/tc-npc tui
+
+# Full desktop app (Wails v2 windows + tray).
+go-app:
+    go run -tags desktop,production ./cmd/tc-npc app
+
+# Release binary with the desktop UI. Put mistlib.dll (mistlib release
+# mistlib-native-windows-x86_64) next to the exe to enable `mist`.
+go-release: web-build
+    go build -trimpath -ldflags "-s -w" -tags desktop,production -o tc-npc.exe ./cmd/tc-npc
+
+# Headless release binary (serve / tui only, no Wails in the graph).
+go-release-headless: web-build
+    go build -trimpath -ldflags "-s -w" -o tc-npc.exe ./cmd/tc-npc
+
+# Affect replay for the emotion eval (Go port of the affect_trace example).
+go-eval-trace:
+    go run ./cmd/affect-trace
+
+go-eval-emotion: go-eval-trace
+    cd web && npm run eval:emotion
